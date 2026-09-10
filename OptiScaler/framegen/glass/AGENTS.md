@@ -11,7 +11,7 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Joint capture and repeated FG trials remain insufficient. Actual material transmission captured with separate target/material groups. Source-color and coverage extraction pass independent GPU tests; runtime integration and visual acceptance remain incomplete.
+- [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
 - `GlassLayerComposite.hlsl`: Experimental isolated source; moving layers and stationary transparency with independent background motion tested through actual FG. Explicit correction footprint preserves original output outside the admitted region. Runtime footprint/input acquisition, color-domain validation and integration remain incomplete; see README.md and tests/replay/README.md.

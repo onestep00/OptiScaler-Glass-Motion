@@ -153,6 +153,18 @@ Build with `tests/build_stage_readback.ps1` from an x64 developer PowerShell and
 
 The game was normally exited after the trace and its diagnostic ASI restored to the previous version. No new algorithm was deployed. Next capture work must correlate actual stage colors and layer values using GPU dependencies, then validate conversion through intermediate processing. Coordinate independence does not make an early HDR material layer compatible with a final post-processed FG image.
 
+## Complete material-span reconstruction
+
+A later startup diagnostic catalogued successful graphics descriptors without matching material names. It retained PSO/root identities and owned shader/input-layout bytes, with bounded storage. The live run recorded 5,309 graphics descriptors and 1,803 unique shader blobs; 983 passed blend/stage/descriptor eligibility, but eligibility alone did not authorize another draw. No unknown pipeline-stream descriptors were catalogued; this run observed zero stream creations. Shader bytes and addresses remain local and are not distributed.
+
+A same-recording capture using the earlier four admitted PSOs selected 52 draws and omitted 91. Exact descriptor and VS/PS inspection identified eight additional variants, including 26 `fillable_fluid_vertex` discarded-variant draws. Those audited variants had no UAV or non-output resource writes, depth output, additional shader stages or stream output. Their depth/stencil state was read-only and their actual RGB blend was `One / Src1Color / Add`. The previously observed two fluid draws with no surviving pixels did not cover this other fluid variant.
+
+Using the same general blend helper for all 12 audited PSOs captured 143 direct draws with none omitted inside the selected span. B before the span, C after it, accumulated F/T and surviving coverage came from one RT/DSV and one recording at their actual 2560x1440 allocation/extent. Recording close, single submission, Reset/discard and queue-fence completion all passed; capture hooks were disabled, with no FG input substitution. The standalone capture test also covered non-indexed and indexed draws, padded subregions and omitted draws, preserving the original color output exactly.
+
+For the 119,938 surviving pixels, `F + T*B` matched actual C with median relative max-channel error 0.02864%, p99 0.08460%, and maximum 0.21867%. None exceeded 1%. Absolute max-channel error reached 0.01490 in the early HDR units. All 3,566,462 pixels outside coverage matched exactly. Direct image inspection confirmed that the formerly missing yellow fluid and cup bases were captured. These are reconstruction residuals from one material-stage sample, not generated-frame quality scores. B already contains cup-shaped refraction/detail, so it is not a clean background. Color/exposure/temporal transport through later DLSS stages remains unresolved.
+
+The game was normally exited, RootBuilder Sync/Clear completed, and the temporary startup ASI was restored to its preceding version. The deployed correction DLL remains b59aa86. Local evidence is in `outputs/glass-material-census-live-v6/`, `outputs/glass-material-joint-capture-v11/` and the workspace joint-capture document. This result supports general descriptor-based extraction; it does not approve arbitrary shader replay or the final ghosting fix.
+
 ## Menu controls and timing
 
 The FG settings window contains **Transparent surface correction (experimental)**:
