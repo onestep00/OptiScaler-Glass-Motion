@@ -2,7 +2,7 @@
 
 - Created: 2026-09-10
 - Updated: 2026-09-10
-- Status: experimental; deployed native host, startup bridge, controls and timer verified; moving-glass visual acceptance pending
+- Status: experimental; deployed native host, controls and actual moving-frame input substitution verified; paired 4x replay still shows glass ghosting, not visually accepted
 - Deployment: full b59aa86 OptiScaler DLL and both shaders installed through MO2 RootBuilder and exercised in a fresh game process; local correction enabled at strength 100
 - Deprecated: no
 - Scope: Cyberpunk 2077 native D3D12 FG, recorded 2x/4x conventions
@@ -81,11 +81,27 @@ Keep the existing Ultimate ASI Loader `version.dll`, `plugins/mfg-unlock.asi` an
 
 On 2026-09-10, the complete b59aa86 Release DLL was built again and installed as `overwrite/Root/bin/x64/dxgi.dll`, with both `Glass/` shaders. RootBuilder copied the files into the game. DLL SHA-256: `4dfa71cdbee83f40665f73e533d96a8fd987880b3f13b51ff9020bd861742a9a`; build identification: `b59aa86 / 20260910_130315`. Existing OptiScaler settings, `version.dll` and `mfg-unlock.asi` were preserved. The local separate INI enables correction at strength 100 with sparse timing; source defaults remain off.
 
-A fresh game process loaded this DLL and the existing ASI unlock together. No diagnostic DLL was injected into that process. The production named Streamline startup path therefore supplied the tag metadata used by actual corrections. At the initial checkpoint, 8,679 of 8,700 native host evaluations substituted inputs, with 2,897 identified surface captures. Periodically logged evaluation results were successful; these sampled results are not a complete per-call failure histogram. MO2 redirected the log to `overwrite/bin/x64/OptiScaler.Glass.log`.
+A fresh game process loaded this DLL and the existing ASI unlock together. No diagnostic DLL had been injected at this startup checkpoint; later paired capture added a diagnostic recorder. The production named Streamline startup path therefore supplied the tag metadata used by the initial corrections. At the initial checkpoint, 8,679 of 8,700 native host evaluations substituted inputs, with 2,897 identified surface captures. Periodically logged evaluation results were successful; these sampled results are not a complete per-call failure histogram. MO2 redirected the log to `overwrite/bin/x64/OptiScaler.Glass.log`.
 
 The actual OptiScaler menu showed correction enabled, strength 100, active status and a completed 0.364 ms GPU sample. Disabling the checkbox stopped substitution and capture counters while native evaluations continued: counters remained 9,408 substitutions / 4,315 captures through evaluations 9,900 to 11,100. Re-enabling resumed correction: evaluation 11,400 showed 9,603 substitutions / 4,380 captures, and the UI displayed a new 0.404 ms sample. Correction was left enabled and the menu closed. These are sparse correction-only samples, not average frame costs or a performance guarantee.
 
 The ratio override displayed 4X. Separate generated-phase output capture was not performed in this startup/UI check. Final moving-glass quality, cup edges, moving objects and background preservation remain pending. Runtime substitution and controls are verified; the ghosting fix is not visually accepted.
+
+## Paired moving-frame capture and remaining failure
+
+After the user reported continued background attachment, a bounded recorder observed the deployed module's original input copies and the actual substituted MV/depth at native FG entry. It added no second correction or parameter substitution. The recording contains 32 rendered frames, 96 successful generated phases and 320 complete readbacks: real color, three generated colors, original MV/depth, actual auxiliary snapshot, HUDless and delivered MV/depth. Capture hooks were disabled and all jobs completed. Readback affects cadence, so this is not a performance benchmark.
+
+The actual inputs changed: frame 12 contains 68,938 changed pixels, with a median motion delta of approximately 44.53 render pixels. Changed depth equals the auxiliary snapshot exactly; delivered vectors match projection through that depth and the recorded camera transform within half precision. Unchanged pixels and MV Z/W remain bit-identical. All frames preserve the upper 700 render rows in this particular scene. This is limited background-preservation evidence, not a guarantee for arbitrary panes.
+
+Reliable tracked scene features place the three generated phases near 25%, 50% and 75% between endpoints. A few unambiguous cup-base features agree with projected motion; repetitive glasses make other matches unreliable. This does not establish correct motion for all transparent appearance. Actual generated frames still contain cup-edge and stem duplication.
+
+A fresh-feature replay uses recorded evaluation arguments and remaps only explicit resource inputs. Two identical-input runs produced 96 bit-identical outputs. Creation arguments and internal provider history were not captured, so replay is not claimed bit-identical to the live recording. Same-time comparisons of original inputs, MV-only changes, depth-only changes and both changes show better-separated cup bodies with both changes, but remaining edge ghosts. Sparse successful runtime calls alone cannot establish image quality.
+
+At movement stop, frame 27 reverts 54,043 previously selected, depth-compatible pixels to background inputs. The shaders reject motion disagreement below 0.5 render pixels and require photometric evidence to seed each frame. An offline history-only trial retained 45,700 low-motion pixels in that frame. Its generated-image effect was small and it did not solve moving-glass ghosts; it has not been installed or adopted into production.
+
+The recorded HUDless pair also contains mixed correspondence evidence inside selected glasses. For frame 12, 38,829 selected pixels favor surface motion, 16,587 favor background motion and 13,522 are inconclusive under a 5x5 RGB residual comparison with 3/255 and 10% margins. This is not opacity or ground-truth flow: repeated shapes, occlusion, reflections and refraction violate simple brightness matching. Further work must distinguish surface appearance from refracted background rather than assume one geometric surface vector explains both.
+
+Local evidence is indexed in `outputs/glass-deployed-capture-v3/`: `input-audit.json`, `feature-flow-audit.json`, `paired-replay-audit.json`, `selection-history-audit.json`, `appearance-motion-audit.json`, full-scene comparisons and `original-vs-delivered-4x-slow.mp4`. The video preserves real/generated order at a slow 15 fps presentation, not measured timing. Diagnostic files and raw game data are not distributed here. The deployed algorithm remains b59aa86; this finding is not a completed fix.
 
 ## Menu controls and timing
 
