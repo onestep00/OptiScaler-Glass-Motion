@@ -1,14 +1,16 @@
 # Experimental transparent-surface motion correction
 
 - Created: 2026-09-10
-- Updated: 2026-09-10
+- Updated: 2026-09-11
 - Status: experimental; deployed native host, controls and actual moving-frame input substitution verified; paired 4x replay still shows glass ghosting, not visually accepted
 - Deployment: full b59aa86 OptiScaler DLL and both shaders installed through MO2 RootBuilder and exercised in a fresh game process; local correction enabled at strength 100
 - Deprecated: no
-- Scope: Cyberpunk 2077 native D3D12 FG, recorded 2x/4x conventions
+- Scope: all Cyberpunk 2077 in-world transparency, excluding HUD; native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
 
 This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. The native FG Evaluate branch now calls `NativeHost`; native creation/release/shutdown provide lifecycle notifications. ASI/MFG unlock behavior remains upstream-owned. Correction defaults off and requires the two HLSL assets beside the DLL in `Glass/`.
+
+[EngineGeometry.md](EngineGeometry.md) records the broader geometry scope and latest engine-input evidence. Cups/railings are test samples. Vehicle glass, eyewear, moving world icons, holograms, skinning, deformation and particles remain in scope. A 32-route inventory guides missing-input work; it is not a list of completed support. Verified rigid history and the newly correlated skinning-buffer binding have not yet been connected to the production correction.
 
 ## Boundaries
 

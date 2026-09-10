@@ -7,11 +7,13 @@
 - Resource ownership, GPU completion, command-list state restoration and resize/feature teardown must be verified before enabling runtime integration.
 - Preserve the repository's PCH conventions. Do not add dependencies to pch.h for this module.
 - Distinguish compilation, recorded-input replay, live runtime integration and visual acceptance. Do not label the current candidate a finished ghosting fix.
+- Target all in-world transparency, including vehicle glass, eyewear, icons and particles. Identify geometry/coverage from verified rendering inputs, not an object/material whitelist. Do not classify world displays as HUD from names. Read EngineGeometry.md for current evidence and missing routes before engine-input changes.
 - Update document metadata and this index when adding or changing documentation status.
 
 ## Document index
 
 - [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
+- [EngineGeometry.md](EngineGeometry.md): All in-world transparency scope, 32 geometry-route inventory, verified rigid history and skinning offset/binding observations. Actual per-instance/FG frame association, procedural/particle coverage and runtime producer remain incomplete; no new correction deployed.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
 - [tests/ObjectMotion.md](tests/ObjectMotion.md): Separate-object boundary weights and geometry MV reference. Synthetic inputs only; engine history and FG quality remain unverified.
