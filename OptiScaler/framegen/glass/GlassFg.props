@@ -6,6 +6,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassFgPass.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkSurfacePass.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)SurfaceQueueLink.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ComputeRecording.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassFgCompile.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassSettings.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassControls.h" />

@@ -9,6 +9,11 @@ New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
 $objectDirectory = $buildDirectory.TrimEnd('\') + '\'
 $common = @('/nologo', '/std:c++20', '/EHsc', '/O2', '/MD', '/D_CRT_SECURE_NO_WARNINGS',
             "/I$PSScriptRoot", "/Fo$objectDirectory")
+$recordingExe = Join-Path $buildDirectory 'ComputeRecording.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'ComputeRecording.cpp') "/Fe$recordingExe"
+if ($LASTEXITCODE -ne 0) { throw 'Compute recording test build failed' }
+& $recordingExe
+if ($LASTEXITCODE -ne 0) { throw 'Compute recording contract failed' }
 $gpuExe = Join-Path $buildDirectory 'GpuResources.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'GpuResources.cpp') "/Fe$gpuExe" /link d3d12.lib dxgi.lib dxguid.lib
 if ($LASTEXITCODE -ne 0) { throw 'GPU test build failed' }

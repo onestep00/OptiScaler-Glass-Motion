@@ -19,6 +19,7 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 | `GlassFgPass.h` | Typed NGX input validation, owned correction resources, one execution per rendered frame, scoped MV/depth substitution and restoration |
 | `CyberpunkSurfacePass.h` | Version-specific executable signature and depth-transition identification; no fixed resource addresses |
 | `SurfaceQueueLink.h` | Bounded CPU bookkeeping of observed submissions and fence dependencies; no GPU commands or waits |
+| `ComputeRecording.h` | Fresh COMPUTE recording admission, complete callback coverage and single-use epoch tickets |
 | `SurfaceSnapshotPool.h` | Four owned depth copies, producer/consumer completion and command-reset tracking, no wait on pool exhaustion |
 | `GlassControls.h`, `GlassSettings.cpp` | Atomic controls, separate INI persistence and OptiScaler menu widgets |
 | `GlassGpuTimer.h` | Sparse GPU timestamps, existing host completion fence and nonblocking readback |
@@ -27,6 +28,16 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 The host must supply an unambiguous surface snapshot, its generation and actual resource state. It must establish GPU ordering, preserve command-list state, and drain GPU use before resource release or recreation. `SurfaceQueueLink` records observed queue dependencies; it does not own resources or prove GPU completion. `CyberpunkSurfacePass` identifies an observed consumer transition, not the shader that wrote the depth.
 
 The intended host seam is the native FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, using `HandleToFeature`. Stale parameter keys alone must not classify an evaluation as FG. Keep per-feature lifetime, snapshot capture and command-list restoration in a separate host adapter in this directory; keep the upstream call site small. That adapter is not implemented yet. The UI explicitly reports this pending state. Selection preview remains disabled until a valid runtime texture can be displayed.
+
+## Reusing the OptiScaler host
+
+Reuse the existing native NGX feature map, parameter ABI and Evaluate dispatch. The module must not detour the private FG provider or reproduce MFG unlock. Resolve D3D12 methods from the actual COM interfaces, as the existing `D3D12_Hooks` does, rather than matching driver machine code. The executable fingerprints in `CyberpunkSurfacePass` serve a separate purpose: identifying a game-specific auxiliary depth pass that the public FG input does not name.
+
+The existing `D3D12Hooks::RestoreRoot` is conditional on user configuration and does not unconditionally preserve all state needed by this insertion. Do not silently enable global restoration settings. The broad `ResTrack_Dx12::HookDevice` also explicitly skips `FGInput::NvngxFG`; enabling its HUD/resource registry wholesale is not a native-FG surface-capture solution. Keep the required Reset/barrier/submission callbacks in the isolated adapter and reuse existing dispatch points where their contracts match.
+
+Current native FG observations show a fresh COMPUTE recording before each of the three generated phases. `ComputeRecording` admits insertion only after observing a successful `Reset(nullptr)` and all applicable state-changing entry points. It rejects missing hooks, non-COMPUTE lists, initial PSOs, intervening state setters, repeated insertion and stale reset tickets. The host must retain the command identity, serialize callbacks and exclude only its own correction commands from state observations. It must observe `SetPipelineState1` and `SetProgram` when their extended interfaces exist. Unknown interface-query errors do not count as interface absence.
+
+After an admitted correction, `ClearState(nullptr)` restores the fresh binding contract before native FG. Resource barriers remain the pass's separate responsibility. This avoids a full binding-state save/replay and adds no queue submission or wait. The gate alone does not install hooks or establish resource lifetime; native host integration remains pending. Follow Microsoft's [Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset) and [ClearState](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-clearstate) contracts.
 
 ## Existing MFG unlock
 
@@ -59,6 +70,9 @@ Settings changes are sampled when preparing phase 1; phases 2/3 retain the same 
 - Standalone GPU test: four depth copies, 8,192 exact pixels, in-flight reuse rejection, stale-token rejection and discarded-recording reuse passed. Timing returned no sample before completion and no duplicate after delivery. The D3D12 debug layer was unavailable; this is functional GPU evidence, not debug-layer validation.
 - Settings tests: defaults, range clamping, save/reload, unrelated-key preservation, failed replacement preserving the previous file, malformed-value fallback and headless ImGui vertex generation passed. Production retains FreeType; the headless test uses stb fonts. This does not prove the final game-menu layout.
 - Earlier candidate images reduced cup-body duplication; edge artifacts remain. Limited railing regions retained background motion. Dynamic objects and broader scenes are not accepted yet. No 1 ms performance guarantee is made.
+- Same-recording replay: correction and FG were recorded together without submitting/draining between them. Readbacks moved after native Evaluate. All 96 FG calls succeeded and all 189 generated/corrected-input files matched the earlier replay. This closes the previous replay's submission-boundary gap; it does not prove live hook coverage or resolve edge quality.
+- Bounded live state experiment: 16 base/extended method hooks installed successfully on the actual FG command list, including predication, indirect execution, state objects and programs. The production admission gate permitted 63 ClearState calls; all 134 observed FG calls succeeded. Hooks were disabled afterwards. No MV/depth substitution occurred, so this is state compatibility evidence, not live correction deployment or a performance result.
+- Compute recording contract test: individually missing each of 16 observations, failed Reset, initial PSO, stale tickets, repeated insertion, changed identity and non-COMPUTE lists were rejected. This CPU test checks admission semantics, not the platform hook installer.
 
 Raw game captures and diagnostic DLLs are local investigation artifacts and are not part of this repository. The source-only standalone tests below are included; the recorded FG observations are not a portable end-to-end test suite.
 
