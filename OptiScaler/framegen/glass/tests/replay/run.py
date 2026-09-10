@@ -33,6 +33,8 @@ def main():
 
     if config["formatProfile"] != "rgba8-mv16f-depth32":
         raise ValueError("Unsupported format profile")
+    if "userInterfaceRecomposition" in config and type(config["userInterfaceRecomposition"]) is not bool:
+        raise ValueError("userInterfaceRecomposition must be boolean")
     for key in ("outputWidth", "outputHeight", "renderWidth", "renderHeight"):
         if type(config[key]) is not int or not 1 <= config[key] <= 16384:
             raise ValueError(f"Invalid {key}")
@@ -77,6 +79,12 @@ def main():
             inputs.append({"frame": frame, "slot": slot, "path": str(selected), "bytes": size,
                            "originalSha256": original_hash, "selectedSha256": selected_hash,
                            "changed": original_hash != selected_hash})
+        if "uiAlpha" in config:
+            alpha = path("uiAlpha") / f"frame-{frame:02d}-ui-alpha.bin"
+            if alpha.stat().st_size != color_bytes // 4:
+                raise ValueError(f"Wrong UI alpha length: {alpha.name}")
+            inputs.append({"frame": frame, "slot": "UIAlpha", "path": str(alpha),
+                           "bytes": color_bytes // 4, "selectedSha256": digest(alpha), "configured": True})
     output.parent.mkdir(parents=True, exist_ok=True)
     with log.open("xb") as stream:
         result = subprocess.run([str(executable), str(manifest)], stdout=stream, stderr=subprocess.STDOUT)

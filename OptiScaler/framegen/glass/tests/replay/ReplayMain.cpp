@@ -126,7 +126,7 @@ int wmain(int argc, wchar_t** argv)
         return std::filesystem::absolute(manifest.parent_path() /
                                          std::filesystem::u8path(replayConfig.at(key).get<std::string>()));
     };
-    std::filesystem::path provider, capture, packet, output, overrides, unlock;
+    std::filesystem::path provider, capture, packet, output, overrides, unlock, uiAlpha;
     try
     {
         provider = path("provider");
@@ -135,12 +135,18 @@ int wmain(int argc, wchar_t** argv)
         output = path("output");
         if (replayConfig.contains("overrides"))
             overrides = path("overrides");
+        if (replayConfig.contains("uiAlpha"))
+            uiAlpha = path("uiAlpha");
+        if (replayConfig.contains("userInterfaceRecomposition") &&
+            !replayConfig.at("userInterfaceRecomposition").is_boolean())
+            throw std::runtime_error("userInterfaceRecomposition must be boolean");
         if (replayGenerated == 3)
             unlock = path("unlock");
         if (!std::filesystem::is_regular_file(provider) || !std::filesystem::is_regular_file(packet) ||
             !std::filesystem::is_directory(capture) ||
             (replayGenerated == 3 && !std::filesystem::is_regular_file(unlock)) ||
-            (!overrides.empty() && !std::filesystem::is_directory(overrides)))
+            (!overrides.empty() && !std::filesystem::is_directory(overrides)) ||
+            (!uiAlpha.empty() && !std::filesystem::is_directory(uiAlpha)))
             throw std::runtime_error("missing replay input");
     }
     catch (const std::exception& e)
@@ -256,6 +262,9 @@ int wmain(int argc, wchar_t** argv)
     set<unsigned, 4>(&p, "DLSSG.BackbufferFormat", DXGI_FORMAT_R8G8B8A8_UNORM);
     set<unsigned, 4>(&p, "CreationNodeMask", 1);
     set<unsigned, 4>(&p, "VisibilityNodeMask", 1);
+    if (replayConfig.contains("userInterfaceRecomposition"))
+        set<int, 3>(&p, "DLSSG.UserInterfaceRecompositionEnabled",
+                    replayConfig.at("userInterfaceRecomposition").get<bool>() ? 1 : 0);
     phase = "create";
     void* handle = nullptr;
     result = create(cmd, (unsigned) NVSDK_NGX_Feature_FrameGeneration, &p, &handle);
@@ -290,7 +299,8 @@ int wmain(int argc, wchar_t** argv)
         {
             ReplayRun runner(device, queue, allocator, cmd, fence);
             replayResult = runner.run(module, handle, p, capture.c_str(), packet.c_str(), output.c_str(),
-                                      overrides.empty() ? nullptr : overrides.c_str());
+                                      overrides.empty() ? nullptr : overrides.c_str(),
+                                      uiAlpha.empty() ? nullptr : uiAlpha.c_str());
         }
         catch (const std::exception& e)
         {

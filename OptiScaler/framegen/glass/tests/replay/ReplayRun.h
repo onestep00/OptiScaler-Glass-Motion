@@ -127,7 +127,7 @@ class ReplayRun
     {
     }
     int run(HMODULE module, void* handle, Params& p, const wchar_t* input, const wchar_t* packet, const wchar_t* output,
-            const wchar_t* overrides = nullptr)
+            const wchar_t* overrides = nullptr, const wchar_t* uiAlphaDirectory = nullptr)
     {
         std::filesystem::create_directories(output);
         // Creation command list has already been submitted, completed and closed.
@@ -149,6 +149,13 @@ class ReplayRun
                                    i < 4 ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         disable = buffer(16, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        ID3D12Resource* uiAlpha = nullptr;
+        if (uiAlphaDirectory)
+        {
+            auto d = textures[0]->GetDesc();
+            d.Format = DXGI_FORMAT_R8_UNORM;
+            uiAlpha = resource(d, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+        }
         ID3D12Resource* phaseOutputs[3][2] { { textures[4], textures[5] }, {}, {} };
         for (unsigned i = 1; i < replayGenerated; i++)
             for (unsigned j = 0; j < 2; j++)
@@ -244,6 +251,18 @@ class ReplayRun
                     transition(cmd, textures[i], D3D12_RESOURCE_STATE_COPY_DEST,
                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             }
+            if (uiAlpha)
+            {
+                wchar_t name[64];
+                swprintf(name, 64, L"frame-%02u-ui-alpha.bin", frame);
+                transfer(uiAlpha, std::filesystem::path(uiAlphaDirectory) / name, true);
+                phase = "configured_ui_alpha";
+                set<void*, 0>(&p, "DLSSG.UIAlpha", uiAlpha);
+                set<int, 3>(&p, "DLSSG.UIAlphaSubrectBaseX", 0);
+                set<int, 3>(&p, "DLSSG.UIAlphaSubrectBaseY", 0);
+                set<int, 3>(&p, "DLSSG.UIAlphaSubrectWidth", static_cast<int>(outputWidth));
+                set<int, 3>(&p, "DLSSG.UIAlphaSubrectHeight", static_cast<int>(outputHeight));
+            }
             for (unsigned index = 1; index <= replayGenerated; index++)
             {
                 set<unsigned, 4>(&p, "DLSSG.MultiFrameIndex", index);
@@ -273,6 +292,8 @@ class ReplayRun
             for (auto r : phaseOutputs[i])
                 r->Release();
         disable->Release();
+        if (uiAlpha)
+            uiAlpha->Release();
         printf("REPLAY_DONE frames=%u generated_count=%u comparison_verified=0\n", frames, replayGenerated);
         return 0;
     }
