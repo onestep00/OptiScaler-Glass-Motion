@@ -24,6 +24,22 @@ VARIANTS = ('background', 'alpha_mv', 'alpha_depth', 'edge_alpha_mv',
             'edge_alpha_depth', 'directional_fit_mv', 'directional_fit_depth')
 
 
+def hard_weights(s, output_size, motion_size, opacity_threshold=.9, edge_width=1.):
+    """Object/background selection, with the boundary wholly inside material coverage."""
+    w, h = output_size
+    rw, rh = motion_size
+    rx, ry = max(1, int(np.ceil(edge_width*w/rw))), max(1, int(np.ceil(edge_width*h/rh)))
+    cov = s['cov'] & ~s['opaque']
+    edge = cov & (cv2.erode(cov.astype(np.uint8), np.ones((2*ry+1, 2*rx+1), np.uint8)) == 0)
+    visible = (np.max(np.abs(s['f']), axis=2)>1e-6) | (np.min(s['t'], axis=2)<1-1e-6)
+    edge &= visible
+    # Every RGB channel must attenuate enough; colored transmission is not scalar alpha.
+    high = cov & (np.max(s['t'], axis=2) <= 1-opacity_threshold)
+    masks = dict(background=np.zeros_like(cov), opaque_only_mv=high, edge_only_mv=edge,
+                 edge_opaque_mv=edge|high, edge_opaque_depth=edge|high)
+    return {name: (mask | s['opaque']).astype(np.float32) for name, mask in masks.items()}
+
+
 def weights(s):
     """No future frames or score regions enter these weights."""
     f, t, b, cov = (s[k] for k in ('f', 't', 'b', 'cov'))
@@ -71,6 +87,7 @@ def show_field(weight, mv, title, path):
 
 
 def main():
+    global VARIANTS
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--material', type=Path, required=True)
     p.add_argument('--audit', type=Path, required=True)
@@ -78,7 +95,14 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--executable', type=Path, required=True)
     p.add_argument('--analyze-only', action='store_true')
+    p.add_argument('--selector-family', choices=('continuous', 'hard'), default='continuous')
+    p.add_argument('--opacity-threshold', type=float, default=.9)
+    p.add_argument('--edge-width-mv-pixels', type=float, default=1.)
     args = p.parse_args()
+    if not 0 <= args.opacity_threshold <= 1 or not 0 < args.edge_width_mv_pixels <= 4:
+        p.error('Opacity must be in [0,1] and inner edge width in (0,4] MV pixels')
+    if args.selector_family == 'hard':
+        VARIANTS = ('background', 'opaque_only_mv', 'edge_only_mv', 'edge_opaque_mv', 'edge_opaque_depth')
     out = args.output.resolve()
     base = json.loads(args.template.read_text())
     base.pop('overrides', None)
@@ -97,6 +121,8 @@ def main():
             syntheticMotion=True, syntheticDepth=True, syntheticBackground=True,
             syntheticToneCurve=True, separatedBackgroundOracle=True,
             capturedGameSequence=False, glassRefraction=False, gameQualityAccepted=False,
+            selectorFamily=args.selector_family, opacityThreshold=args.opacity_threshold,
+            edgeWidthMotionPixels=args.edge_width_mv_pixels,
             depthBlend='Linear interpolation of reverse-Z, explicitly a heuristic for independent layer motion'), indent=2))
         for scene in ('stationary', 'relative_translation'):
             target = out/scene
@@ -108,7 +134,8 @@ def main():
             input_rows = []
             for frame in range(fixture.n):
                 s = fixture.scene(scene, frame)
-                all_weights = weights(s)
+                all_weights = (hard_weights(s, (w, h), (rw, rh), args.opacity_threshold, args.edge_width_mv_pixels)
+                               if args.selector_family == 'hard' else weights(s))
                 rgba = np.concatenate((np.uint8(np.clip(s['c'], 0, 1)*255+.5),
                                        np.full((h, w, 1), 255, np.uint8)), axis=2)
                 for slot in (0, 7):
@@ -120,6 +147,10 @@ def main():
                     mv[..., 0] = -(s['vb'] + weight*(s['vs']-s['vb'])) / w
                     dw = weight if variant.endswith('_depth') else s['opaque'].astype(np.float32)
                     d = s['depth'] + dw*(.02/3-s['depth'])
+                    if args.selector_family == 'hard':
+                        mv[..., 0] = -np.where(weight > 0, s['vs'], s['vb']) / w
+                        d = s['depth'].copy()
+                        d[dw > 0] = .02/3
                     mv = cv2.resize(mv, (rw, rh), interpolation=cv2.INTER_NEAREST).astype('<f2')
                     d = cv2.resize(d, (rw, rh), interpolation=cv2.INTER_NEAREST).astype('<f4')
                     assert np.isfinite(mv).all() and np.isfinite(d).all()
@@ -194,7 +225,7 @@ def main():
                             max(1e-12, np.sum(material_energy[crossed_material])))))
                     panels.append((variant, rgb))
                 if frame == 8 and phase == 50:
-                    sheet = Image.new('RGB', (w*2, (h+24)*4))
+                    sheet = Image.new('RGB', (w*2, (h+24)*((len(panels)+1)//2)))
                     draw = ImageDraw.Draw(sheet)
                     for i, (label, rgb) in enumerate(panels):
                         im = Image.fromarray(np.uint8(np.clip(rgb, 0, 1)*255+.5))
