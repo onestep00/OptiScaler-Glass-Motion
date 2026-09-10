@@ -20,6 +20,12 @@ if ($LASTEXITCODE -ne 0) { throw 'GPU test build failed' }
 & $gpuExe
 if ($LASTEXITCODE -ne 0) { throw 'GPU resource or timer test failed' }
 
+$sessionExe = Join-Path $buildDirectory 'NativeSession.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'NativeSession.cpp') "/Fe$sessionExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
+if ($LASTEXITCODE -ne 0) { throw 'Native session test build failed' }
+& $sessionExe (Join-Path $PSScriptRoot '..\GlassSurface.hlsl') (Join-Path $PSScriptRoot '..\GlassRegion.hlsl')
+if ($LASTEXITCODE -ne 0) { throw 'Native session admission or lifetime test failed' }
+
 $imgui = Join-Path $optiDirectory 'include\imgui'
 $sources = @((Join-Path $PSScriptRoot 'Settings.cpp'))
 foreach ($name in @('imgui.cpp', 'imgui_draw.cpp', 'imgui_widgets.cpp', 'imgui_tables.cpp')) {

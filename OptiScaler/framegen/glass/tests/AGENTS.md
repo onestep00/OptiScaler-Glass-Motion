@@ -6,6 +6,7 @@
 - Settings.cpp includes the production settings implementation with a test-only DLL-path provider. ImGui uses stb fonts in this headless test; production retains FreeType. Vertex generation is not visual acceptance of the game menu.
 - All settings test directories must be new. Build artifacts belong outside source control.
 - ComputeRecording.cpp checks missing observer coverage, stale Reset tickets and interleaved state rejection. It does not install hooks or prove live observer coverage.
+- NativeSession.cpp runs synthetic inputs on independent DIRECT/COMPUTE queues. It checks rejected admission and unsubmitted/in-flight retirement, not glass quality. Its artificial GPU gate and CPU drains are test-only.
 
 ## Document index
 

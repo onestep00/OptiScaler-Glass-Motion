@@ -20,6 +20,7 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 | `CyberpunkSurfacePass.h` | Version-specific executable signature and depth-transition identification; no fixed resource addresses |
 | `SurfaceQueueLink.h` | Bounded CPU bookkeeping of observed submissions and fence dependencies; no GPU commands or waits |
 | `ComputeRecording.h` | Fresh COMPUTE recording admission, complete callback coverage and single-use epoch tickets |
+| `NativeSession.h` | Per-feature capture, queue provenance, state admission, correction phases, completion and timer coordination |
 | `SurfaceSnapshotPool.h` | Four owned depth copies, producer/consumer completion and command-reset tracking, no wait on pool exhaustion |
 | `GlassControls.h`, `GlassSettings.cpp` | Atomic controls, separate INI persistence and OptiScaler menu widgets |
 | `GlassGpuTimer.h` | Sparse GPU timestamps, existing host completion fence and nonblocking readback |
@@ -27,7 +28,15 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 
 The host must supply an unambiguous surface snapshot, its generation and actual resource state. It must establish GPU ordering, preserve command-list state, and drain GPU use before resource release or recreation. `SurfaceQueueLink` records observed queue dependencies; it does not own resources or prove GPU completion. `CyberpunkSurfacePass` identifies an observed consumer transition, not the shader that wrote the depth.
 
-The intended host seam is the native FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, using `HandleToFeature`. Stale parameter keys alone must not classify an evaluation as FG. Keep per-feature lifetime, snapshot capture and command-list restoration in a separate host adapter in this directory; keep the upstream call site small. That adapter is not implemented yet. The UI explicitly reports this pending state. Selection preview remains disabled until a valid runtime texture can be displayed.
+The intended host seam is the native FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, using `HandleToFeature`. Stale parameter keys alone must not classify an evaluation as FG. `NativeSession.h` implements the per-feature coordinator; connecting its callbacks to the Windows hook service and native Evaluate seam remains pending. Keep that platform adapter in this directory and keep the upstream call site small. The UI explicitly reports this pending state. Selection preview remains disabled until a valid runtime texture can be displayed.
+
+## Native session callback contract
+
+Initialize one session per feature/size and bind its actual COMPUTE command list only after observer coverage is established. The platform adapter retains synchronization identities used by queue provenance, serializes the real queue call together with its after-callback, and excludes only this module's nested commands from observers. Call `captureIdentifiedSurface` immediately after a uniquely identified depth transition. A missing snapshot, multiple candidates between phase-1 evaluations, a missing native fence dependency or a non-fresh compute recording bypasses correction and invalidates history.
+
+Successful Reset clears discarded surface recordings from queue provenance, releases retained producer-command identities and updates snapshot/timer bookkeeping. `afterSubmit` tracks all recorded uses of corrected outputs, including later MFG phases. Its monotonic completion fence also supplies sparse timing, so enabling the timer adds no extra signal. The snapshot pool separately signals producer/read completion. These ownership signals never substitute for a native producer-to-consumer dependency; the module inserts no waits.
+
+The platform adapter calls `stop` on feature retirement and keeps forwarding submission/Reset callbacks while draining outstanding use. `readyToRelease` requires discarded command recordings and completed GPU work, not just one of those conditions. A Reset with a fresh allocator while the GPU is busy is not enough to release resources. A command destroyed without Reset needs a proven final-owner/discard notification from the platform service; do not invent a Reset while the game can still resubmit a closed recording. Resize creates a new session only while preserving the retiring session's lifetime. That platform lifecycle wiring is still pending.
 
 ## Reusing the OptiScaler host
 
@@ -73,6 +82,8 @@ Settings changes are sampled when preparing phase 1; phases 2/3 retain the same 
 - Same-recording replay: correction and FG were recorded together without submitting/draining between them. Readbacks moved after native Evaluate. All 96 FG calls succeeded and all 189 generated/corrected-input files matched the earlier replay. This closes the previous replay's submission-boundary gap; it does not prove live hook coverage or resolve edge quality.
 - Bounded live state experiment: 16 base/extended method hooks installed successfully on the actual FG command list, including predication, indirect execution, state objects and programs. The production admission gate permitted 63 ClearState calls; all 134 observed FG calls succeeded. Hooks were disabled afterwards. No MV/depth substitution occurred, so this is state compatibility evidence, not live correction deployment or a performance result.
 - Compute recording contract test: individually missing each of 16 observations, failed Reset, initial PSO, stale tickets, repeated insertion, changed identity and non-COMPUTE lists were rejected. This CPU test checks admission semantics, not the platform hook installer.
+- Native session replay: a DIRECT queue uploads the recorded auxiliary depth and the pool captures it; native-style Signal/Wait links it to the COMPUTE queue. The session runs correction and actual 4x FG in one recording. All 96 calls succeeded and all 189 generated/corrected-input files matched the prior replay. Stale frame 19 was bypassed and completion plus discarded-recording release was verified. File-upload/readback waits belong to the standalone harness, not the session.
+- Standalone native session test: missing dependency observation, ambiguous captures and intervening predication calls reject admission. Unsubmitted and GPU-in-flight release attempts are rejected; completion after Reset permits release. Timing is unavailable before completion, delivered once afterwards, and stop prevents new captures/evaluations. This uses an independent GPU device and synthetic inputs, not a game attachment or a quality test.
 
 Raw game captures and diagnostic DLLs are local investigation artifacts and are not part of this repository. The source-only standalone tests below are included; the recorded FG observations are not a portable end-to-end test suite.
 

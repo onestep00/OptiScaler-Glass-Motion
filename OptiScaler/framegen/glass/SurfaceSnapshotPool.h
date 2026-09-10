@@ -255,6 +255,19 @@ class SurfaceSnapshotPool
 
     bool healthy() const { return producerFence && !failed; }
 
+    // The host must first stop capture/read admission. Completion alone is not
+    // enough: a still-closed command list could submit this recording again.
+    bool idle()
+    {
+        if (failed)
+            return false;
+        for (const auto& slot : slots)
+            if (slot.writeCommand || slot.readCommand || !completed(producerFence, slot.writeFence) ||
+                !completed(consumerFence, slot.readFence))
+                return false;
+        return true;
+    }
+
     // The caller must stop new recordings, discard outstanding unsubmitted
     // lists, and drain both queues. No COM release is hidden in a destructor.
     void releaseAfterGpuDrain()

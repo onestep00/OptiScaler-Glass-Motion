@@ -75,6 +75,15 @@ class SurfaceQueueLink
         return false;
     }
 
+    // A successful Reset discards an unsubmitted recording. Keep the known
+    // FG queue binding, but never later submit an abandoned surface generation.
+    void resetCommand(const void* command)
+    {
+        for (auto& entry : recordings)
+            if (entry.command == command)
+                entry = {};
+    }
+
     void submit(const void* queue, const void* command)
     {
         if (invalid || !queue || !command)

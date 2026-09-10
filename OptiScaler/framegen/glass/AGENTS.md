@@ -11,6 +11,6 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. Release x64 builds, controls, sparse timing, same-recording 4x output equivalence and bounded live fresh-state compatibility verified. Contains OptiScaler code reuse boundaries and admission rules. Native host connection and final visual acceptance remain incomplete.
+- [README.md](README.md): Active experimental module. Native session coordinator, two-queue 4x replay equivalence, admission/lifetime tests, Release build, controls and timing verified. Contains OptiScaler reuse and platform callback contracts. Windows hook wiring, game deployment and final visual acceptance remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
