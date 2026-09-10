@@ -16,6 +16,8 @@ Texture2D<float4> CurrentTransmission : register(t3);
 Texture2D<float4> GeneratedBackground : register(t4);
 Texture2D<float4> Fallback : register(t5);
 Texture2D<float4> EndpointUVs : register(t6);
+// X: verified endpoint correspondence. Y: admitted correction footprint.
+// The footprint must include displaced FG ghosts, not just surface coverage.
 Texture2D<float4> CorrespondenceValid : register(t7);
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float4> Output : register(u0);
@@ -28,8 +30,9 @@ void Composite(uint3 id : SV_DispatchThreadID)
     int3 p = int3(id.xy, 0);
     float4 fallback = Fallback.Load(p);
     Output[id.xy] = fallback;
+    float2 admission = CorrespondenceValid.Load(p).xy;
     if (InputsAdmitted != 1 || !isfinite(Phase) || Phase < 0 || Phase > 1 ||
-        CorrespondenceValid.Load(p).x != 1)
+        any(admission != 1))
         return;
     float4 uv = EndpointUVs.Load(p);
     float2 halfTexel = 0.5 / float2(Width, Height);
@@ -40,10 +43,14 @@ void Composite(uint3 id : SV_DispatchThreadID)
     float3 f1 = CurrentSource.SampleLevel(LinearClamp, uv.zw, 0).rgb;
     float3 t0 = PreviousTransmission.SampleLevel(LinearClamp, uv.xy, 0).rgb;
     float3 t1 = CurrentTransmission.SampleLevel(LinearClamp, uv.zw, 0).rgb;
-    float3 background = GeneratedBackground.Load(p).rgb;
     if (!all(isfinite(f0)) || !all(isfinite(f1)) || !all(isfinite(t0)) ||
-        !all(isfinite(t1)) || !all(isfinite(background)) || any(t0 < 0) ||
+        !all(isfinite(t1)) || any(t0 < 0) ||
         any(t1 < 0) || any(t0 > 1) || any(t1 > 1))
+        return;
+    // Neutral layers inside the admitted footprint intentionally restore the
+    // background: the original FG may have displaced a surface ghost here.
+    float3 background = GeneratedBackground.Load(p).rgb;
+    if (!all(isfinite(background)))
         return;
     float3 color = lerp(f0, f1, Phase) + lerp(t0, t1, Phase) * background;
     if (all(isfinite(color)))

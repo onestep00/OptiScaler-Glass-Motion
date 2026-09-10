@@ -129,6 +129,16 @@ Most further experiments run through [the standalone FG replay harness](tests/re
 
 `GlassLayerComposite.hlsl` applies a further controlled result as isolated GPU code: generate the separated background once, then warp endpoint source color and RGB transmission along verified surface correspondences and compose `F + T*B`. This avoids assigning foreground motion to the transmitted background. In the no-refraction synthetic test it reduced cup error and the inspected duplicated outlines more than the four tested single-MV choices. Its GPU output matches the reference, including rejected-input fallback checks. It remains disconnected from the game host. Captured game layers, common linear color domain, refraction, overlapping layers, correspondence, lifetime and per-phase output access remain necessary before integration. A cheap composition shader alone does not establish that all required game capture work fits the requested budget; see the replay README for evidence and limitations.
 
+### Stationary transparency with independent background motion
+
+The target is transparent foreground attaching to background depth/motion, not a cup-specific appearance filter. Both camera-relative motion and an independently moving object behind stationary transparency must pass. Supplying foreground depth/motion is not sufficient evidence that the generated foreground is separated correctly.
+
+A subsequent live capture separated source color, transmission and surviving-pixel coverage at one original target. Railing and cup groups had 67,493 and 50,511 surviving pixels; the observed two fluid draws had none. This is evidence about those draws, not all fluid materials. Source RGB reached 109.5, so treating it as the final RGBA8 FG color domain would be invalid. Runtime color-transfer and simultaneous background capture remain unresolved.
+
+A controlled experiment froze the captured cup F/T and moved a synthetic figure behind it, with fixed camera and surface. Three actual 4x FG runs produced 108 generated images. Foreground zero motion plus foreground depth still left displaced outlines. Separate layers in a known linear domain reduced this error. The samples are real material values, but motion, lighting and tone mapping are synthetic; it is not a live game-motion replay.
+
+The compositor now requires an explicit correction footprint in addition to valid surface endpoint correspondence. Pixels outside it retain the original FG output. Neutral F=0/T=1 pixels inside it restore the separated background because FG may have displaced a foreground ghost there. An earlier neutral-pixel bypass retained such ghosts and was rejected. Footprint construction must account for relative motion; actual surface coverage alone is insufficient. The fixture uses a known motion bound, not a runtime estimator. Three-phase GPU checks pass, and a 921,600-pixel test matches the CPU reference at every displayed 8-bit pixel while preserving all 887,331 pixels outside its footprint. Game input acquisition and quality acceptance remain incomplete.
+
 ## Menu controls and timing
 
 The FG settings window contains **Transparent surface correction (experimental)**:
