@@ -11,6 +11,6 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Additional joint distortion/FG capture and 72-output repeat verified. Sparse local flow worsens some outlines; geometry-preserving refinements remain insufficient. Dual-source transmittance extraction passed a synthetic GPU check but is not captured in the game or deployed. Visual acceptance remains incomplete.
+- [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Joint capture and repeated FG trials remain insufficient. Actual material transmission captured with separate target/material groups. Source-color and coverage extraction pass independent GPU tests; runtime integration and visual acceptance remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.

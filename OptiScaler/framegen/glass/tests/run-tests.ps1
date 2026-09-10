@@ -9,6 +9,11 @@ New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
 $objectDirectory = $buildDirectory.TrimEnd('\') + '\'
 $common = @('/nologo', '/std:c++20', '/EHsc', '/O2', '/MD', '/D_CRT_SECURE_NO_WARNINGS',
             "/I$PSScriptRoot", "/Fo$objectDirectory")
+$materialExe = Join-Path $buildDirectory 'MaterialCaptureBlend.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'MaterialCaptureBlend.cpp') "/Fe$materialExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
+if ($LASTEXITCODE -ne 0) { throw 'Material capture blend test build failed' }
+& $materialExe
+if ($LASTEXITCODE -ne 0) { throw 'Material capture blend test failed' }
 $recordingExe = Join-Path $buildDirectory 'ComputeRecording.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'ComputeRecording.cpp') "/Fe$recordingExe"
 if ($LASTEXITCODE -ne 0) { throw 'Compute recording test build failed' }
