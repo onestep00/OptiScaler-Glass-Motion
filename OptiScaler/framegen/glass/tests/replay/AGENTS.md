@@ -13,3 +13,4 @@
 
 - [README.md](README.md): Manifest-based standalone provider harness. Repeated 24-frame 4x outputs match the previous replay; eight-frame 2x check passes. No completed ghosting fix or broad scene acceptance.
 - The README also records a separated-layer synthetic FG experiment and the independent GPU compositor contract, including a distinct correction footprint. Known synthetic correspondence or footprint is not evidence for a game capture/admission path.
+- The same README defines per-input allocation/extent mapping and normalized endpoint offsets. `test_layer_spaces.py` verifies different resolutions and padded subrectangles; it does not validate internal DLSS-stage access or a color-space conversion. Old absolute-UV fixtures must be regenerated.

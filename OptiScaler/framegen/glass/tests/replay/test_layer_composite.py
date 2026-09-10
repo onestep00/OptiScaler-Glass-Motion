@@ -27,7 +27,7 @@ def main():
             f0, f1 = [.1, .2, .3, 1.], [.3, .4, .5, 1.]
             t0, t1 = [.5, .25, .75, 1.], [.25, .75, .5, 1.]
             bg = [.4, .3, .2, 1.]
-            uv = [(x+.5)/width, (y+.5)/height] * 2
+            uv = [0., 0., 0., 0.]  # Normalized endpoint offsets from output view UV.
             valid = [1., 1., 0., 0.]
             reject = y < 6
             if y == 0: valid[0] = 0.

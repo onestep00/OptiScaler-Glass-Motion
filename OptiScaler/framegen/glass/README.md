@@ -139,6 +139,10 @@ A controlled experiment froze the captured cup F/T and moved a synthetic figure 
 
 The compositor now requires an explicit correction footprint in addition to valid surface endpoint correspondence. Pixels outside it retain the original FG output. Neutral F=0/T=1 pixels inside it restore the separated background because FG may have displaced a foreground ghost there. An earlier neutral-pixel bypass retained such ghosts and was rejected. Footprint construction must account for relative motion; actual surface coverage alone is insufficient. The fixture uses a known motion bound, not a runtime estimator. Three-phase GPU checks pass, and a 921,600-pixel test matches the CPU reference at every displayed 8-bit pixel while preserving all 887,331 pixels outside its footprint. Game input acquisition and quality acceptance remain incomplete.
 
+## Independent layer resolutions
+
+The isolated separated-layer compositor now accepts each input's actual dimensions and valid region, with normalized endpoint offsets. Previous/current layers, background, correspondence grid and output can have different sizes. Padded allocation edges are excluded; the original fallback matches the chosen output stage and remains exact outside correction. Five independent-resolution GPU configurations passed 326,970 pixels, and a controlled actual-FG case with 640x360 MV/depth and 1280x720 color passed composition at two output sizes. See [the coordinate contract and evidence](tests/replay/README.md#independent-resolutions-and-valid-regions). This does not establish internal DLSS-stage access, color conversion or runtime integration, and does not change the deployed b59aa86 module.
+
 ## Menu controls and timing
 
 The FG settings window contains **Transparent surface correction (experimental)**:

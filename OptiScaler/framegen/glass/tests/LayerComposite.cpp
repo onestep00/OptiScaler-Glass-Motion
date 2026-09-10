@@ -31,6 +31,33 @@ int wmain(int argc, wchar_t** argv)
         const float phase = std::stof(argv[5]);
         if (!width || !height || width > 8192 || height > 8192 || !std::isfinite(phase) || phase < 0 || phase > 1)
             throw std::runtime_error("Invalid dimensions or phase");
+        struct Layout
+        {
+            unsigned width, height;
+            std::array<unsigned, 4> region;
+        };
+        std::array<Layout, 8> layouts;
+        for (auto& layout : layouts)
+            layout = { width, height, { 0, 0, width, height } };
+        const auto layoutPath = folder / "input-layout.txt";
+        if (std::filesystem::exists(layoutPath))
+        {
+            std::ifstream input(layoutPath);
+            for (auto& layout : layouts)
+            {
+                auto& r = layout.region;
+                if (!(input >> layout.width >> layout.height >> r[0] >> r[1] >> r[2] >> r[3]) ||
+                    !layout.width || !layout.height || layout.width > 8192 || layout.height > 8192 ||
+                    !r[2] || !r[3] || r[0] > layout.width || r[1] > layout.height ||
+                    r[2] > layout.width - r[0] || r[3] > layout.height - r[1])
+                    throw std::runtime_error("Invalid input layout");
+            }
+            std::string extra;
+            if (input >> extra)
+                throw std::runtime_error("Extra input layout data");
+        }
+        if (layouts[5].region[2] != width || layouts[5].region[3] != height)
+            throw std::runtime_error("Fallback region must match output dimensions");
         ComPtr<IDXGIFactory4> factory;
         check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
         ComPtr<ID3D12Device> device;
@@ -63,7 +90,7 @@ int wmain(int argc, wchar_t** argv)
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         parameters[0].DescriptorTable = { 2, ranges };
         parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        parameters[1].Constants = { 0, 0, 4 };
+        parameters[1].Constants = { 0, 0, 36 };
         D3D12_STATIC_SAMPLER_DESC sampler {};
         sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -130,9 +157,15 @@ int wmain(int argc, wchar_t** argv)
         std::array<ComPtr<ID3D12Resource>, 8> uploads;
         for (unsigned i = 0; i < 9; ++i)
         {
+            auto inputDescription = td;
             if (i == 8)
-                td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-            textures[i] = make(td, D3D12_HEAP_TYPE_DEFAULT,
+                inputDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            else
+            {
+                inputDescription.Width = layouts[i].width;
+                inputDescription.Height = layouts[i].height;
+            }
+            textures[i] = make(inputDescription, D3D12_HEAP_TYPE_DEFAULT,
                                i == 8 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST);
             if (i == 8)
                 device->CreateUnorderedAccessView(textures[i].Get(), nullptr, nullptr, handle);
@@ -145,15 +178,22 @@ int wmain(int argc, wchar_t** argv)
                 view.Texture2D.MipLevels = 1;
                 device->CreateShaderResourceView(textures[i].Get(), &view, handle);
                 const auto file = folder / ("input-" + std::to_string(i) + ".bin");
-                if (std::filesystem::file_size(file) != UINT64(width) * height * 16)
+                const auto& layout = layouts[i];
+                if (std::filesystem::file_size(file) != UINT64(layout.width) * layout.height * 16)
                     throw std::runtime_error("Input length mismatch");
-                uploads[i] = make(bd, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+                D3D12_PLACED_SUBRESOURCE_FOOTPRINT inputFootprint {};
+                UINT64 inputBytes;
+                device->GetCopyableFootprints(&inputDescription, 0, 1, 0, &inputFootprint, nullptr, nullptr,
+                                             &inputBytes);
+                auto uploadDescription = bd;
+                uploadDescription.Width = inputBytes;
+                uploads[i] = make(uploadDescription, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
                 void* data;
                 check(uploads[i]->Map(0, nullptr, &data));
                 std::ifstream stream(file, std::ios::binary);
-                for (unsigned y = 0; y < height; ++y)
-                    if (!stream.read(static_cast<char*>(data) + fp.Offset + y * fp.Footprint.RowPitch,
-                                     size_t(width) * 16))
+                for (unsigned y = 0; y < layout.height; ++y)
+                    if (!stream.read(static_cast<char*>(data) + inputFootprint.Offset + y * inputFootprint.Footprint.RowPitch,
+                                     size_t(layout.width) * 16))
                         throw std::runtime_error("Input read failed");
                 uploads[i]->Unmap(0, nullptr);
                 D3D12_TEXTURE_COPY_LOCATION dst {}, src {};
@@ -161,7 +201,7 @@ int wmain(int argc, wchar_t** argv)
                 dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                 src.pResource = uploads[i].Get();
                 src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                src.PlacedFootprint = fp;
+                src.PlacedFootprint = inputFootprint;
                 cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                 transition(textures[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -178,8 +218,12 @@ int wmain(int argc, wchar_t** argv)
             unsigned width, height;
             float phase;
             unsigned admitted;
+            std::array<std::array<unsigned, 4>, 8> regions;
         } constants { width, height, phase, admitted };
-        cmd->SetComputeRoot32BitConstants(1, 4, &constants, 0);
+        static_assert(sizeof(constants) == 36 * sizeof(unsigned));
+        for (unsigned i = 0; i < 8; ++i)
+            constants.regions[i] = layouts[i].region;
+        cmd->SetComputeRoot32BitConstants(1, 36, &constants, 0);
         cmd->SetPipelineState(pso.Get());
         cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
         transition(textures[8].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);

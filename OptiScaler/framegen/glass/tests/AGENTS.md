@@ -7,6 +7,7 @@
 - All settings test directories must be new. Build artifacts belong outside source control.
 - MaterialCaptureBlend.cpp checks source color, RGB transmission and surviving-pixel coverage for five blend families. It includes discarded pixels and unit transmission with nonzero source color. This is not game layer extraction or FG quality validation.
 - LayerComposite.cpp runs the isolated compositor on caller-supplied float4 files. Build and contract checks are documented in replay/README.md. It never captures or changes a game, and it is not part of the default suite that has no Python dependency.
+- The compositor runner accepts independent per-input dimensions and valid regions. Keep its 36-constant layout and normalized-offset interpretation synchronized with the HLSL. Resolution checks use analytic fields and preserve exact fallback; differing sizes alone never establish input admission.
 - ComputeRecording.cpp checks missing observer coverage, stale Reset tickets and interleaved state rejection. It does not install hooks or prove live observer coverage.
 - NativeSession.cpp runs synthetic inputs on independent DIRECT/COMPUTE queues. It checks rejected admission and unsubmitted/in-flight retirement, not glass quality. Its artificial GPU gate and CPU drains are test-only.
 - TaggedInputs.cpp checks fresh phase admission and stale/mixed metadata rejection. StreamlineTagBridge.cpp tests the production registration/forwarding code with a mock parameter registry and independent D3D12 textures. It does not attach to or initialize the game's Streamline plugin.
