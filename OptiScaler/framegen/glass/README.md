@@ -2,13 +2,13 @@
 
 - Created: 2026-09-10
 - Updated: 2026-09-10
-- Status: experimental; native host integration in progress
-- Deployment: menu/source/build integration only; not installed in the game or connected to native FG evaluation
+- Status: experimental; native host connected and bounded runtime execution verified
+- Deployment: source connected; production module exercised by a bounded game probe; full OptiScaler DLL and startup bridge not yet installed through MO2
 - Deprecated: no
 - Scope: Cyberpunk 2077 native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
 
-This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. Native FG evaluation and ASI/MFG unlock code are unchanged at this stage. Building this branch does **not** enable the correction in a game.
+This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. The native FG Evaluate branch now calls `NativeHost`; native creation/release/shutdown provide lifecycle notifications. ASI/MFG unlock behavior remains upstream-owned. Correction defaults off and requires the two HLSL assets beside the DLL in `Glass/`.
 
 ## Boundaries
 
@@ -21,6 +21,8 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 | `SurfaceQueueLink.h` | Bounded CPU bookkeeping of observed submissions and fence dependencies; no GPU commands or waits |
 | `ComputeRecording.h` | Fresh COMPUTE recording admission, complete callback coverage and single-use epoch tickets |
 | `NativeSession.h` | Per-feature capture, queue provenance, state admission, correction phases, completion and timer coordination |
+| `NativeHost.cpp`, `D3D12Observer.cpp` | Existing NGX dispatch integration, real COM-method observation, feature retirement and UI telemetry |
+| `CommandLifetime.h` | Official destruction notifications without retaining command lists or guessing final Release counts |
 | `StreamlineTagBridge.cpp`, `TaggedInputs.h` | Named common-plugin callback registration and bounded clone-state metadata admission |
 | `SurfaceSnapshotPool.h` | Four owned depth copies, producer/consumer completion and command-reset tracking, no wait on pool exhaustion |
 | `GlassControls.h`, `GlassSettings.cpp` | Atomic controls, separate INI persistence and OptiScaler menu widgets |
@@ -29,15 +31,15 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 
 The host must supply an unambiguous surface snapshot, its generation and actual resource state. It must establish GPU ordering, preserve command-list state, and drain GPU use before resource release or recreation. `SurfaceQueueLink` records observed queue dependencies; it does not own resources or prove GPU completion. `CyberpunkSurfacePass` identifies an observed consumer transition, not the shader that wrote the depth.
 
-The intended host seam is the native FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, using `HandleToFeature`. Stale parameter keys alone must not classify an evaluation as FG. `NativeSession.h` implements the per-feature coordinator; connecting its callbacks to the Windows hook service and native Evaluate seam remains pending. Keep that platform adapter in this directory and keep the upstream call site small. The UI explicitly reports this pending state. Selection preview remains disabled until a valid runtime texture can be displayed.
+The host seam is the native FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, using `HandleToFeature`. Stale parameter keys alone do not classify an evaluation as FG. `NativeHost` prepares a per-feature session and scopes MV/depth substitution around the original native call. It publishes runtime status and completed timing samples. Selection preview remains disabled until a valid runtime texture can be displayed.
 
 ## Native session callback contract
 
 Initialize one session per feature/size and bind its actual COMPUTE command list only after observer coverage is established. The platform adapter retains synchronization identities used by queue provenance, serializes the real queue call together with its after-callback, and excludes only this module's nested commands from observers. Call `captureIdentifiedSurface` immediately after a uniquely identified depth transition. A missing snapshot, multiple candidates between phase-1 evaluations, a missing native fence dependency or a non-fresh compute recording bypasses correction and invalidates history.
 
-Successful Reset clears discarded surface recordings from queue provenance, releases retained producer-command identities and updates snapshot/timer bookkeeping. `afterSubmit` tracks all recorded uses of corrected outputs, including later MFG phases. Its monotonic completion fence also supplies sparse timing, so enabling the timer adds no extra signal. The snapshot pool separately signals producer/read completion. These ownership signals never substitute for a native producer-to-consumer dependency; the module inserts no waits.
+Successful Reset clears discarded surface recordings from queue provenance, discards tracked producer-command recordings and updates snapshot/timer bookkeeping. `afterSubmit` tracks all recorded uses of corrected outputs, including later MFG phases. Its monotonic completion fence also supplies sparse timing, so enabling the timer adds no extra signal. The snapshot pool separately signals producer/read completion. These ownership signals never substitute for a native producer-to-consumer dependency; the module inserts no waits.
 
-The platform adapter calls `stop` on feature retirement and keeps forwarding submission/Reset callbacks while draining outstanding use. `readyToRelease` requires discarded command recordings and completed GPU work, not just one of those conditions. A Reset with a fresh allocator while the GPU is busy is not enough to release resources. A command destroyed without Reset needs a proven final-owner/discard notification from the platform service; do not invent a Reset while the game can still resubmit a closed recording. Resize creates a new session only while preserving the retiring session's lifetime. That platform lifecycle wiring is still pending.
+The platform adapter calls `stop` on feature retirement and keeps forwarding submission/Reset callbacks while draining outstanding use. `readyToRelease` requires discarded command recordings and completed GPU work, not just one of those conditions. A Reset with a fresh allocator while the GPU is busy is not enough to release resources. `CommandLifetime` queries the official `ID3DDestructionNotifier` interface. Its callback only publishes a destruction flag and releases a small CPU token; it never dereferences the dying object, takes the host lock or releases GPU resources. Discarded recordings still require GPU completion. Resize/feature retirement preserves old sessions in a bounded two-entry retirement array and bypasses new correction until they drain. Shutdown stops admission; successful native FG creation can reopen it.
 
 ## Reusing the OptiScaler host
 
@@ -47,7 +49,7 @@ The existing `D3D12Hooks::RestoreRoot` is conditional on user configuration and 
 
 Current native FG observations show a fresh COMPUTE recording before each of the three generated phases. `ComputeRecording` admits insertion only after observing a successful `Reset(nullptr)` and all applicable state-changing entry points. It rejects missing hooks, non-COMPUTE lists, initial PSOs, intervening state setters, repeated insertion and stale reset tickets. The host must retain the command identity, serialize callbacks and exclude only its own correction commands from state observations. It must observe `SetPipelineState1` and `SetProgram` when their extended interfaces exist. Unknown interface-query errors do not count as interface absence.
 
-After an admitted correction, `ClearState(nullptr)` restores the fresh binding contract before native FG. Resource barriers remain the pass's separate responsibility. This avoids a full binding-state save/replay and adds no queue submission or wait. The gate alone does not install hooks or establish resource lifetime; native host integration remains pending. Follow Microsoft's [Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset) and [ClearState](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-clearstate) contracts.
+After an admitted correction, `ClearState(nullptr)` restores the fresh binding contract before native FG. Resource barriers remain the pass's separate responsibility. This avoids a full binding-state save/replay and adds no queue submission or wait. `D3D12Observer` installs the complete applicable method set from actual COM interfaces using upstream `rewrite_signature` and Detours. It checks DIRECT/COMPUTE implementation compatibility, serializes queue calls with their after-callbacks and suppresses only this module's nested API calls. Binding changes on unrelated command lists avoid the host lock; depth barriers receive a cheap state filter before game-pass identification. Follow Microsoft's [Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset) and [ClearState](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-clearstate) contracts.
 
 ### Streamline tag-state bridge
 
@@ -60,6 +62,14 @@ Native FG input states can be read through `ReadStreamlineStates` once per nativ
 Two bounded read-only game probes observed FG 91/90 times with no failures. After initial incomplete observations, native MV/color/depth matched their common tag clones in 81/78 evaluations respectively; all matched states were COPY_DEST and resource flags were 0x5. Diagnostic probes used an inspected, file-hash-guarded function RVA; that address is absent from this production bridge. Hooks were disabled afterwards. The new startup registration path passed an independent test with real D3D12 resource descriptions, unchanged forwarded outputs, different producer/consumer threads and shutdown behavior; it has not yet been deployed in the game.
 
 A subsequent bounded game probe compiled the production decoder, `TaggedInputs` and `ReadStreamlineStates` directly. All 155 returned tags decoded successfully; 91 of 93 observed native evaluations passed metadata admission, with two initial incomplete phases rejected. All 104 observed FG calls succeeded. The probe added no GPU command or input substitution and was disabled afterwards. This validates live decoding/admission; the game's startup registration path and actual correction are still pending. Release x64 build and all six standalone executables passed after the final code changes.
+
+## Native Windows host verification
+
+The observer-driven standalone session test uses real D3D12 Reset, barrier, ExecuteCommandLists, Signal and Wait calls rather than manually forwarding their notifications. All applicable 16 binding observations installed. Missing native ordering, ambiguous surfaces and dirty compute state rejected correction. Reset without GPU completion retained resources. Destruction without Reset also retained in-flight resources until completion and allowed release afterward. A separate destruction-notifier test passed callback, explicit unregister and owner-before-command teardown cases. All eight standalone executables and the Release x64 solution build passed.
+
+A five-second game probe compiled the production `NativeHost`, `NativeSession`, D3D12 observer, decoder and shaders. It captured 88 identified surfaces and substituted owned MV/depth inputs in 258 of 270 host evaluations. All 286 FG calls observed by the outer diagnostic wrapper succeeded. Stop disabled further correction and the host reported all entries retired after completion. The game's installed OptiScaler and MFG unlock files were unchanged. The probe's central/tag observation hooks were disabled; process-lifetime D3D12 forwarding hooks remain loaded with no correction session until game exit. No diagnostic DLL is distributed in this repository.
+
+The diagnostic entry uses a file-identity-checked common-tag address because the game is already initialized. The production startup bridge still uses named registration. Therefore this experiment proves live capture, ordering, correction substitution and retirement, but not full DLL startup deployment or the final menu layout. The observed scene had changed to a wider view of the casino. No new moving-glass quality claim or performance guarantee follows from these successful calls.
 
 ## Existing MFG unlock
 
@@ -78,7 +88,7 @@ The pass samples the first and then every 30th correction batch. Each sample add
 
 The displayed interval covers correction input copies and compute passes on the FG COMPUTE queue. It excludes the producer's surface-depth capture, DLSS-G evaluation and presentation. It is the last sampled interval, not total frame latency or the measurement's own overhead. Query operations still have a cost; sparse sampling limits their frequency without claiming zero overhead. Follow [Microsoft's timestamp contract](https://learn.microsoft.com/en-us/windows/win32/direct3d12/timing) and [query-resolution lifetime contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-resolvequerydata).
 
-Settings changes are sampled when preparing phase 1; phases 2/3 retain the same prepared inputs. This preserves consistent 4x interpolation. The native host still needs to pass `ReadControls()`, supply the timer's submission/reset callbacks and publish completed timings to the menu.
+Settings changes are sampled when preparing phase 1; phases 2/3 retain the same prepared inputs. This preserves consistent 4x interpolation. `NativeHost` supplies controls and submission/reset callbacks, then publishes completed samples without waiting.
 
 ## Validation to date
 
@@ -114,7 +124,7 @@ This builds isolated GPU-resource/timing and settings/widget tests under `artifa
 
 ## Build and upstream updates
 
-Clone with submodules, or run `git submodule update --init --recursive`. Build `OptiScaler.sln` with the upstream Windows dependencies and Release x64 configuration. HLSL files remain source assets; the eventual runtime host must provide their resolved paths or embed compiled shaders.
+Clone with submodules, or run `git submodule update --init --recursive`. Build `OptiScaler.sln` with the upstream Windows dependencies and Release x64 configuration. `GlassFg.props` copies `GlassSurface.hlsl` and `GlassRegion.hlsl` into `$(TargetDir)Glass` and the upstream Release package's `a/Glass`. The fast build artifact also includes both shaders. Deployment requires this directory beside the OptiScaler DLL. The host resolves paths from the loaded DLL, independent of the process working directory.
 
 Development is committed on `glass-motion`. Keep `upstream` pointing to the original repository and `origin` pointing to the user's fork. Merge upstream changes into the development branch:
 

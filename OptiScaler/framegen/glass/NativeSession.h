@@ -1,6 +1,7 @@
 #pragma once
 #include "GlassFgPass.h"
 #include "ComputeRecording.h"
+#include "CommandLifetime.h"
 #include "SurfaceQueueLink.h"
 #include "SurfaceSnapshotPool.h"
 #include <array>
@@ -22,7 +23,9 @@ class NativeSession
     ID3D12GraphicsCommandList* fgCommand = nullptr;
     ID3D12CommandQueue* fgQueue = nullptr;
     ID3D12Fence* completion = nullptr;
-    std::array<ID3D12GraphicsCommandList*, 64> producers {};
+    CommandLifetime fgLifetime;
+    std::array<CommandLifetime, 64> producers {};
+    std::array<ID3D12Fence*, 64> nativeFences {};
     SurfaceSnapshotPool::Token newest {};
     SurfaceSnapshot batchSnapshot {};
     uint64_t generation = 0, submitted = 0;
@@ -32,17 +35,37 @@ class NativeSession
 
     bool retainProducer(ID3D12GraphicsCommandList* command)
     {
-        for (auto entry : producers)
-            if (entry == command)
+        collectDestroyed();
+        for (const auto& entry : producers)
+            if (entry.identity() == command)
                 return true;
         for (auto& entry : producers)
-            if (!entry)
-            {
-                entry = command;
-                command->AddRef();
-                return true;
-            }
+            if (!entry.identity())
+                return entry.attach(command);
         return false;
+    }
+
+    void discardRecording(const void* command)
+    {
+        pool.discardRecording(command);
+        link.resetCommand(command);
+        timer.discardRecording(command);
+        if (command == fgCommand)
+            outputRecording = false;
+    }
+
+    void collectDestroyed()
+    {
+        if (const auto command = fgLifetime.takeDestroyed())
+        {
+            recording.onMutation(command);
+            discardRecording(command);
+            fgCommand = nullptr;
+            stop();
+        }
+        for (auto& producer : producers)
+            if (const auto command = producer.takeDestroyed())
+                discardRecording(command);
     }
 
   public:
@@ -73,30 +96,26 @@ class NativeSession
     bool bindFgCommand(ID3D12GraphicsCommandList* command, uint32_t supported, uint32_t observed)
     {
         if (!initialized || stopped || failed || !command || fgCommand ||
-            command->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE || !link.registerFgCommand(command))
+            command->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE || !link.registerFgCommand(command) ||
+            !fgLifetime.attach(command))
             return false;
         fgCommand = command;
-        fgCommand->AddRef();
         recording.bind(command, true, supported, observed);
         return true;
     }
 
     void onReset(ID3D12GraphicsCommandList* command, bool success, ID3D12PipelineState* initialPipeline)
     {
+        collectDestroyed();
         recording.onReset(command, success, initialPipeline);
         if (!success)
             return;
-        pool.onReset(command);
-        link.resetCommand(command);
-        timer.onReset(command);
-        if (command == fgCommand)
-            outputRecording = false;
+        discardRecording(command);
+        if (stopped && command == fgCommand)
+            fgLifetime.detachLive(command);
         for (auto& producer : producers)
-            if (producer == command)
-            {
-                producer->Release();
-                producer = nullptr;
-            }
+            if (producer.identity() == command)
+                producer.detachLive(command);
     }
 
     // Includes Close and every applicable state setter, including predication.
@@ -107,6 +126,7 @@ class NativeSession
     bool captureIdentifiedSurface(ID3D12GraphicsCommandList* command, ID3D12Resource* depth,
                                   D3D12_RESOURCE_STATES state)
     {
+        collectDestroyed();
         if (!initialized || stopped || failed || !command || !depth ||
             command->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !retainProducer(command))
             return false;
@@ -123,11 +143,22 @@ class NativeSession
     // the timer reuses this stream and never adds a signal of its own.
     bool afterSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands)
     {
+        collectDestroyed();
         if (!initialized || failed || !queue || !commands || !count)
             return false;
         bool usesOutput = false;
         for (UINT i = 0; i < count; ++i)
         {
+            if (commands[i] == fgCommand)
+            {
+                if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+                    failed = true;
+                else if (!fgQueue)
+                {
+                    fgQueue = queue;
+                    fgQueue->AddRef();
+                }
+            }
             link.submit(queue, commands[i]);
             usesOutput |= outputRecording && commands[i] == fgCommand;
         }
@@ -139,11 +170,6 @@ class NativeSession
                 failed = true;
             else
             {
-                if (!fgQueue)
-                {
-                    fgQueue = queue;
-                    fgQueue->AddRef();
-                }
                 if (FAILED(queue->Signal(completion, ++submitted)))
                     failed = true;
                 else if (timing && !timer.submitted(fgCommand, queue, completion, submitted))
@@ -155,12 +181,39 @@ class NativeSession
 
     // Only native, successful GPU synchronization calls belong here. Exclude
     // this module's own completion signals; they do not establish input order.
-    void onSignal(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value) { link.signal(queue, fence, value); }
-    void onWait(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value) { link.wait(queue, fence, value); }
+    void onSignal(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
+    {
+        if (failed || !fence || !link.isProducerQueue(queue))
+            return;
+        bool retained = false;
+        for (auto entry : nativeFences)
+            retained |= entry == fence;
+        if (!retained)
+            for (auto& entry : nativeFences)
+                if (!entry)
+                {
+                    fence->AddRef();
+                    entry = fence;
+                    retained = true;
+                    break;
+                }
+        if (!retained)
+        {
+            failed = true;
+            return;
+        }
+        link.signal(queue, fence, value);
+    }
+    void onWait(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
+    {
+        if (!failed && queue == fgQueue)
+            link.wait(queue, fence, value);
+    }
 
     PreparedInputs prepare(ID3D12GraphicsCommandList* command, const Inputs& inputs,
                            const D3D12_RESOURCE_STATES (&states)[3], Controls controls)
     {
+        collectDestroyed();
         if (!initialized || stopped || failed || command != fgCommand)
             return {};
         if (inputs.index == 1)
@@ -199,6 +252,21 @@ class NativeSession
     }
 
     void nativeFailure() { pass.invalidateHistory(); }
+    bool accepting()
+    {
+        collectDestroyed();
+        return initialized && !stopped && !failed;
+    }
+    void bypass(unsigned index)
+    {
+        pass.invalidateHistory();
+        if (index == 1)
+        {
+            candidates = 0;
+            batchSnapshot = {};
+            pool.retire(newest);
+        }
+    }
     std::optional<GpuTimer::Sample> pollTiming() { return timing ? timer.poll() : std::optional<GpuTimer::Sample> {}; }
     uint64_t renderedDispatches() const { return pass.renderedDispatches(); }
     ID3D12Resource* selection() const { return pass.selection(); }
@@ -213,10 +281,11 @@ class NativeSession
 
     bool readyToRelease()
     {
+        collectDestroyed();
         if (!stopped || failed || outputRecording || !pool.idle())
             return false;
-        for (auto producer : producers)
-            if (producer)
+        for (const auto& producer : producers)
+            if (producer.identity())
                 return false;
         if (!submitted)
             return true;
@@ -233,13 +302,14 @@ class NativeSession
         pool.releaseAfterGpuDrain();
         timer.releaseAfterGpuDrain();
         for (auto& producer : producers)
-            if (producer)
+            producer.forget();
+        fgLifetime.forget();
+        for (auto& fence : nativeFences)
+            if (fence)
             {
-                producer->Release();
-                producer = nullptr;
+                fence->Release();
+                fence = nullptr;
             }
-        if (fgCommand)
-            fgCommand->Release();
         if (fgQueue)
             fgQueue->Release();
         if (completion)

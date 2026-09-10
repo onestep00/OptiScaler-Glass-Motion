@@ -5,6 +5,13 @@
 #include <stdexcept>
 #include <vector>
 using Microsoft::WRL::ComPtr;
+#ifdef GLASS_TEST_OBSERVER
+#include "ObservedSession.h"
+using TestedSession = ObserverTest::Session;
+#else
+using TestedSession = GlassFg::NativeSession;
+namespace ObserverTest { void omitWait(bool) {} }
+#endif
 
 static void check(bool value, const char* label)
 {
@@ -120,7 +127,7 @@ int wmain(int argc, wchar_t** argv)
         producer->ExecuteCommandLists(1, pLists);
         drain(device.Get(), producer.Get());
         uploads.clear();
-        GlassFg::NativeSession session;
+        TestedSession session;
         D3D12_RESOURCE_DESC descs[] = { motion->GetDesc(), color->GetDesc(), depth->GetDesc() };
         check(session.initialize(device.Get(), descs, argv[1], argv[2], stdout), "initialize session");
         check(session.bindFgCommand(cc.Get(), GlassFg::ComputeRecording::AllMethods,
@@ -146,6 +153,7 @@ int wmain(int argc, wchar_t** argv)
                                                  D3D12_RESOURCE_STATE_COPY_DEST };
         for (unsigned scenario = 1; scenario <= 4; ++scenario)
         {
+            ObserverTest::omitWait(scenario == 1);
             hr(pa->Reset(), "reset producer allocator");
             hr(pc->Reset(pa.Get(), nullptr), "reset producer list");
             session.onReset(pc.Get(), true, nullptr);
@@ -209,9 +217,79 @@ int wmain(int argc, wchar_t** argv)
             hr(pc->Close(), "close final producer");
             session.releaseAfterGpuDrain();
         }
-        std::puts("NATIVE_SESSION_OK missing_wait_rejected=1 ambiguous_rejected=1 dirty_state_rejected=1 "
+        // The real command objects can die without Reset. Destruction drops
+        // recording references, but must not drop their submitted GPU work.
+        for (bool submitted : { false, true })
+        {
+            ComPtr<ID3D12CommandAllocator> destroyPa, destroyCa;
+            ComPtr<ID3D12GraphicsCommandList> destroyPc, destroyCc;
+            hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&destroyPa)), "destroy pa");
+            hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&destroyCa)), "destroy ca");
+            hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, destroyPa.Get(), nullptr,
+                                        IID_PPV_ARGS(&destroyPc)), "destroy pc");
+            hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, destroyCa.Get(), nullptr,
+                                        IID_PPV_ARGS(&destroyCc)), "destroy cc");
+            TestedSession retiring;
+            check(retiring.initialize(device.Get(), descs, argv[1], argv[2], stdout), "destroy initialize");
+            check(retiring.bindFgCommand(destroyCc.Get(), GlassFg::ComputeRecording::AllMethods,
+                                        GlassFg::ComputeRecording::AllMethods), "destroy bind");
+            ID3D12CommandList* producerLists[] = { destroyPc.Get() };
+            ID3D12CommandList* consumerLists[] = { destroyCc.Get() };
+            hr(destroyCc->Close(), "destroy bootstrap close");
+            retiring.onStateMutation(destroyCc.Get());
+            consumer->ExecuteCommandLists(1, consumerLists);
+            check(retiring.afterSubmit(consumer.Get(), 1, consumerLists), "destroy bootstrap submit");
+            drain(device.Get(), consumer.Get());
+            hr(destroyCa->Reset(), "destroy reset allocator");
+            hr(destroyCc->Reset(destroyCa.Get(), nullptr), "destroy reset compute");
+            retiring.onReset(destroyCc.Get(), true, nullptr);
+            check(retiring.captureIdentifiedSurface(destroyPc.Get(), surface.Get(), readState), "destroy capture");
+            hr(destroyPc->Close(), "destroy close producer");
+            if (submitted)
+            {
+                producer->ExecuteCommandLists(1, producerLists);
+                check(retiring.afterSubmit(producer.Get(), 1, producerLists), "destroy submit producer");
+                hr(producer->Signal(native.Get(), 100), "destroy native signal");
+                retiring.onSignal(producer.Get(), native.Get(), 100);
+                hr(consumer->Wait(native.Get(), 100), "destroy native wait");
+                retiring.onWait(consumer.Get(), native.Get(), 100);
+                check(retiring.prepare(destroyCc.Get(), inputs, states, { true, 100, true }).motion != nullptr,
+                      "destroy prepare");
+                hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "destroy gate");
+                hr(consumer->Wait(gate.Get(), 1), "destroy hold gpu");
+            }
+            hr(destroyCc->Close(), "destroy close consumer");
+            retiring.onStateMutation(destroyCc.Get());
+            if (submitted)
+            {
+                consumer->ExecuteCommandLists(1, consumerLists);
+                check(retiring.afterSubmit(consumer.Get(), 1, consumerLists), "destroy submit consumer");
+            }
+            retiring.stop();
+            check(!retiring.readyToRelease(), "closed recording released before destruction");
+            destroyPc.Reset();
+            destroyCc.Reset();
+            if (submitted)
+            {
+                check(!retiring.readyToRelease(), "destroyed inflight recording released GPU resources");
+                hr(gate->Signal(1), "destroy release gpu");
+                drain(device.Get(), consumer.Get());
+            }
+            check(retiring.readyToRelease(), "destroyed completed recording retained");
+            retiring.releaseAfterGpuDrain();
+        }
+        std::puts("NATIVE_SESSION_OK destruction_without_reset=1 destroyed_inflight_retained=1 "
+                  "missing_wait_rejected=1 ambiguous_rejected=1 dirty_state_rejected=1 "
                   "unsubmitted_release_rejected=1 inflight_release_rejected=1 completed_release=1 timing=1 "
                   "stop_rejected=1 game_attachment=0");
+#ifdef GLASS_TEST_OBSERVER
+        const auto& observed = ObserverTest::context();
+        check(observed.resets && observed.mutations && observed.barriers && observed.submits &&
+              observed.signals && observed.waits, "missing actual observer callback");
+        std::printf("D3D12_OBSERVER_OK mask=%x reset=%u mutation=%u barrier=%u submit=%u signal=%u wait=%u\n",
+                    GlassFg::ObservedComputeMethods(), observed.resets, observed.mutations, observed.barriers,
+                    observed.submits, observed.signals, observed.waits);
+#endif
         return 0;
     }
     catch (const std::exception& error)

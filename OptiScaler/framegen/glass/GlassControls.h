@@ -27,4 +27,6 @@ Controls ReadControls();
 void WriteControls(Controls value);
 void RenderSettings();
 void PublishGpuMilliseconds(double milliseconds);
+enum class RuntimeStatus : unsigned { Waiting, Correcting, Unavailable, Retiring, Stopped };
+void PublishRuntimeStatus(RuntimeStatus status);
 } // namespace GlassFg

@@ -1,8 +1,8 @@
-# Iteration build. Uploads the two files that change and nothing else.
+# Iteration build. Uploads the changed DLLs and glass shader assets.
 #
 # The packaging step in Build (No Signing) spends ~35s compressing 200 MB of checked-in third-party
 # DLLs -- libxess, amd_fidelityfx, the Streamline set -- which no commit here touches. Testing a code
-# change needs OptiScaler.dll and the forwarder, dropped over an install that already has the rest.
+# change needs OptiScaler.dll, the forwarder and Glass/, over an install that already has the rest.
 #
 # Scratch-repo only. Not for the upstream tree, which wants the whole package.
 name: Build (Fast)
@@ -43,4 +43,5 @@ jobs:
         path: |
           ${{ github.workspace }}\x64\Release\a\OptiScaler.dll
           ${{ github.workspace }}\x64\Release\a\nvngx.dll_dlssnr.dll
+          ${{ github.workspace }}\x64\Release\a\Glass\*.hlsl
         if-no-files-found: error

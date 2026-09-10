@@ -14,6 +14,7 @@ namespace
 std::atomic<uint32_t> controls { Controls {}.packed() };
 std::once_flag loaded;
 std::atomic<double> latestMilliseconds { -1.0 };
+std::atomic<RuntimeStatus> runtimeStatus { RuntimeStatus::Waiting };
 
 std::filesystem::path settingsPath() { return Util::DllPath().parent_path() / L"OptiScaler.Glass.ini"; }
 
@@ -80,6 +81,8 @@ void PublishGpuMilliseconds(double milliseconds)
         latestMilliseconds.store(milliseconds, std::memory_order_relaxed);
 }
 
+void PublishRuntimeStatus(RuntimeStatus status) { runtimeStatus.store(status, std::memory_order_relaxed); }
+
 void RenderSettings()
 {
     if (!ImGui::CollapsingHeader("Transparent surface correction (experimental)##GlassFG"))
@@ -124,7 +127,17 @@ void RenderSettings()
     if (result)
         ImGui::TextWrapped("%s", result);
     ImGui::TextDisabled("Saved separately in OptiScaler.Glass.ini");
-    ImGui::TextWrapped("Runtime integration pending: this build does not yet apply correction in the game.");
+    if (value.active())
+    {
+        switch (runtimeStatus.load(std::memory_order_relaxed))
+        {
+        case RuntimeStatus::Correcting: ImGui::TextWrapped("Correction active (experimental)."); break;
+        case RuntimeStatus::Unavailable: ImGui::TextWrapped("Correction unavailable for this session. See OptiScaler.Glass.log."); break;
+        case RuntimeStatus::Retiring: ImGui::TextWrapped("Waiting for previous correction work to finish."); break;
+        case RuntimeStatus::Stopped: ImGui::TextWrapped("Correction stopped after graphics shutdown. Waiting for native DLSS-G recreation."); break;
+        default: ImGui::TextWrapped("Waiting for compatible native DLSS-G inputs."); break;
+        }
+    }
     ImGui::BeginDisabled();
     bool preview = false;
     ImGui::Checkbox("Show selected regions (pending runtime preview)", &preview);

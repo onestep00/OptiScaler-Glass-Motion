@@ -236,7 +236,9 @@ class SurfaceSnapshotPool
         return true;
     }
 
-    void onReset(ID3D12GraphicsCommandList* command)
+    // Reset or proven command destruction discards the recording association.
+    // Identity comparison only; the object may already be dead.
+    void discardRecording(const void* command)
     {
         if (!command)
             return;
@@ -252,6 +254,8 @@ class SurfaceSnapshotPool
                 slot.readCommand = nullptr;
         }
     }
+
+    void onReset(ID3D12GraphicsCommandList* command) { discardRecording(command); }
 
     bool healthy() const { return producerFence && !failed; }
 

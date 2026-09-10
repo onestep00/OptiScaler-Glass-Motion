@@ -147,7 +147,8 @@ class GpuTimer
         return true;
     }
 
-    void onReset(ID3D12GraphicsCommandList* command)
+    // Identity-only bookkeeping; safe after proven command destruction too.
+    void discardRecording(const void* command)
     {
         for (auto& slot : slots)
             if (slot.command == command)
@@ -157,6 +158,8 @@ class GpuTimer
                     slot = {}; // The recording was discarded without submission.
             }
     }
+
+    void onReset(ID3D12GraphicsCommandList* command) { discardRecording(command); }
 
     std::optional<Sample> poll()
     {

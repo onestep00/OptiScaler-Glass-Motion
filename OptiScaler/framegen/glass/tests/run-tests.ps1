@@ -14,6 +14,11 @@ $recordingExe = Join-Path $buildDirectory 'ComputeRecording.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Compute recording test build failed' }
 & $recordingExe
 if ($LASTEXITCODE -ne 0) { throw 'Compute recording contract failed' }
+$lifetimeExe = Join-Path $buildDirectory 'CommandLifetime.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'CommandLifetime.cpp') "/Fe$lifetimeExe" /link d3d12.lib dxgi.lib dxguid.lib
+if ($LASTEXITCODE -ne 0) { throw 'Command lifetime test build failed' }
+& $lifetimeExe
+if ($LASTEXITCODE -ne 0) { throw 'Command lifetime contract failed' }
 $tagsExe = Join-Path $buildDirectory 'TaggedInputs.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'TaggedInputs.cpp') "/Fe$tagsExe"
 if ($LASTEXITCODE -ne 0) { throw 'Tag metadata test build failed' }
@@ -36,6 +41,13 @@ $sessionExe = Join-Path $buildDirectory 'NativeSession.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Native session test build failed' }
 & $sessionExe (Join-Path $PSScriptRoot '..\GlassSurface.hlsl') (Join-Path $PSScriptRoot '..\GlassRegion.hlsl')
 if ($LASTEXITCODE -ne 0) { throw 'Native session admission or lifetime test failed' }
+$observerExe = Join-Path $buildDirectory 'ObservedSession.exe'
+& $compiler @common '/DGLASS_TEST_OBSERVER' "/I$optiDirectory" "/I$optiDirectory\include" `
+    (Join-Path $PSScriptRoot 'NativeSession.cpp') "/Fe$observerExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib `
+    (Join-Path $optiDirectory 'library\detours\detours.lib')
+if ($LASTEXITCODE -ne 0) { throw 'Observed session test build failed' }
+& $observerExe (Join-Path $PSScriptRoot '..\GlassSurface.hlsl') (Join-Path $PSScriptRoot '..\GlassRegion.hlsl')
+if ($LASTEXITCODE -ne 0) { throw 'Observed session callback or lifetime test failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'
 $sources = @((Join-Path $PSScriptRoot 'Settings.cpp'))

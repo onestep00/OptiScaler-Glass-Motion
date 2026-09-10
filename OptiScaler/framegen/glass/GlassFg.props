@@ -8,6 +8,11 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)SurfaceQueueLink.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ComputeRecording.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NativeSession.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)CommandLifetime.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)D3D12Observer.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)D3D12Observer.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)NativeHost.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)NativeHost.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)TaggedInputs.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.cpp" />
@@ -20,4 +25,14 @@
     <None Include="$(MSBuildThisFileDirectory)GlassSurface.hlsl" />
     <None Include="$(MSBuildThisFileDirectory)GlassRegion.hlsl" />
   </ItemGroup>
+  <Target Name="CopyGlassShaders" AfterTargets="Build">
+    <MakeDir Directories="$(TargetDir)Glass" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl"
+          DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
+    <!-- Upstream moves the Release DLL into a/ before packaging. -->
+    <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl"
+          DestinationFolder="$(SolutionDir)x64\Release\a\Glass" SkipUnchangedFiles="true"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+  </Target>
 </Project>

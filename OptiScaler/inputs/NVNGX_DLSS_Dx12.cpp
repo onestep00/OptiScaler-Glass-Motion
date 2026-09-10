@@ -14,6 +14,7 @@
 #include "upscalers/dlss/DLSSFeature_Dx12.h"
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/glass/NativeHost.h>
 #include "FG/FSR3_Dx12_FG.h"
 #include "FG/Upscaler_Inputs_Dx12.h"
 
@@ -372,6 +373,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Init_with_ProjectID(
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void)
 {
+    GlassFg::StopNativeFG();
     shutdown = true;
     State::Instance().nvngxDx12Inited = false;
 
@@ -421,6 +423,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void)
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown1(ID3D12Device* InDevice)
 {
+    GlassFg::StopNativeFG();
     shutdown = true;
     State::Instance().nvngxDx12Inited = false;
 
@@ -789,6 +792,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsComma
             {
                 LOG_INFO("Native CreateFeature success, HandleId: {}", (*OutHandle)->Id);
                 HandleToFeature[(*OutHandle)->Id] = InFeatureID;
+                if (res == NVSDK_NGX_Result_Success && InFeatureID == NVSDK_NGX_Feature_FrameGeneration)
+                    GlassFg::CreatedNativeFG();
             }
             else
             {
@@ -817,6 +822,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* 
 
     if (!InHandle)
         return NVSDK_NGX_Result_Success;
+
+    GlassFg::RetireNativeFG(InHandle);
 
     // Before any feature's resources are freed, drop the exposure scan's references to whatever it
     // captured. The scan AddRef's candidates and never released them; a Streamline/DLSS-D resource it
@@ -1204,7 +1211,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
 
             NVSDK_NGX_Result result =
-                NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
+                feature == NVSDK_NGX_Feature_FrameGeneration
+                    ? GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
+                                               NVNGXProxy::D3D12_EvaluateFeature())
+                    : NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
 
             // Neural Rendering runs over what the upscaler just wrote, on the same list, so frame

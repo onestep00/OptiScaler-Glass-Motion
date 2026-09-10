@@ -174,5 +174,6 @@ class SurfaceQueueLink
     }
 
     bool healthy() const { return !invalid; }
+    bool isProducerQueue(const void* queue) const { return !invalid && queue && queue == producerQueue; }
 };
 } // namespace GlassFg
