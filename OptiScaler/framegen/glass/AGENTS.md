@@ -11,6 +11,6 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. Native session coordinator, two-queue 4x replay, admission/lifetime tests, named Streamline tag bridge, controls and timing. Common-tag/native-input state matches observed live; bridge startup tested independently. Windows queue/capture wiring and bounded live substitution verified. Full DLL startup/MO2 deployment and final moving-glass visual acceptance remain incomplete.
+- [README.md](README.md): Active experimental module. Native session coordinator, two-queue 4x replay, admission/lifetime tests, named Streamline tag bridge, controls and timing. Full DLL MO2 deployment and fresh-process startup/substitution verified. Actual menu enable/disable and completed 0.364/0.404 ms samples observed. Final moving-glass visual acceptance remains incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.

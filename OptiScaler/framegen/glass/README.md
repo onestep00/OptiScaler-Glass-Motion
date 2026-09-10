@@ -2,8 +2,8 @@
 
 - Created: 2026-09-10
 - Updated: 2026-09-10
-- Status: experimental; native host connected and bounded runtime execution verified
-- Deployment: source connected; production module exercised by a bounded game probe; full OptiScaler DLL and startup bridge not yet installed through MO2
+- Status: experimental; deployed native host, startup bridge, controls and timer verified; moving-glass visual acceptance pending
+- Deployment: full b59aa86 OptiScaler DLL and both shaders installed through MO2 RootBuilder and exercised in a fresh game process; local correction enabled at strength 100
 - Deprecated: no
 - Scope: Cyberpunk 2077 native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
@@ -11,6 +11,8 @@
 This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. The native FG Evaluate branch now calls `NativeHost`; native creation/release/shutdown provide lifecycle notifications. ASI/MFG unlock behavior remains upstream-owned. Correction defaults off and requires the two HLSL assets beside the DLL in `Glass/`.
 
 ## Boundaries
+
+Verification sections below retain earlier investigation results. The fresh-process deployment section records the current installation state.
 
 | Component | Responsibility |
 | --- | --- |
@@ -73,7 +75,17 @@ The diagnostic entry uses a file-identity-checked common-tag address because the
 
 ## Existing MFG unlock
 
-Keep the existing Ultimate ASI Loader `version.dll`, `plugins/mfg-unlock.asi` and OptiScaler loader configuration. Correction operates on FG input copies. It does not replace the ASI loader, patch support gates or kernels, or write multiplier options. Existing coexistence was observed in the running game; compatibility of a future connected correction still requires runtime validation.
+Keep the existing Ultimate ASI Loader `version.dll`, `plugins/mfg-unlock.asi` and OptiScaler loader configuration. Correction operates on FG input copies. It does not replace the ASI loader, patch support gates or kernels, or write multiplier options. Coexistence with the connected correction was observed in the fresh-process deployment below. This does not establish compatibility with every future loader or provider version.
+
+## Fresh-process MO2 deployment
+
+On 2026-09-10, the complete b59aa86 Release DLL was built again and installed as `overwrite/Root/bin/x64/dxgi.dll`, with both `Glass/` shaders. RootBuilder copied the files into the game. DLL SHA-256: `4dfa71cdbee83f40665f73e533d96a8fd987880b3f13b51ff9020bd861742a9a`; build identification: `b59aa86 / 20260910_130315`. Existing OptiScaler settings, `version.dll` and `mfg-unlock.asi` were preserved. The local separate INI enables correction at strength 100 with sparse timing; source defaults remain off.
+
+A fresh game process loaded this DLL and the existing ASI unlock together. No diagnostic DLL was injected into that process. The production named Streamline startup path therefore supplied the tag metadata used by actual corrections. At the initial checkpoint, 8,679 of 8,700 native host evaluations substituted inputs, with 2,897 identified surface captures. Periodically logged evaluation results were successful; these sampled results are not a complete per-call failure histogram. MO2 redirected the log to `overwrite/bin/x64/OptiScaler.Glass.log`.
+
+The actual OptiScaler menu showed correction enabled, strength 100, active status and a completed 0.364 ms GPU sample. Disabling the checkbox stopped substitution and capture counters while native evaluations continued: counters remained 9,408 substitutions / 4,315 captures through evaluations 9,900 to 11,100. Re-enabling resumed correction: evaluation 11,400 showed 9,603 substitutions / 4,380 captures, and the UI displayed a new 0.404 ms sample. Correction was left enabled and the menu closed. These are sparse correction-only samples, not average frame costs or a performance guarantee.
+
+The ratio override displayed 4X. Separate generated-phase output capture was not performed in this startup/UI check. Final moving-glass quality, cup edges, moving objects and background preservation remain pending. Runtime substitution and controls are verified; the ghosting fix is not visually accepted.
 
 ## Menu controls and timing
 
