@@ -175,6 +175,12 @@ A further controlled ablation used the complete captured F/T/U, including the pr
 
 Local evidence is recorded in the workspace document `docs/glass-object-motion-source.md`, `work/glass-object-motion-audit-v1/audit.json`, and `work/glass-material-motion-selection-v1/analysis.json`. Game bytecode and raw captures remain local. No new runtime algorithm or object-motion extraction has been installed.
 
+### Geometry motion and separate object boundaries
+
+`GlassObjectMotion.hlsli` and [the independent raster reference](tests/ObjectMotion.md) now separate current/previous object transforms and deformed vertices from current/previous camera projection. Confirmed object boundaries receive a full surface weight regardless of low opacity; gain/bias applies to the interior. The reference retains separate object masks before compositing, including a smaller transparent surface behind another pane.
+
+Eleven cases at two sizes compared actual D3D12 raster outputs with independent double-precision ray/triangle correspondence. Maximum geometric motion error across 1,769,686 checked samples was 0.000983 pixels. Per-object boundaries preserved outlines lost by the previous union mask; CPU boundary selection copied 25,668 admitted GPU vectors exactly. GPU scalar weights were also checked. Coincident edges with different vectors remain explicitly unresolved, and opaque occlusion cuts are not intrinsic object boundaries. These are synthetic input/geometry tests, not native FG quality results or extraction of engine object history. No host or installed DLL changes were made. See the linked document for sources, limits and runtime prerequisites.
+
 ## Menu controls and timing
 
 The FG settings window contains **Transparent surface correction (experimental)**:
