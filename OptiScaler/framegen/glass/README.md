@@ -103,6 +103,18 @@ The recorded HUDless pair also contains mixed correspondence evidence inside sel
 
 Local evidence is indexed in `outputs/glass-deployed-capture-v3/`: `input-audit.json`, `feature-flow-audit.json`, `paired-replay-audit.json`, `selection-history-audit.json`, `appearance-motion-audit.json`, full-scene comparisons and `original-vs-delivered-4x-slow.mp4`. The video preserves real/generated order at a slow 15 fps presentation, not measured timing. Diagnostic files and raw game data are not distributed here. The deployed algorithm remains b59aa86; this finding is not a completed fix.
 
+## Further recorded-input trials (2026-09-10)
+
+A later joint capture contains 24 rendered inputs, 72 generated phases and 28 actual distortion fields. Observed queue order and native fence dependencies associate the captured distortion with the following FG evaluation. A separate stage capture verified that the distortion consumer samples color at UV plus this field; its large displacement is not simply an assumed format conversion. Neither capture substitutes a new correction.
+
+Unconstrained inverse-distortion roots frequently leave the transparent surface. A bounded same-depth search also finds too few convincing cup correspondences to constitute a fix. Surface-seeded local appearance tracking changes real MV/depth inputs, but selecting only its most confident individual pixels makes some generated cup outlines bend more severely. Each candidate was evaluated through the actual NVIDIA provider, rather than judged solely from an image warp. Keeping deployed geometry and only refining local vectors, with or without conservative interior-background restoration, still leaves doubled outlines. None of these candidates has been adopted or installed.
+
+For the new recording, two fresh-feature runs of the delivered inputs produced 72 bit-identical outputs. Creation arguments and provider history remain unavailable; reproducibility does not mean exact restoration of live internal state. These observations reinforce the distinction between reduced photometric matching error and accepted FG quality.
+
+The material's dual-source shader emits a separate RGB destination multiplier. An independent synthetic D3D12 test verified extracting this multiplier through a second draw with zero source contribution and `SRC1_COLOR` destination blending, without changing the pixel shader. All 2,048 synthetic pixels matched. This is a possible source of more direct layer evidence; it is not a captured in-game transmittance buffer, a new deployed feature or a performance guarantee. Repeating the real glass shader has additional cost and requires complete draw-state and side-effect validation. The existing deployed algorithm remains b59aa86.
+
+Local evidence: `outputs/glass-local-correspondence/`, `outputs/glass-joint-capture-v2/`, `work/glass-joint-replay/`, and the workspace document `docs/glass-refraction-joint-capture.md`. Raw game captures are not distributed in this repository.
+
 ## Menu controls and timing
 
 The FG settings window contains **Transparent surface correction (experimental)**:

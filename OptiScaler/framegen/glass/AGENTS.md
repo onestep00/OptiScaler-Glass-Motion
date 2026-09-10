@@ -11,6 +11,6 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. MO2 deployment, named startup, controls and timer verified. Moving-frame paired capture contains 320 buffers and 96 generated phases; repeated fresh-feature outputs are bit-identical. Actual input correction confirmed, but cup ghosts remain. Low-motion history trial not adopted. Visual acceptance remains incomplete.
+- [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Additional joint distortion/FG capture and 72-output repeat verified. Sparse local flow worsens some outlines; geometry-preserving refinements remain insufficient. Dual-source transmittance extraction passed a synthetic GPU check but is not captured in the game or deployed. Visual acceptance remains incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
