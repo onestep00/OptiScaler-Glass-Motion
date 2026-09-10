@@ -15,6 +15,7 @@
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
 - [tests/ObjectMotion.md](tests/ObjectMotion.md): Separate-object boundary weights and geometry MV reference. Synthetic inputs only; engine history and FG quality remain unverified.
+- [tests/replay/BoundaryFG.md](tests/replay/BoundaryFG.md): Real FG boundary-width experiments, including unchanged captured Cyberpunk HUDless. No candidate passes full transparency quality requirements.
 - `GlassLayerComposite.hlsl`: Experimental isolated source; moving layers and stationary transparency with independent background motion tested through actual FG. Explicit correction footprint preserves original output outside the admitted region. Runtime footprint/input acquisition, color-domain validation and integration remain incomplete; see README.md and tests/replay/README.md.
 - The isolated compositor supports per-input valid regions and normalized endpoint offsets across different previous/current/intermediate/final sizes. Analytic GPU mapping tests and a controlled actual-FG comparison passed. This is not proof that arbitrary DLSS stages share a color domain or that the game host supplies these inputs.
 - README.md also distinguishes installed static-world projection from possible engine object-motion inputs. Previous-transform and second-bone-state bytecode paths were found; validity at transparent draws remains unverified. Complete-material single-MV selectors failed the controlled 432-output FG comparison and were not adopted.

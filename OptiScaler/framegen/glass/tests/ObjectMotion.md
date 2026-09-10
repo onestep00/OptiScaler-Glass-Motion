@@ -1,7 +1,7 @@
 # Object geometry motion and separate boundary reference
 
 - Created: 2026-09-10
-- Updated: 2026-09-10
+- Updated: 2026-09-11
 - Status: isolated GPU geometry verification passed; engine input acquisition remains incomplete
 - Deployment: none; neither the native host nor the installed game DLL uses this path
 - Deprecated: no
@@ -65,3 +65,7 @@ Local evidence: workspace `work/glass-object-motion-raster-final/` and `work/gla
 - [DrawInstanced](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-drawinstanced): per-draw instances and vertex input semantics.
 
 The geometry, identity and boundary policies above are this project's proposed contract, not extra guarantees supplied by these APIs or DLSS-G.
+
+## Subsequent FG experiment
+
+[BoundaryFG.md](replay/BoundaryFG.md) records the later actual-provider tests with camera/object motion and 1/2/4-pixel inner bands, followed by replay of actual Cyberpunk HUDless/Backbuffer. The synthetic edge/depth candidate improves some edge scores but worsens interiors. Actual recorded frames retain ghosting. The game recording lacks the per-object previous geometry/coverage used by this reference; it tests a static-world depth-boundary approximation rather than proving the full engine input path.

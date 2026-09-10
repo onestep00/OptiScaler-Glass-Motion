@@ -10,8 +10,11 @@
 - Update document metadata and this index when changing documentation status.
 - material_fixture.py and test_material_motion_blend.py are optional synthetic-scene experiments with caller-supplied frozen material buffers and extra Python dependencies. They do not reconstruct live object motion or game refraction. Treat preservation of foreground material and independent transmitted background motion as separate quality requirements; lower whole-image error alone is insufficient.
 - Optional UI-alpha/recomposition manifests are standalone only. Validate R8 input sizes and preserve the default replay path. A tagged material mask is not enough: correct final/HUDless composition and color domain must be supplied. Do not infer optical-flow-only selection from a zero motion vector.
+- Read BoundaryFG.md for geometry-width and recorded-depth tests. Preserve both captured Backbuffer and HUDless hashes. Static-world auxiliary-depth motion is not full object history. Screen crops must follow the object or be labeled only as fixed-region differences.
 
 ## Document index
+
+- [BoundaryFG.md](BoundaryFG.md): Actual FG width sweep and real Cyberpunk HUDless replay; partial edge changes, persistent ghosts, no new game deployment.
 
 - [README.md](README.md): Manifest-based standalone provider harness. Repeated 24-frame 4x outputs match the previous replay; eight-frame 2x check passes. No completed ghosting fix or broad scene acceptance.
 - The README also records a separated-layer synthetic FG experiment and the independent GPU compositor contract, including a distinct correction footprint. Known synthetic correspondence or footprint is not evidence for a game capture/admission path.

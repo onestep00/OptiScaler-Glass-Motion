@@ -1,13 +1,15 @@
 # Standalone recorded DLSS-G replay
 
 - Created: 2026-09-10
-- Updated: 2026-09-10
+- Updated: 2026-09-11
 - Status: standalone implementation verified against recorded inputs; scene generalization and quality experiments continue
 - Deployment: standalone only; no game attachment
 - Deprecated: no
 - Scope: GFR1 evaluation packets, RGBA8 color/HUDless, RGBA16F motion, R32 depth, 2x/4x generated phases
 
 This executable creates a D3D12 device and a fresh native FG feature, uploads recorded inputs, calls the locally supplied NVIDIA provider and saves each generated phase. It has no window, input automation or game-scene simulation. Optional prepared MV/depth files are substituted before evaluation. Candidate preparation remains separate, allowing the production correction code or offline experiments to generate those files.
+
+The subsequent [boundary-width experiments](BoundaryFG.md) include exact synthetic 3D geometry and replay of actual Cyberpunk Backbuffer plus HUDless, with color hashes held fixed. They expose partial edge improvements and persistent ghosts; they do not approve deployment or recover full engine object motion.
 
 Paths, dimensions, frame count and multiplier come from a UTF-8 JSON manifest. Dimensions are configurable; the resource format profile is currently fixed and must be declared as `rgba8-mv16f-depth32`. Input files use `frame-NN-index-S.bin`, with S=0 color, 7 HUDless, 4 motion and 5 depth. The GFR1 packet carries recorded evaluation parameters and inline matrix/vector payloads. Unmapped non-null pointers are rejected. Frame zero resets the fresh feature. Creation defaults are explicitly reconstructed, not captured; unknown internal history is not reproduced.
 

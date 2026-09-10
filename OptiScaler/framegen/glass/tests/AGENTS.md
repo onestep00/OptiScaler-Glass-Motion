@@ -21,3 +21,4 @@
 - [../README.md](../README.md): Active module design, validation limits and standalone test instructions.
 - [replay/README.md](replay/README.md): Standalone manifest-based FG replay, identity/input/output validation and recorded-input comparisons. Requires user-supplied local recordings and binaries; not part of the synthetic-only default suite.
 - [ObjectMotion.md](ObjectMotion.md): Isolated geometry-motion and boundary-weight reference, verification and missing runtime inputs.
+- [replay/BoundaryFG.md](replay/BoundaryFG.md): Subsequent actual FG tests on exact synthetic geometry and recorded Cyberpunk inputs. The latter has no per-object history/alpha; width changes are not a finished fix.
