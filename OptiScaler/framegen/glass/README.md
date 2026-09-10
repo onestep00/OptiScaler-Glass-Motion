@@ -127,6 +127,8 @@ The current base shader cache contains 395 material names and 19,647 technique r
 
 Most further experiments run through [the standalone FG replay harness](tests/replay/README.md). Dimensions, counts and paths now come from manifests, and a standard-library Python runner verifies identities, actual input changes and generated outputs. Repeated 24-frame 4x outputs match the previous local replay exactly; an eight-frame 2x case also passes. Additional scenes and layer-driven candidates remain work in progress. In-game work is limited to missing input capture and final application checks. Neither the new layer extraction nor its synthetic test resolves the observed cup ghosting by itself.
 
+`GlassLayerComposite.hlsl` applies a further controlled result as isolated GPU code: generate the separated background once, then warp endpoint source color and RGB transmission along verified surface correspondences and compose `F + T*B`. This avoids assigning foreground motion to the transmitted background. In the no-refraction synthetic test it reduced cup error and the inspected duplicated outlines more than the four tested single-MV choices. Its GPU output matches the reference, including rejected-input fallback checks. It remains disconnected from the game host. Captured game layers, common linear color domain, refraction, overlapping layers, correspondence, lifetime and per-phase output access remain necessary before integration. A cheap composition shader alone does not establish that all required game capture work fits the requested budget; see the replay README for evidence and limitations.
+
 ## Menu controls and timing
 
 The FG settings window contains **Transparent surface correction (experimental)**:

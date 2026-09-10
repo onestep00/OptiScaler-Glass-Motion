@@ -12,3 +12,4 @@
 ## Document index
 
 - [README.md](README.md): Manifest-based standalone provider harness. Repeated 24-frame 4x outputs match the previous replay; eight-frame 2x check passes. No completed ghosting fix or broad scene acceptance.
+- The README also records a separated-layer synthetic FG experiment and the independent GPU compositor contract. Known synthetic correspondence is not evidence for a game capture/admission path.

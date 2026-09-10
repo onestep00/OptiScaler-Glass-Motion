@@ -14,3 +14,4 @@
 - [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Joint capture and repeated FG trials remain insufficient. Actual material transmission captured with separate target/material groups. Source-color and coverage extraction pass independent GPU tests; runtime integration and visual acceptance remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
+- `GlassLayerComposite.hlsl`: Experimental isolated source; synthetic actual-FG composition and GPU contract verified. Runtime input acquisition, color-domain validation and integration remain incomplete; see README.md and tests/replay/README.md.
