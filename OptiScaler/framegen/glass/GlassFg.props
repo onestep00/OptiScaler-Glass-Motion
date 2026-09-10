@@ -8,6 +8,10 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)SurfaceQueueLink.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ComputeRecording.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NativeSession.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)TaggedInputs.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.cpp" />
+    <None Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.LICENSE.txt" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassFgCompile.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassSettings.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassControls.h" />

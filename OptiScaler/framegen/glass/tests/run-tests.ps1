@@ -14,6 +14,17 @@ $recordingExe = Join-Path $buildDirectory 'ComputeRecording.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Compute recording test build failed' }
 & $recordingExe
 if ($LASTEXITCODE -ne 0) { throw 'Compute recording contract failed' }
+$tagsExe = Join-Path $buildDirectory 'TaggedInputs.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'TaggedInputs.cpp') "/Fe$tagsExe"
+if ($LASTEXITCODE -ne 0) { throw 'Tag metadata test build failed' }
+& $tagsExe
+if ($LASTEXITCODE -ne 0) { throw 'Tag metadata contract failed' }
+$bridgeExe = Join-Path $buildDirectory 'StreamlineTagBridge.exe'
+& $compiler @common "/I$optiDirectory" "/I$repository\external\streamline" `
+    (Join-Path $PSScriptRoot 'StreamlineTagBridge.cpp') "/Fe$bridgeExe" /link d3d12.lib dxgi.lib dxguid.lib
+if ($LASTEXITCODE -ne 0) { throw 'Streamline bridge test build failed' }
+& $bridgeExe
+if ($LASTEXITCODE -ne 0) { throw 'Streamline bridge contract failed' }
 $gpuExe = Join-Path $buildDirectory 'GpuResources.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'GpuResources.cpp') "/Fe$gpuExe" /link d3d12.lib dxgi.lib dxguid.lib
 if ($LASTEXITCODE -ne 0) { throw 'GPU test build failed' }

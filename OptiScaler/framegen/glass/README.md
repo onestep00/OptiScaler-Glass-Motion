@@ -8,7 +8,7 @@
 - Scope: Cyberpunk 2077 native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
 
-This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. No upstream FG evaluation, loader or unlock code is changed at this stage. Building this branch does **not** enable the correction in a game.
+This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. Native FG evaluation and ASI/MFG unlock code are unchanged at this stage. Building this branch does **not** enable the correction in a game.
 
 ## Boundaries
 
@@ -21,6 +21,7 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 | `SurfaceQueueLink.h` | Bounded CPU bookkeeping of observed submissions and fence dependencies; no GPU commands or waits |
 | `ComputeRecording.h` | Fresh COMPUTE recording admission, complete callback coverage and single-use epoch tickets |
 | `NativeSession.h` | Per-feature capture, queue provenance, state admission, correction phases, completion and timer coordination |
+| `StreamlineTagBridge.cpp`, `TaggedInputs.h` | Named common-plugin callback registration and bounded clone-state metadata admission |
 | `SurfaceSnapshotPool.h` | Four owned depth copies, producer/consumer completion and command-reset tracking, no wait on pool exhaustion |
 | `GlassControls.h`, `GlassSettings.cpp` | Atomic controls, separate INI persistence and OptiScaler menu widgets |
 | `GlassGpuTimer.h` | Sparse GPU timestamps, existing host completion fence and nonblocking readback |
@@ -47,6 +48,18 @@ The existing `D3D12Hooks::RestoreRoot` is conditional on user configuration and 
 Current native FG observations show a fresh COMPUTE recording before each of the three generated phases. `ComputeRecording` admits insertion only after observing a successful `Reset(nullptr)` and all applicable state-changing entry points. It rejects missing hooks, non-COMPUTE lists, initial PSOs, intervening state setters, repeated insertion and stale reset tickets. The host must retain the command identity, serialize callbacks and exclude only its own correction commands from state observations. It must observe `SetPipelineState1` and `SetProgram` when their extended interfaces exist. Unknown interface-query errors do not count as interface absence.
 
 After an admitted correction, `ClearState(nullptr)` restores the fresh binding contract before native FG. Resource barriers remain the pass's separate responsibility. This avoids a full binding-state save/replay and adds no queue submission or wait. The gate alone does not install hooks or establish resource lifetime; native host integration remains pending. Follow Microsoft's [Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset) and [ClearState](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-clearstate) contracts.
+
+### Streamline tag-state bridge
+
+`OnStreamlineCommonLoad` receives the parameter interface and parsed common-plugin version from OptiScaler's existing loader. `WrapStreamlineCommonFunction` wraps the common plugin's named startup/shutdown callbacks. After successful startup, it obtains `sl.param.global.getTag` through the existing typed `IParameters` ABI and registers a forwarding wrapper before dependent plugins initialize. It does not scan driver instructions or detour a private FG provider. Shutdown disables observation and restores the original registration if the bridge still owns it. A module reference keeps the original forwarding target mapped for cached callbacks; replacing that target in the same process is rejected.
+
+The wrapper reads a borrowed `CommonResource` result without modifying it or copying a `shared_ptr`. This is an **internal Streamline structure**, not a stable public FG input API. Its layout is isolated and admitted only for common versions 2.14.0/2.14.1. Offsets derive from the pinned NVIDIA 2.14.1 source and were observed on the installed 2.14.0 OTA binary. Structure GUID/version, clone identity, frame, state, viewport, extent and actual native-input pointer checks reject unknown inputs. Another Streamline ABI requires review; a driver patch alone does not select a new byte signature here. The game-specific auxiliary-depth identifier remains separately version-dependent.
+
+Native FG input states can be read through `ReadStreamlineStates` once per native evaluation. Phase 1 requires fresh matching depth/motion/HUD-less tags; incomplete, mixed-frame or repeated data are rejected. The current supported state is COPY_DEST on ordinary 2D textures, with no simultaneous-access flag. The bridge stores scalar identities under a short mutex because live tag retrieval and native Evaluate occur on different threads. It allocates no GPU resource and records no GPU command. These metadata checks do not replace surface snapshot ownership, command-state admission or queue provenance.
+
+Two bounded read-only game probes observed FG 91/90 times with no failures. After initial incomplete observations, native MV/color/depth matched their common tag clones in 81/78 evaluations respectively; all matched states were COPY_DEST and resource flags were 0x5. Diagnostic probes used an inspected, file-hash-guarded function RVA; that address is absent from this production bridge. Hooks were disabled afterwards. The new startup registration path passed an independent test with real D3D12 resource descriptions, unchanged forwarded outputs, different producer/consumer threads and shutdown behavior; it has not yet been deployed in the game.
+
+A subsequent bounded game probe compiled the production decoder, `TaggedInputs` and `ReadStreamlineStates` directly. All 155 returned tags decoded successfully; 91 of 93 observed native evaluations passed metadata admission, with two initial incomplete phases rejected. All 104 observed FG calls succeeded. The probe added no GPU command or input substitution and was disabled afterwards. This validates live decoding/admission; the game's startup registration path and actual correction are still pending. Release x64 build and all six standalone executables passed after the final code changes.
 
 ## Existing MFG unlock
 
@@ -84,6 +97,8 @@ Settings changes are sampled when preparing phase 1; phases 2/3 retain the same 
 - Compute recording contract test: individually missing each of 16 observations, failed Reset, initial PSO, stale tickets, repeated insertion, changed identity and non-COMPUTE lists were rejected. This CPU test checks admission semantics, not the platform hook installer.
 - Native session replay: a DIRECT queue uploads the recorded auxiliary depth and the pool captures it; native-style Signal/Wait links it to the COMPUTE queue. The session runs correction and actual 4x FG in one recording. All 96 calls succeeded and all 189 generated/corrected-input files matched the prior replay. Stale frame 19 was bypassed and completion plus discarded-recording release was verified. File-upload/readback waits belong to the standalone harness, not the session.
 - Standalone native session test: missing dependency observation, ambiguous captures and intervening predication calls reject admission. Unsubmitted and GPU-in-flight release attempts are rejected; completion after Reset permits release. Timing is unavailable before completion, delivered once afterwards, and stop prevents new captures/evaluations. This uses an independent GPU device and synthetic inputs, not a game attachment or a quality test.
+
+- Tag bridge tests: unsupported common versions and failed startup do not install a reader; named registration preserves output bytes and forwarding after shutdown. Fresh 2x/4x phases, cross-thread metadata, stale/mixed/missing data, changed handles/states/viewports/offsets and malformed structure/extent rejection passed. These tests do not prove the deployed game's startup interception.
 
 Raw game captures and diagnostic DLLs are local investigation artifacts and are not part of this repository. The source-only standalone tests below are included; the recorded FG observations are not a portable end-to-end test suite.
 

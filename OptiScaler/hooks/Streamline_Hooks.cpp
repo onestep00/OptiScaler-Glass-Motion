@@ -11,6 +11,7 @@
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/dlssg/MfgUnlock.h>
+#include <framegen/glass/StreamlineTagBridge.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
 
@@ -1073,6 +1074,8 @@ bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, co
     configJson.at("version").at("minor").get_to(slVersion.minor);
     configJson.at("version").at("build").get_to(slVersion.patch);
 
+    GlassFg::OnStreamlineCommonLoad(result ? params : nullptr, slVersion.major, slVersion.minor, slVersion.patch);
+
     // Completely disables Streamline hooks
     // if (true)
     //    configJson["hooks"].clear();
@@ -1741,7 +1744,7 @@ void* StreamlineHooks::hkcommon_slGetPluginFunction(const char* functionName)
         return &hkcommon_slSetParameters_sl1;
     }
 
-    return o_common_slGetPluginFunction(functionName);
+    return GlassFg::WrapStreamlineCommonFunction(functionName, o_common_slGetPluginFunction(functionName));
 }
 
 void StreamlineHooks::updateForceReflex()

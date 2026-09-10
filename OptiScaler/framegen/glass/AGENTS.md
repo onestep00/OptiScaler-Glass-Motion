@@ -11,6 +11,6 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. Native session coordinator, two-queue 4x replay equivalence, admission/lifetime tests, Release build, controls and timing verified. Contains OptiScaler reuse and platform callback contracts. Windows hook wiring, game deployment and final visual acceptance remain incomplete.
+- [README.md](README.md): Active experimental module. Native session coordinator, two-queue 4x replay, admission/lifetime tests, named Streamline tag bridge, controls and timing. Common-tag/native-input state matches observed live; bridge startup tested independently. Windows queue/capture wiring, game deployment and final visual acceptance remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
