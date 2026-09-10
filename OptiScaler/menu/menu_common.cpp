@@ -18,6 +18,7 @@
 
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/dlssg/MfgUnlock.h>
+#include <framegen/glass/GlassControls.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -3158,6 +3159,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
 void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
+    GlassFg::RenderSettings();
     auto& state = ctx.state;
     auto config = ctx.config;
     auto& menuResScale = ctx.menuResScale;

@@ -1,0 +1,134 @@
+#include "pch.h"
+#include "GlassControls.h"
+#include <Util.h>
+#include <SimpleIni.h>
+#include <imgui/imgui.h>
+#include <atomic>
+#include <cmath>
+#include <mutex>
+
+namespace GlassFg
+{
+namespace
+{
+std::atomic<uint32_t> controls { Controls {}.packed() };
+std::once_flag loaded;
+std::atomic<double> latestMilliseconds { -1.0 };
+
+std::filesystem::path settingsPath() { return Util::DllPath().parent_path() / L"OptiScaler.Glass.ini"; }
+
+bool load()
+{
+    CSimpleIniA ini;
+    const auto path = settingsPath();
+    std::error_code error;
+    if (!std::filesystem::exists(path, error) && !error)
+    {
+        controls.store(Controls {}.packed(), std::memory_order_relaxed);
+        return true;
+    }
+    if (error || ini.LoadFile(path.c_str()) < 0)
+        return false;
+    latestMilliseconds.store(-1.0, std::memory_order_relaxed);
+    const auto strength = ini.GetLongValue("GlassFG", "Strength", 100);
+    controls.store(Controls { ini.GetBoolValue("GlassFG", "Enabled", false),
+                              static_cast<unsigned>(std::clamp(strength, 0L, 100L)),
+                              ini.GetBoolValue("GlassFG", "MeasureGpuTime", true) }
+                       .packed(),
+                   std::memory_order_relaxed);
+    return true;
+}
+
+bool save(Controls value)
+{
+    CSimpleIniA ini;
+    const auto path = settingsPath();
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error || (exists && ini.LoadFile(path.c_str()) < 0))
+        return false;
+    ini.SetBoolValue("GlassFG", "Enabled", value.enabled);
+    ini.SetLongValue("GlassFG", "Strength", std::min(value.strength, 100u));
+    ini.SetBoolValue("GlassFG", "MeasureGpuTime", value.measureGpuTime);
+    auto temporary = path;
+    temporary += L".tmp";
+    if (ini.SaveFile(temporary.c_str()) < 0)
+        return false;
+    // Preserve the old file if the replacement fails. The UI reports failure.
+    return MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+}
+} // namespace
+
+Controls ReadControls()
+{
+    std::call_once(loaded, [] { load(); });
+    return Controls::unpack(controls.load(std::memory_order_relaxed));
+}
+
+void WriteControls(Controls value)
+{
+    auto previous = ReadControls();
+    if (previous.measureGpuTime != value.measureGpuTime || previous.enabled != value.enabled ||
+        previous.strength != value.strength)
+        latestMilliseconds.store(-1.0, std::memory_order_relaxed);
+    controls.store(value.packed(), std::memory_order_relaxed);
+}
+
+void PublishGpuMilliseconds(double milliseconds)
+{
+    if (std::isfinite(milliseconds) && milliseconds >= 0.0)
+        latestMilliseconds.store(milliseconds, std::memory_order_relaxed);
+}
+
+void RenderSettings()
+{
+    if (!ImGui::CollapsingHeader("Transparent surface correction (experimental)##GlassFG"))
+        return;
+    ImGui::PushID("GlassFG");
+    auto value = ReadControls();
+    bool changed = ImGui::Checkbox("Enable glass motion correction", &value.enabled);
+    int strength = static_cast<int>(value.strength);
+    changed |= ImGui::SliderInt("Correction strength", &strength, 0, 100, "%d%%");
+    value.strength = static_cast<unsigned>(strength);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Lower values require stronger surface evidence and correct fewer regions.\n"
+                          "0%% bypasses correction. 100%% uses the validated candidate thresholds.\n"
+                          "Surface and background motion vectors are not averaged.");
+    if (changed)
+        WriteControls(value);
+    const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);
+    if (!value.active())
+        ImGui::TextDisabled("GPU correction: inactive");
+    else if (!value.measureGpuTime)
+        ImGui::TextDisabled("GPU correction: timing disabled in INI");
+    else if (milliseconds >= 0.0)
+        ImGui::Text("GPU correction: %.3f ms (last sample)", milliseconds);
+    else
+        ImGui::TextDisabled("GPU correction: waiting for a completed sample");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Samples one in 30 rendered frames. Reads completed results without waiting.\n"
+                          "Measures correction input copies and compute passes; excludes DLSS-G and surface capture.");
+
+    static const char* result = nullptr;
+    if (ImGui::Button("Save glass settings"))
+        result = save(value) ? "Glass settings saved." : "Could not save glass settings.";
+    ImGui::SameLine();
+    if (ImGui::Button("Reload glass settings"))
+        result = load() ? "Glass settings reloaded." : "Could not load glass settings.";
+    ImGui::SameLine();
+    if (ImGui::Button("Reset glass defaults"))
+    {
+        WriteControls({});
+        result = "Defaults restored. Save to keep them.";
+    }
+    if (result)
+        ImGui::TextWrapped("%s", result);
+    ImGui::TextDisabled("Saved separately in OptiScaler.Glass.ini");
+    ImGui::TextWrapped("Runtime integration pending: this build does not yet apply correction in the game.");
+    ImGui::BeginDisabled();
+    bool preview = false;
+    ImGui::Checkbox("Show selected regions (pending runtime preview)", &preview);
+    ImGui::EndDisabled();
+    ImGui::PopID();
+}
+} // namespace GlassFg

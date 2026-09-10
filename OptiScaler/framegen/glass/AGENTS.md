@@ -11,4 +11,6 @@
 
 ## Document index
 
-- [README.md](README.md): Active experimental module. Release x64 builds and recorded 4x output equivalence verified; native host connection and final visual acceptance remain incomplete. Contains boundaries and upstream update procedure.
+- [README.md](README.md): Active experimental module. Release x64 builds, adjustable controls, sparse GPU timing and recorded 4x output equivalence verified; native host connection and final visual acceptance remain incomplete. Contains boundaries and upstream update procedure.
+
+- [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.

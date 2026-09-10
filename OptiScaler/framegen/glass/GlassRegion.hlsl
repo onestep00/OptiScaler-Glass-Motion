@@ -19,7 +19,7 @@ SamplerState LinearClamp : register(s0);
 cbuffer Parameters : register(b0) {
     uint2 MotionSize; float2 CurrentJitter;
     float2 MotionToUV; float2 InverseColorSize;
-    uint HistoryValid; uint IdentityOnly; uint ValidateColor; uint Padding;
+    uint HistoryValid; uint IdentityOnly; uint ValidateColor; float Strength;
     row_major float4x4 ClipToPreviousClip;
 };
 uint2 gridSize(){return (MotionSize+3)/4;}
@@ -116,7 +116,7 @@ void ApplyRegions(uint3 id:SV_DispatchThreadID){
     float surface;
     if(HistoryValid&&!IdentityOnly&&Failures[0]==0&&foreground(p,surface)){
         uint root=Parents[cellIndex(p/4)];Region r=Regions[root];
-        bool accepted=float(r.separated)>=float(r.area)*.2f&&r.area>=80u&&r.seeds>=16u&&float(r.seeds)>=float(r.area)*.08f&&r.evidence>=32u&&float(r.evidence)>=float(r.area)*.2f&&r.baseError>r.evidence*3u&&float(r.surfaceError)<float(r.baseError)*1.02f+float(r.evidence);
+        bool accepted=float(r.separated)>=float(r.area)*.2f&&r.area>=80u&&r.seeds>=16u&&float(r.seeds)>=float(r.area)*(.08f+(1-saturate(Strength))*.42f)&&r.evidence>=32u&&float(r.evidence)>=float(r.area)*.2f&&r.baseError>r.evidence*3u&&float(r.surfaceError)<float(r.baseError)*1.02f+float(r.evidence);
         float2 s;float expected;
         if(accepted&&geometry(p,surface,s,expected)){mv.xy=s/MotionToUV;depth=surface;selected=1;}
     }

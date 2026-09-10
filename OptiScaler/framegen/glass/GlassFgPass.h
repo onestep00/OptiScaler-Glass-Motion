@@ -1,5 +1,7 @@
 #pragma once
 #include "GlassRegionGpu.h"
+#include "GlassControls.h"
+#include "GlassGpuTimer.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -193,8 +195,14 @@ class Pass
 
     // Input states come from the host; COPY_DEST is not inferred from a format.
     PreparedInputs prepare(ID3D12GraphicsCommandList* cmd, const Inputs& inputs, const SurfaceSnapshot& snapshot,
-                           const D3D12_RESOURCE_STATES (&states)[3])
+                           const D3D12_RESOURCE_STATES (&states)[3], Controls controls = { true, 100 },
+                           GpuTimer* timer = nullptr)
     {
+        if (inputs.index == 1 && !controls.active())
+        {
+            invalidateHistory();
+            return {};
+        }
         if (!initialized || !cmd || !inputs.valid() || !matches(inputs, snapshot) ||
             states[0] != D3D12_RESOURCE_STATE_COPY_DEST || states[2] != D3D12_RESOURCE_STATE_COPY_DEST ||
             (cmd->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT && cmd->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE))
@@ -210,6 +218,8 @@ class Pass
                 invalidateHistory();
                 return {};
             }
+            const auto timing =
+                timer && controls.measureGpuTime && dispatchCount % 30 == 0 ? timer->begin(cmd) : GpuTimer::Ticket {};
             ID3D12Resource* originals[] = { inputs.motion, inputs.color, inputs.depth, snapshot.resource };
             for (unsigned i = 0; i < 4; ++i)
             {
@@ -223,7 +233,9 @@ class Pass
             surface.dispatch(cmd, inputs.scaleX, inputs.scaleY, inputs.jitterX, inputs.jitterY,
                              inputs.clipToPrevious.data(), inputs.reset != 0, false, true, false);
             region.dispatch(cmd, surface, inputs.scaleX, inputs.scaleY, inputs.jitterX, inputs.jitterY,
-                            inputs.clipToPrevious.data(), inputs.reset != 0);
+                            inputs.clipToPrevious.data(), inputs.reset != 0, controls.coverage());
+            if (timer && timing)
+                timer->end(cmd, timing);
             ++dispatchCount;
             lastSurfaceGeneration = snapshot.generation;
             batch = inputs;

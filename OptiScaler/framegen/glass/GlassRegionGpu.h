@@ -189,7 +189,7 @@ class GlassRegionGpu
         return true;
     }
     void dispatch(ID3D12GraphicsCommandList* cmd, GlassSurfaceGpu& surface, float sx, float sy, float jx, float jy,
-                  const float* matrix, bool reset)
+                  const float* matrix, bool reset, float strength = 1.f)
     {
         for (auto r : surface.inputs)
             GlassSurfaceGpu::transition(cmd, r, D3D12_RESOURCE_STATE_COPY_DEST,
@@ -198,7 +198,8 @@ class GlassRegionGpu
         {
             unsigned w, h;
             float jx, jy, sx, sy, cx, cy;
-            unsigned valid, identity, validate, pad;
+            unsigned valid, identity, validate;
+            float strength;
             float matrix[16];
         };
         Constants c { width,
@@ -212,7 +213,7 @@ class GlassRegionGpu
                       surface.history && !reset,
                       0,
                       1,
-                      0,
+                      strength,
                       {} };
         memcpy(c.matrix, matrix, 64);
         cmd->SetDescriptorHeaps(1, &heap);

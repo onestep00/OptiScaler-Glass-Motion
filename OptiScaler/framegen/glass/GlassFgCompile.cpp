@@ -2,6 +2,7 @@
 #include "GlassFgPass.h"
 #include "CyberpunkSurfacePass.h"
 #include "SurfaceQueueLink.h"
+#include "SurfaceSnapshotPool.h"
 #include <nvsdk_ngx_params.h>
 
 // Compile the NGX adapter against the same MSVC ABI and SDK as the native host.
