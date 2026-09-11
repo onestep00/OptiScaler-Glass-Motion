@@ -6,6 +6,7 @@
 #include "../GeometryCoverageRecorder.h"
 #include "ExperimentDrawCheck.h"
 #include "ModuleRecorderCheck.h"
+#include "InFlightCaptureCheck.h"
 extern bool geometryFixturePacket;
 extern bool geometryFixtureMissingIdentity;
 extern std::uint32_t geometryFixtureFrame;
@@ -193,10 +194,12 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--experiment") == 0 ||
                                             wcscmp(argv[3], L"--capture-module") == 0 ||
                                             wcscmp(argv[3], L"--module-recorder") == 0 ||
+                                            wcscmp(argv[3], L"--inflight-recorder") == 0 ||
                                             wcscmp(argv[3], L"--controlled-recorder") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
-        const bool controlledRecorder = argc == 4 && wcscmp(argv[3], L"--controlled-recorder") == 0;
+        const bool inflightRecorder = argc == 4 && wcscmp(argv[3], L"--inflight-recorder") == 0;
+        const bool controlledRecorder = inflightRecorder || (argc == 4 && wcscmp(argv[3], L"--controlled-recorder") == 0);
         const bool moduleRecorder = controlledRecorder || (argc == 4 && wcscmp(argv[3], L"--module-recorder") == 0);
         const bool recorder = moduleRecorder || (argc == 4 && wcscmp(argv[3], L"--recorder") == 0);
         const bool captureModule = argc == 4 && wcscmp(argv[3], L"--capture-module") == 0;
@@ -213,12 +216,16 @@ int wmain(int argc, wchar_t** argv)
         auto vs = read(dir / "instances.dxil");
         auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
         Device g;
+        if (commands)
+        {
+            require(GlassFg::StartGeometryViews(g.d.Get()), "Install render-target descriptor observer");
+            require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
+        }
         ExperimentDrawCheck experimentCheck;
         ModuleRecorderCheck moduleRecorderCheck;
         if (controlledRecorder) moduleRecorderCheck.useControl();
         if (experiment) experimentCheck.start(g.d.Get(), dir, captureModule);
-        const auto recorderOutput = moduleRecorder ? moduleRecorderCheck.start(g.d.Get(), dir, argv[2]) :
-            std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
+        auto recorderOutput = std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
         std::filesystem::path secondModuleOutput;
         if (recorder && !moduleRecorder)
         {
@@ -226,11 +233,6 @@ int wmain(int argc, wchar_t** argv)
             const auto request = recorderOutput / "request.txt";
             { std::ofstream file(request); file << recorderOutput.string() << '\n'; }
             GlassFg::StartGeometryCoverageRecorder(g.d.Get(), std::filesystem::absolute(argv[2]), request);
-        }
-        if (commands)
-        {
-            require(GlassFg::StartGeometryViews(g.d.Get()), "Install render-target descriptor observer");
-            require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
         }
         struct Stop
         {
@@ -349,6 +351,12 @@ int wmain(int argc, wchar_t** argv)
                               : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
                                                std::filesystem::absolute(argv[2]));
         const auto& root = *lease->root;
+        if (moduleRecorder)
+        {
+            if (inflightRecorder)
+                moduleRecorderCheck.selectNext(lease->identity, GlassFg::FindGeometryView(rtvs[1], 1)->resource);
+            recorderOutput = moduleRecorderCheck.start(g.d.Get(), dir, argv[2]);
+        }
         if (captureModule) experimentCheck.prime(lease, argv[2]);
         rootInvalidation(root, original.Get());
         capturePso = lease->instrumented;
@@ -423,9 +431,11 @@ int wmain(int argc, wchar_t** argv)
         std::vector<char> priorCapture;
         UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0, auxiliaryWritten = 0;
         double maximum = 0;
+        unsigned recorderSplitFrame = 5;
+        bool checkedInFlight = false;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
-            if (moduleRecorder && frame == 5)
+            if (moduleRecorder && !inflightRecorder && frame == 5)
             {
                 moduleRecorderCheck.selectNext(lease->identity, GlassFg::FindGeometryView(rtvs[1], 1)->resource);
                 secondModuleOutput = moduleRecorderCheck.replace();
@@ -458,7 +468,7 @@ int wmain(int argc, wchar_t** argv)
             if (recorder)
             {
                 geometryFixtureFrame = frame;
-                geometryFixtureMissingIdentity = frame >= 5;
+                geometryFixtureMissingIdentity = frame >= recorderSplitFrame;
             }
             UINT order[10] {};
             std::array<GlassFg::GeometryInstance, 10> mapping {};
@@ -655,8 +665,18 @@ int wmain(int argc, wchar_t** argv)
             g.c->CopyBufferRegion(readback.Get(), 5 * imageBytes + SOBytes + HistoryBytes, capture.Get(), 0,
                                   CaptureBytes);
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            g.finish();
-            if (recorder || captureModule)
+            if (inflightRecorder && !checkedInFlight && GlassFg::GetGeometryCommandStats().captureRecorded)
+            {
+                require(frame < 5, "Initial module capture was not ready in time for replacement");
+                checkInFlightCapture(g, [&]
+                {
+                    recorderSplitFrame = frame + 1;
+                    secondModuleOutput = moduleRecorderCheck.replace();
+                }, [&] { moduleRecorderCheck.requirePendingOldModule(); });
+                checkedInFlight = true;
+            }
+            else g.finish();
+            if ((recorder && !controlledRecorder) || captureModule)
             {
                 ID3D12CommandList* submitted[] { g.c.Get() };
                 GlassFg::NotifyGeometryCaptureSubmit(g.q.Get(), 1, submitted);
@@ -862,7 +882,7 @@ int wmain(int argc, wchar_t** argv)
                             colorTarget.defaultDescriptor && depthTarget.defaultDescriptor,
                         "Captured target bindings differ from actual draw resources");
             }
-            require(captureDirectory == recorderOutput ? frame <= 4 : frame >= 5,
+            require(captureDirectory == recorderOutput ? frame < recorderSplitFrame : frame >= recorderSplitFrame,
                     "Capture request reused an earlier session's recording");
             const auto data = read(captureDirectory / "objects-0.bin");
             constexpr UINT words = 1 + (W * H + 31) / 32;
@@ -872,7 +892,7 @@ int wmain(int argc, wchar_t** argv)
                 {
                     UINT word;
                     memcpy(&word, data.data() + (i * words + 1 + p / 32) * 4, 4);
-                    const unsigned expected = frame >= 5 && i == 1 ? 0u : expectedCoverage[(frame * 3 + i) * W * H + p];
+                    const unsigned expected = frame >= recorderSplitFrame && i == 1 ? 0u : expectedCoverage[(frame * 3 + i) * W * H + p];
                     require(((word >> (p % 32)) & 1) == expected,
                             "Recorded engine-mapped material coverage differs from original draw");
                 }
@@ -903,12 +923,17 @@ int wmain(int argc, wchar_t** argv)
                 }
                 missingMapped += originalCovered && !mapped;
             }
-            require(frame >= 5 ? missingMapped > 20 : missingMapped == 0,
+            require(frame >= recorderSplitFrame ? missingMapped > 20 : missingMapped == 0,
                     "Reference did not distinguish deliberately missing object mapping");
             }
             if (moduleRecorder)
             {
-                if (controlledRecorder) printf("PASS event_control=1 submission_admission=1 duplicate_load_rollback=1 asynchronous_retirement=1 same_process_replacement=1 game_hooks=0\n");
+                if (inflightRecorder)
+                {
+                    require(checkedInFlight, "No captured GPU work was blocked for the replacement test");
+                    printf("PASS capture_owner_inflight_replacement=1 actual_queue_observer=1 reset_before_completion_retained=1 split_frame=%u\n", recorderSplitFrame);
+                }
+                if (controlledRecorder) printf("PASS event_control=1 submission_admission=1 actual_submission_hooks=1 duplicate_load_rollback=1 asynchronous_retirement=1 same_process_replacement=1 game_hooks=0\n");
                 printf("PASS independent_module_recorder=1 worker_prepared_resources=1 saved_original_samples=%u "
                        "original_pixels=%llu same_draw_reference=1 module_generations=2 actual_unload=2 "
                        "missing_mapping_detected=1 motion_produced=0 game_hooks=0\n", 6 * W * H, exact);

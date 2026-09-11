@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [Experiments.md](Experiments.md): Census v1 saves 56 actual fixture API calls, including 8 missing packets. Targeted generation-two capture and CPU-callback lifetime checks pass. No new game or FG evidence.
+- [Experiments.md](Experiments.md): Census v1 saves 56 fixture calls. Actual public queue hooks and in-flight captured submission/Reset/replacement preserve both DLLs and original pixels; final unload passes. No game or FG evidence.
 
 - [GeometryTargets.md](GeometryTargets.md): GeometryTargetViews verifies public view/heap/copy hooks, OM snapshot stability and no texture retention. Controlled recorder saves exact actual test-draw targets. No game resource or FG validation.
 

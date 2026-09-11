@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: event control, raw draw census and targeted module recapture pass independent GPU checks; not deployed
+- Status: actual public submission hooks and GPU-in-flight capture replacement pass independent checks; deployment preparation
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -85,9 +85,23 @@ producing the same reference capture. Original 143,360 pixels and 107,520 materi
 samples pass; no game objects or new MV are produced. The existing capture-module
 mode also preserves 3,563 shader-MV samples. Full Release compilation passes.
 
-The test still drains the GPU before manually forwarding submissions. Actual
-queue-observer delivery and in-flight replacement through this capture owner
-must pass before deployment. The earlier four-pixel game failure is unresolved.
+The later controlled fixture now uses the actual public queue observer rather
+than manual forwarding. `ObservedCaptureQueue.h` installs production
+`D3D12Observer` after `GeometryCommands` and uses NativeHost's submission forwarding
+and internal-signal exclusion sequence. The manual module mode remains separate.
+
+`--inflight-recorder` additionally gates a real submission containing a module
+capture, replaces A with B, then resets that command onto a fresh allocator while
+the GPU submission is still pending. Control status requires both DLLs and pending
+capture jobs to remain. After releasing the gate, the original color and material
+readbacks must match, and both generations eventually unload. The observed split
+was frame 3; it is selected by actual recorded capture availability, not assumed
+GPU readiness. No original upload inputs or pending allocator are reused while
+the gate is closed. This artificial wait exists only in the independent fixture.
+56 raw calls, 143,360 original pixels and 107,520 material samples pass with this
+ordering. This validates the capture-owner/observer combination on the test
+device, not game frame/FG correspondence. The earlier four-pixel game failure
+and actual object contours/MV remain unresolved.
 
 Draw payload version 2 introduced `ExperimentPipelineAbi.h` / `ExperimentPipelineService.h`.
 An explicit opaque token retains the existing immutable pipeline-cache entry.
@@ -216,8 +230,9 @@ infer that an unobserved submission did not occur.
 through the event/file client and independent resident control thread. It verifies
 missing-observer rejection before module preparation, duplicate-path load rollback,
 asynchronous retirement, worker saves, original pixels and two actual unloads.
-The fixture forwards every submission manually after its GPU drain. It does not
-exercise NativeHost's live queue observer or GPU-in-flight hot replacement.
+The controlled fixture now forwards through the production public D3D12 observer.
+The subsequent `--inflight-recorder` mode covers GPU-in-flight hot replacement as
+described above. Neither mode attaches to a game or invokes NativeHost's FG logic.
 
 Build `tests/ExperimentRequest.cpp` with C++20, `/EHsc /MD /W4 /WX` as a standalone
 diagnostic client. Its interface is:

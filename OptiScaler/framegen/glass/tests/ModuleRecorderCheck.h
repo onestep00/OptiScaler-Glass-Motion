@@ -2,6 +2,7 @@
 #include "../ExperimentCaptureOwner.h"
 #include "../ExperimentControl.h"
 #include "ExperimentClient.h"
+#include "ObservedCaptureQueue.h"
 #include <vector>
 #include <future>
 #include <thread>
@@ -76,7 +77,8 @@ class ModuleRecorderCheck
                 require(blocked.at("ok") == "0" && blocked.at("active_generation") == "0" &&
                         blocked.at("submission_observer_ready") == "0" && !std::filesystem::exists(output),
                         "Missing submission observation did not block capture preparation");
-                submissionReady.store(true); // This fixture forwards every actual submission.
+                require(CaptureQueueTest::install(device), "Install actual public submission observer");
+                submissionReady.store(true);
             }
             const auto result = ExperimentRequest(controlDirectory, GetCurrentProcessId(), "load", loaded);
             require(result.at("ok") == "1", "Control module load rejected");
@@ -97,6 +99,14 @@ class ModuleRecorderCheck
         return output;
     }
     std::filesystem::path replace() { return start(observedDevice, artifactsPath, compilerPath); }
+    void requirePendingOldModule()
+    {
+        require(controlled && generations == 2, "In-flight test needs two controlled generations");
+        const auto result = ExperimentRequest(controlDirectory, GetCurrentProcessId(), "status");
+        require(result.at("ok") == "1" && result.at("loaded_modules") == "2" &&
+                std::stoull(result.at("capture_pending")) > 0 && GetModuleHandleW(loadedPaths.front().c_str()),
+                "In-flight captured recording lost its original module");
+    }
     void collect() { if (!controlled) { if (owner) owner->collect(); unloaded += runtime.collect(); } }
     void finish()
     {
@@ -129,14 +139,13 @@ class ModuleRecorderCheck
             const auto output = path.parent_path() / "capture";
             std::ifstream done(output / "draw-census.done");
             const std::string status((std::istreambuf_iterator<char>(done)), {});
-            require(status.find("rows=28\n") != std::string::npos && status.find("contended=0\n") != std::string::npos &&
+            require(status.find("contended=0\n") != std::string::npos &&
                     status.find("overflow=0\n") != std::string::npos, "Census dropped fixture draws");
-            require(std::filesystem::file_size(output / "draw-census.targets.bin") ==
-                    28 * 9 * sizeof(GlassExperimentTarget), "Census target row size mismatch");
             std::ifstream csv(output / "draw-census.csv"); std::string line;
-            std::getline(csv, line); uint64_t prior = 0;
+            std::getline(csv, line); uint64_t prior = 0; unsigned rows = 0;
             while (std::getline(csv, line))
             {
+                ++rows;
                 std::istringstream values(line); std::vector<std::string> fields; std::string field;
                 while (std::getline(values, field, ',')) fields.push_back(field);
                 require(fields.size() == 57, "Census columns incomplete");
@@ -164,6 +173,10 @@ class ModuleRecorderCheck
                     }
                 }
             }
+            require(std::filesystem::file_size(output / "draw-census.targets.bin") ==
+                    rows * 9 * sizeof(GlassExperimentTarget) &&
+                    status.find("rows=" + std::to_string(rows) + "\n") != std::string::npos,
+                    "Census row/target count mismatch");
         }
         require(indexed == 40 && missing == 8 && direct == 8 && indirect == 8, "Census operation coverage mismatch");
         std::ifstream filter(loadedPaths.back().parent_path() / "capture" / "selection.status");
@@ -171,6 +184,7 @@ class ModuleRecorderCheck
         require(filterStatus.find("enabled=1\n") != std::string::npos && filterStatus.find("matched=0\n") == std::string::npos &&
                 filterStatus.find("rejected=0\n") == std::string::npos, "Targeted module did not filter original draws");
         printf("PASS raw_census=56 indexed=40 missing_packets=8 nonindexed=8 indirect=8 gpu_copies=0 game_objects=0\n");
+        if (controlled) require(CaptureQueueTest::submissions() >= 10, "Actual submissions not observed");
     }
     ~ModuleRecorderCheck()
     {

@@ -85,6 +85,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Module capture preparation/recording/retiremen
 if ($LASTEXITCODE -ne 0) { throw 'Independent coverage module preparation/replacement/capture failed' }
 & $instances $build $dxc --controlled-recorder
 if ($LASTEXITCODE -ne 0) { throw 'Event-controlled module replacement/capture failed' }
+& $instances $build $dxc --inflight-recorder
+if ($LASTEXITCODE -ne 0) { throw 'Actual observer/in-flight capture replacement failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $instances $build $dxc --recorder
