@@ -108,6 +108,25 @@ runtime cache admission follows from these raw fields yet.
 
 ## Array update boundary
 
+### Native previous-transform alternative
+
+An offline scalar-dependency trace of the already live-checked native VS
+`7193f0d2...` separates its current output 4 from previous output 5. Current uses
+per-instance input 6 rows 0--2. Previous instead uses fixed b7 rows 1--3 and
+b1 rows 16--19; no per-instance input contributes to that previous output.
+The translation components are integer-bitcast, origin-relative values, not
+ordinary float matrix translations. This shader cannot simply replace the
+40-instance cup VS while preserving distinct previous transforms for each cup.
+
+The captured cup VS uses per-instance current transforms and b1 rows 28--31.
+Both descriptors expose a single b7 CBV at root table slot 3, but this establishes
+neither equal buffer contents nor valid previous data at the transparent draw.
+These static data dependencies exclude control-flow/runtime validity claims.
+Local evidence: `work/glass-native-input-dependencies-v1/{native,cups}.json`,
+original shader disassembly and the prior `glass-bindings-live-v12` layouts.
+Keep grouped source identity/history work active; a matching root layout alone
+does not remove that requirement. No shader swap or game input change was made.
+
 Static direct-call tracing located the array setter's caller in an engine update
 worker. The worker passes an owner, bounds and a span of 48-byte transforms from
 an update record, then consumes the setter's AL result. This establishes a
