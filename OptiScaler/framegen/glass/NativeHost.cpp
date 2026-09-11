@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "GeometryCreation.h"
 #include "NativeHost.h"
 #include "NativeSession.h"
 #include "D3D12Observer.h"
@@ -281,6 +282,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         {
             std::fprintf(r.log, "NATIVE_HOST evaluations=%llu substitutions=%llu captures=%llu result=%x\n",
                          r.evaluations, r.substitutions, r.captures, static_cast<unsigned>(result));
+            ReportGeometryHost(r.log);
             std::fflush(r.log);
         }
         r.reap();

@@ -1,5 +1,6 @@
 #pragma once
 #include "GeometryPipelineCache.h"
+#include <cstdio>
 
 namespace GlassFg
 {
@@ -40,4 +41,5 @@ HRESULT CreateObservedGeometryRoot(Create original, ID3D12Device* device, UINT n
 // Thin OptiScaler adapter: executable admission, module-relative compiler path,
 // and one startup diagnostic. It does not enable draw/input replacement.
 void InitializeGeometryHost(ID3D12Device* device) noexcept;
+void ReportGeometryHost(FILE* log) noexcept;
 } // namespace GlassFg

@@ -69,6 +69,7 @@ class CommandLifetime
     }
 
     const void* identity() const { return state ? state->identity : nullptr; }
+    bool wasDestroyed() const { return state && state->destroyed.load(std::memory_order_acquire); }
     const void* takeDestroyed()
     {
         if (!state || !state->destroyed.load(std::memory_order_acquire))

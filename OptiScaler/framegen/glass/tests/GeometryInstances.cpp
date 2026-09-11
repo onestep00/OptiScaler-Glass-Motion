@@ -1,12 +1,15 @@
 #include "GeometryTestDevice.h"
 #include "../GeometryPipelineCache.h"
 #include "../GeometryCreation.h"
+#include "../GeometryCommands.h"
+extern bool geometryFixturePacket;
 #pragma warning(push, 0)
 #include <d3dx/d3dx12.h>
 #pragma warning(pop)
 
 static std::shared_ptr<const GlassFg::GeometryPipelineEntry>
-observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc)
+observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+                 bool keepActive)
 {
     auto extra = desc;
     extra.SampleMask = 0x7fffffff;
@@ -34,9 +37,12 @@ observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D1
     require(stats.active && stats.roots == 1 && stats.graphics == 2 && stats.streams == 1 && stats.cache.roots == 1 &&
                 stats.cache.pipelines == 1 && stats.cache.ready == 1 && !stats.cache.rejected && !stats.cache.pending,
             "Creation observer missed or recursively captured a call");
-    GlassFg::StopGeometryCreation();
-    require(!GlassFg::FindGeometryPipeline(original) && !GlassFg::GetGeometryCreationStats().active,
-            "Stopped creation observer remained active");
+    if (!keepActive)
+    {
+        GlassFg::StopGeometryCreation();
+        require(!GlassFg::FindGeometryPipeline(original) && !GlassFg::GetGeometryCreationStats().active,
+                "Stopped creation observer remained active");
+    }
     return lease;
 }
 
@@ -118,12 +124,15 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 3 || (argc == 4 && wcscmp(argv[3], L"--observe") == 0),
-                "GeometryInstances artifact-directory dxcompiler.dll [--observe]");
+        require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0)),
+                "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands]");
         const bool observed = argc == 4;
+        const bool commands = observed && wcscmp(argv[3], L"--commands") == 0;
         const std::filesystem::path dir(argv[1]);
         auto vs = read(dir / "instances.dxil"), ps = read(dir / "fixture-pixel.dxil");
         Device g;
+        if (commands)
+            require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
         struct Stop
         {
             ~Stop() { GlassFg::StopGeometryCreation(); }
@@ -216,7 +225,7 @@ int wmain(int argc, wchar_t** argv)
         pd.SampleDesc.Count = 1;
         ComPtr<ID3D12PipelineState> original, capturePso, streamPso;
         check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&original)));
-        auto lease = observed ? observedPipeline(g.d.Get(), original.Get(), pd)
+        auto lease = observed ? observedPipeline(g.d.Get(), original.Get(), pd, commands)
                               : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
                                                std::filesystem::absolute(argv[2]));
         const auto& root = *lease->root;
@@ -347,6 +356,15 @@ int wmain(int argc, wchar_t** argv)
                 const bool instrument = pass == 1;
                 g.c->SetGraphicsRootSignature(instrument ? root.extended.Get() : originalRoot.Get());
                 g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
+                if (commands)
+                {
+                    g.c->SetGraphicsRoot32BitConstants(0, 2, fc, 0);
+                    UINT bits;
+                    memcpy(&bits, fc + 2, sizeof(bits));
+                    g.c->SetGraphicsRoot32BitConstant(0, bits, 2);
+                    memcpy(&bits, fc + 3, sizeof(bits));
+                    g.c->SetGraphicsRoot32BitConstant(0, bits, 3);
+                }
                 g.c->SetPipelineState(instrument ? capturePso.Get() : pass == 0 ? streamPso.Get() : original.Get());
                 if (instrument)
                 {
@@ -373,7 +391,20 @@ int wmain(int argc, wchar_t** argv)
                     UINT index = 0;
                     while (order[7 + index] != pass - 2)
                         ++index;
+                    if (commands)
+                    {
+                        const auto* bindings = GlassFg::ReadGeometryBindings(g.c.Get());
+                        require(bindings && bindings->canReplay(root, original.Get()),
+                                "Public graphics bindings missing");
+                        // Test-only snapshot. Restore after deliberately changing
+                        // the root; the following GPU result must remain exact.
+                        auto saved = *bindings;
+                        saved.replay(g.c.Get(), root.extended.Get());
+                        saved.replay(g.c.Get(), originalRoot.Get());
+                        geometryFixturePacket = true;
+                    }
                     g.c->DrawIndexedInstanced(6, 1, 0, 2, 7 + index);
+                    geometryFixturePacket = false;
                 }
                 g.barrier(colors[pass].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 D3D12_TEXTURE_COPY_LOCATION src {}, dst {};
@@ -398,6 +429,8 @@ int wmain(int argc, wchar_t** argv)
                                   CaptureBytes);
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             g.finish();
+            if (commands)
+                require(!GlassFg::ReadGeometryBindings(g.c.Get()), "Closed recording remained readable");
             void* data;
             D3D12_RANGE readRange { 0, SIZE_T(readBytes) };
             check(readback->Map(0, &readRange, &data));
@@ -500,6 +533,16 @@ int wmain(int argc, wchar_t** argv)
         }
         require(checked > 1000 && overlaps > 100, "Insufficient per-object overlap coverage");
         require(recovered > 100, "Inactive object did not recover after fresh history");
+        if (commands)
+        {
+            const auto stats = GlassFg::GetGeometryCommandStats();
+            require(stats.active && !stats.capacityRejected && stats.indexed == 40 && stats.packets == 24 &&
+                        stats.identities == 24 && stats.pipelinesReady == 24 && stats.bindingsReady == 24,
+                    "Actual public draw/packet/pipeline observation mismatch");
+            printf("PASS public_command_observer=1 restored_root_pixels=%llu indexed=%llu packets=%llu "
+                   "bindings_ready=%llu game_hooks=0\n",
+                   exact, stats.indexed, stats.packets, stats.bindingsReady);
+        }
         printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u instance_rebatch=1 "
                "isolated_contours=1 inactive_instances=1 inactive_recovery=1 opaque_depth_rejection=1 "
                "partial_history_flag=1 "

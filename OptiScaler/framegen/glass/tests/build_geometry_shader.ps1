@@ -20,6 +20,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryInstances.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
+    (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
     (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
@@ -45,3 +46,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Instance material rewriting failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry capture test failed' }
 & $instances $build $dxc --observe
 if ($LASTEXITCODE -ne 0) { throw 'Actual creation observer GPU test failed' }
+& $instances $build $dxc --commands
+if ($LASTEXITCODE -ne 0) { throw 'Actual graphics command observer GPU test failed' }

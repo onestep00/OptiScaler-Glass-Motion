@@ -12,6 +12,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCreation.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCreation.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryHost.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCommands.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCommands.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryObjectRegistry.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkObjects.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)CyberpunkObjects.cpp" />
