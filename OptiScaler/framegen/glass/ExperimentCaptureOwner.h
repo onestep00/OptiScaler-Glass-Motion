@@ -44,6 +44,8 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
     std::array<Job, Capacity> jobs;
     std::array<Queue, QueueCount> queues;
     bool accepting = true;
+    HANDLE changed = nullptr; // Borrowed process-resident control notification.
+    uint64_t recordedCount = 0, retiredCount = 0;
     uint64_t latestFrame = 0, nextJob = 0;
     DWORD controlThread = GetCurrentThreadId();
 
@@ -55,7 +57,8 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
         return frame.module.dispatch(event);
     }
   public:
-    ExperimentCaptureOwner(ExperimentRuntime& value, ID3D12Device* d) : runtime(value), device(d)
+    ExperimentCaptureOwner(ExperimentRuntime& value, ID3D12Device* d, HANDLE wake = nullptr)
+        : runtime(value), device(d), changed(wake)
     {
         if (!d) throw std::runtime_error("Capture experiment requires a device");
         for (auto& queue : queues)
@@ -154,6 +157,8 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
         selected->recorded = recorded;
         if (result < 0) selected->lifetime->submissionUnknown();
         selected->phase = Job::Recorded;
+        if (recorded) ++recordedCount;
+        if (changed) SetEvent(changed);
     }
     void submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands) noexcept override
     {
@@ -197,6 +202,19 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
         if (GetCurrentThreadId() != controlThread) throw std::runtime_error("Capture stop requires control thread");
         std::lock_guard lock(mutex); accepting = false;
     }
+    void resume()
+    {
+        if (GetCurrentThreadId() != controlThread) throw std::runtime_error("Capture resume requires control thread");
+        std::lock_guard lock(mutex); accepting = true;
+    }
+    struct Status { unsigned pending = 0; uint64_t recorded = 0, retired = 0; bool accepting = false; };
+    Status status()
+    {
+        std::lock_guard lock(mutex);
+        Status result { 0, recordedCount, retiredCount, accepting };
+        for (const auto& job : jobs) if (job.phase != Job::Empty) ++result.pending;
+        return result;
+    }
     unsigned collect()
     {
         if (GetCurrentThreadId() != controlThread) throw std::runtime_error("Capture collect requires control thread");
@@ -221,7 +239,7 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
                 std::lock_guard lock(mutex);
                 --frames[job.frame].users; --trackers[job.tracker].users;
                 releaseOutsideLock = std::move(job.pipeline);
-                job.lifetime.reset(); job.phase = Job::Empty; ++retired;
+                job.lifetime.reset(); job.phase = Job::Empty; ++retired; ++retiredCount;
             }
         }
         std::lock_guard lock(mutex);

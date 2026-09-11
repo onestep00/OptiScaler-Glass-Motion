@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [Experiments.md](Experiments.md): `--module-recorder` replaces two independently prepared coverage DLLs and verifies original material/color, missing mapping, Unicode paths and unload. GPU drains are fixture-only; game/FG integration pending.
+- [Experiments.md](Experiments.md): `--controlled-recorder` adds event/file control, missing-observer rejection and duplicate-load rollback to two independently owned coverage generations. Original material/color and unload pass. Native queue observation and game/FG validation pending.
 
 - [GeometryDraws.md](GeometryDraws.md): Mesh range decoder rejects malformed/stale callback inputs; owned-memory fixture only. Coverage sidecar preserves original draw/raster evidence without claiming engine history in the GPU fixture.
 

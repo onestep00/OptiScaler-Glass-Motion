@@ -192,10 +192,12 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--recorder") == 0 ||
                                             wcscmp(argv[3], L"--experiment") == 0 ||
                                             wcscmp(argv[3], L"--capture-module") == 0 ||
-                                            wcscmp(argv[3], L"--module-recorder") == 0)),
+                                            wcscmp(argv[3], L"--module-recorder") == 0 ||
+                                            wcscmp(argv[3], L"--controlled-recorder") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
-        const bool moduleRecorder = argc == 4 && wcscmp(argv[3], L"--module-recorder") == 0;
+        const bool controlledRecorder = argc == 4 && wcscmp(argv[3], L"--controlled-recorder") == 0;
+        const bool moduleRecorder = controlledRecorder || (argc == 4 && wcscmp(argv[3], L"--module-recorder") == 0);
         const bool recorder = moduleRecorder || (argc == 4 && wcscmp(argv[3], L"--recorder") == 0);
         const bool captureModule = argc == 4 && wcscmp(argv[3], L"--capture-module") == 0;
         const bool experiment = captureModule || (argc == 4 && wcscmp(argv[3], L"--experiment") == 0);
@@ -213,6 +215,7 @@ int wmain(int argc, wchar_t** argv)
         Device g;
         ExperimentDrawCheck experimentCheck;
         ModuleRecorderCheck moduleRecorderCheck;
+        if (controlledRecorder) moduleRecorderCheck.useControl();
         if (experiment) experimentCheck.start(g.d.Get(), dir, captureModule);
         const auto recorderOutput = moduleRecorder ? moduleRecorderCheck.start(g.d.Get(), dir, argv[2]) :
             std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
@@ -866,6 +869,7 @@ int wmain(int argc, wchar_t** argv)
             }
             if (moduleRecorder)
             {
+                if (controlledRecorder) printf("PASS event_control=1 submission_admission=1 duplicate_load_rollback=1 asynchronous_retirement=1 same_process_replacement=1 game_hooks=0\n");
                 printf("PASS independent_module_recorder=1 worker_prepared_resources=1 saved_original_samples=%u "
                        "original_pixels=%llu same_draw_reference=1 module_generations=2 actual_unload=2 "
                        "missing_mapping_detected=1 motion_produced=0 game_hooks=0\n", 6 * W * H, exact);

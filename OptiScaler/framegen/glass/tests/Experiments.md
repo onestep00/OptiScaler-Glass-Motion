@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: independently owned coverage worker and two module generations pass GPU capture/unload checks; game integration incomplete
+- Status: event-controlled worker replacement/capture passes independent GPU checks; game startup integration compiled, not deployed
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -11,7 +11,8 @@
 `GlassExperimentQuery`. Its table creates a private context, handles versioned
 borrowed events and destroys the context. No STL or allocator ownership crosses
 the boundary. Draw observation and capture preparation/lifecycle payloads are
-defined; FG payload and game control/startup integration remain incomplete.
+defined. Game control/startup source is present; actual game validation and FG
+payload/integration remain incomplete.
 
 `ExperimentDrawAbi.h` and `ExperimentDrawBridge.h` pass borrowed original draw,
 pipeline/root, shader descriptor, viewport/scissor and target handles to a
@@ -45,7 +46,8 @@ after callbacks, not inside a draw. Its final GPU work is completed and recordin
 discarded before module release; a failed test retains the module conservatively.
 The fixture supplies synthetic identities and a test-only PSO preparation export.
 It does not invoke FG or supply the general production GPU preparation ABI. No production
-startup observer registration has been added yet. Build the fixture DLL from
+draw-observer registration has been added yet; the capture-owner startup below
+does not enable this observation-only fixture. Build the fixture DLL from
 `ExperimentDrawFixture.cpp`, `GeometryPipeline.cpp` and `DxilVertexHistory.cpp`
 beside GeometryInstances with DXC includes and d3d12/dxgi libraries; `build_geometry_shader.ps1`
 includes this check.
@@ -74,7 +76,7 @@ it does not install the live native queue observer. Seven jobs retire before the
 last Reset; the final job and DLL remain retained even after runtime disable.
 The final actual Reset/queue completion permits its Retired callback and unloading.
 All 143,360 original pixels and 3,563 MV samples pass. Module preparation and capture
-buffers in that mode still come from explicit fixture setup. Runtime control,
+buffers in that mode still come from explicit fixture setup. Live runtime control,
 in-flight replacement through this owner, resource/view census,
 actual engine input and FG integration remain unverified/incomplete.
 
@@ -109,7 +111,66 @@ outside the loader entry point, following Microsoft's
 [DLL best practices](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-best-practices).
 The module checks failure/truncation of
 [GetModuleFileNameW](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulefilenamew)
-before reading its configuration. Game control/startup registration is still pending.
+before reading its configuration. Game registration is opt-in through the resident
+control host described below.
+
+## Resident event control
+
+`ExperimentHost.cpp` claims capture ownership only when
+`Glass/experiment-host.enable` exists. In that mode `GeometryHost` does not start
+the legacy recorder. A private control thread creates `ExperimentControl` and
+registers one process-resident capture owner, initially stopped. Startup errors
+go to `Glass/experiment-host.error`; no second owner is installed as a fallback.
+The installed MO2 DLL is unchanged and does not yet provide this control host.
+
+The host exposes auto-reset `Local\OptiScaler.Glass.Experiment.<PID>.Request`
+and `.Response` events. The diagnostic client serializes requests with `.Client`
+mutex ownership. Each request file contains exactly three UTF-8 lines: a unique
+ASCII request ID, `load`/`disable`/`status`, and an absolute DLL path for `load`
+(an empty third line otherwise). Only a request event causes a file read.
+`experiment.control.response` echoes request ID and PID with success/error,
+active generation, loaded/unloaded modules, recorded/pending/retired captures,
+submission-observer admission and `fg_connected=0`. A timed-out client must treat
+completion as unknown and query status; it must not infer rollback from timeout.
+
+The registered owner wakes control after a captured draw. Control checks pending
+recordings at 100 ms intervals while any remain or a disabled module is draining,
+then returns to an indefinite
+event wait. These are CPU completion/discard checks with no file polling or GPU
+work. A completed recording still requires its actual Reset/destruction before
+Retired and unload. `disable` stops new admission while draining existing work;
+a later successful `load` resumes it. Loader failures preserve the active module.
+
+In the game, load is rejected until `NativeHost` has successfully installed its
+process-resident queue observer. The current integration installs that observer
+from the enabled native FG correction path. This dependency is explicit in status;
+host-thread startup alone is not safe GPU-submission coverage. No captured job may
+infer that an unobserved submission did not occur.
+
+`GeometryInstances --controlled-recorder` runs the same two-generation GPU test
+through the event/file client and independent resident control thread. It verifies
+missing-observer rejection before module preparation, duplicate-path load rollback,
+asynchronous retirement, worker saves, original pixels and two actual unloads.
+The fixture forwards every submission manually after its GPU drain. It does not
+exercise NativeHost's live queue observer or GPU-in-flight hot replacement.
+
+Build `tests/ExperimentRequest.cpp` with C++20, `/EHsc /MD /W4 /WX` as a standalone
+diagnostic client. Its interface is:
+
+```text
+ExperimentRequest.exe PID absolute-Glass-directory load absolute-module-DLL
+ExperimentRequest.exe PID absolute-Glass-directory status
+ExperimentRequest.exe PID absolute-Glass-directory disable
+```
+
+The coverage module requires its two-line same-stem configuration described above.
+Requests can load a different module build in the same game process; they do not
+replace resident observation hooks or add missing startup resource metadata.
+Follow Microsoft's [event creation](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw)
+and [multiple-object wait](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects)
+contracts. Event handles remain alive throughout the resident wait.
+
+## Loader and recording lifetime
 
 `ExperimentRuntime.h` loads absolute paths on its control thread. Invalid ABI,
 capabilities or failed preparation leaves the active module unchanged. Up to

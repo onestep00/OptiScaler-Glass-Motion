@@ -13,4 +13,6 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
 void RetireNativeFG(const NVSDK_NGX_Handle* handle);
 void CreatedNativeFG();
 void StopNativeFG();
+// True only after the process-resident native queue observer is installed.
+bool NativeCaptureSubmissionReady() noexcept;
 } // namespace GlassFg

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GeometryCoverageRecorder.h"
+#include "ExperimentHost.h"
 #include "GeometryCreation.h"
 #include "CyberpunkLayout.h"
 #include "CyberpunkObjects.h"
@@ -65,7 +66,7 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 const bool objects = ready && InitializeCyberpunkObjects(GetModuleHandleW(nullptr));
                 const bool draws = objects && InitializeCyberpunkDraws(GetModuleHandleW(nullptr));
                 const bool commands = ready && StartGeometryCommands(device);
-                if (draws && commands)
+                if (draws && commands && !StartExperimentHost(device, directory / L"Glass"))
                     StartGeometryCoverageRecorder(device, compiler, directory / L"Glass" / L"capture-objects.request");
                 GeometryHealth health;
                 health.capabilities = GeometryStarted | (files ? GeometryCompiler : 0u) |

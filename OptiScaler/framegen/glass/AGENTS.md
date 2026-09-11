@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/Experiments.md](tests/Experiments.md): Independent coverage DLL owns its worker, PSO, buffers and saves. Two generations pass reference/color and actual unload checks. Game control, in-flight owner replacement, actual contours/MV and FG remain incomplete.
+- [tests/Experiments.md](tests/Experiments.md): Event control, two independently prepared DLL generations, original color, admission rejection and unload pass GPU checks. Opt-in game startup compiles, not deployed. Live contour/MV/FG and in-flight owner replacement remain incomplete.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Actual mesh chunk range decoder added. Diagnostic draw metadata records counts/bindings, without claiming topology or view identity. New metadata is not deployed.
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Same-process requests and same-draw surviving/contributing references detect deliberate missing mapping on an independent GPU. Original shader/recording artifacts retained locally; live target coverage pending.

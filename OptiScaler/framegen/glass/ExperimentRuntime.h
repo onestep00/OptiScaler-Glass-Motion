@@ -103,6 +103,15 @@ class ExperimentRuntime
         control();
         active.store({});
     }
+    struct Status { uint64_t active = 0; unsigned loaded = 0; };
+    Status status() const
+    {
+        control();
+        const auto current = active.load();
+        Status result { current ? current->generation : 0, 0 };
+        for (const auto& slot : slots) if (slot) ++result.loaded;
+        return result;
+    }
     unsigned collect()
     {
         control();

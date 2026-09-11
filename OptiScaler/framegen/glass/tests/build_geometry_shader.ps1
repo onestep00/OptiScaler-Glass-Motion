@@ -74,6 +74,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL bridge failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Module capture preparation/recording/retirement failed' }
 & $instances $build $dxc --module-recorder
 if ($LASTEXITCODE -ne 0) { throw 'Independent coverage module preparation/replacement/capture failed' }
+& $instances $build $dxc --controlled-recorder
+if ($LASTEXITCODE -ne 0) { throw 'Event-controlled module replacement/capture failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $instances $build $dxc --recorder

@@ -45,6 +45,7 @@ struct Runtime
     std::recursive_mutex mutex;
     std::shared_ptr<Entry> active;
     std::atomic<ID3D12GraphicsCommandList*> activeCommand = nullptr;
+    std::atomic<bool> submissionObserved = false;
     std::array<std::shared_ptr<Entry>, 2> retiring;
     CyberpunkSurfacePass selector;
     FILE* log = nullptr;
@@ -177,6 +178,7 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         std::fflush(r.log);
         return {};
     }
+    r.submissionObserved.store(true, std::memory_order_release);
     auto entry = std::make_shared<Entry>();
     entry->handle = handle;
     entry->command = command;
@@ -208,6 +210,11 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     return entry;
 }
 } // namespace
+
+bool NativeCaptureSubmissionReady() noexcept
+{
+    return runtime().submissionObserved.load(std::memory_order_acquire);
+}
 
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                   NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
