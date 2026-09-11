@@ -91,3 +91,45 @@ Local evidence: `work/glass-current-native-bindings-v1/`,
 `work/glass-current-native-prepare-v1/capture/bindings.done`,
 `work/glass-current-native-pair-v3/analysis.json` and
 `work/glass-current-native-pixels-v1/analysis.json`.
+
+## Array-source and actual vertex capture
+
+The preceding native chunk projected to approximately 23 by 36 pixels. Its
+native-pixel invocation counters also read 0, 1, 4, 0, 0, matching saved coverage;
+the empty images are not merely a missing visualization tag. Occlusion/material
+effects versus complete object coverage remain unresolved.
+
+A current array mesh with 40 original source elements uses a different VS
+(hash 94d3a13b36a9853ec6707a9085ab5ee6) and PS
+(hash fe3d80e60d11e22bd377aed9723bec2d). It lacks the native current/previous
+clip-output pair. The mesh is selected from engine provenance, not identified
+as cups from its count. Its observation identity was 9223372036854776402;
+mesh-filtered preparation produced identity 1376. The selected color draw has
+eight visible instances, 124 vertices each and 468 indices in chunk zero.
+
+Combined material/vertex coverage rejected this original pipeline through its
+blend/depth/geometry admission condition. The guard was not relaxed. An older
+vertex-only DLL yielded no selection attempts; rebuilding the current source
+with GLASS_CAPTURE_VERTEX_OUTPUTS produced 64 actual eight-instance captures.
+The exact reason the older artifact bypassed capture has not been isolated.
+
+A second capture started the source recorder immediately after the first GPU
+capture completed. It yielded three overlapping frame captures, with 24 instance
+records resolved by frame/render-mesh/global-slot to source owner and original
+buffer index. There were no conflicting source keys. Sixteen exactly consecutive
+instance pairs contain 1,984 original-VS vertex correspondences. The remaining
+488 capture instances have no recorded source overlap and are not admitted.
+The source key, chunk, vertex/index buffers, layout and viewport must agree;
+same ordinal alone is not used. Source-array mutation and actual view identity
+remain unproven, so these are experimental correspondences, not production MV.
+
+`work/glass-array-vertices-v3/source-vertex-join.json` records the counts;
+`engine-vertex-motion.csv` and `.png` show 992 current-to-previous vertex vectors
+from one matched frame. This is a sparse vertex plot, not a raster silhouette or
+FG input. No original color or depth behavior was intentionally changed and no
+FG substitution was added. All 128 vertex jobs from the two successful runs
+retired, the modules unloaded, and PID 70152 remained responding.
+
+The next missing component is original-material coverage for this depth/blend
+path, then ordered GPU-resident previous geometry. The native-pair route above
+must not be treated as a substitute for the array route.

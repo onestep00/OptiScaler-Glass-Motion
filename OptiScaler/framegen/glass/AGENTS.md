@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Source bootstrap and same-process native VS capture verified. Mesh-filtered preparation reaches current pipeline; 45 N-1 pairs match. Pixel coverage remains insufficient; new FG input absent.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Array source indices join actual eight-instance VS captures across three frames; 16 consecutive instance pairs. Material coverage guard rejects this path; production history/FG remain absent.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 
