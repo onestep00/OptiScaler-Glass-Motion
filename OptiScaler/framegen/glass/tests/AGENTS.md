@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [SourceSlots.md](SourceSlots.md): Bounded direct slot handoff and stale/ambiguous-domain rejection pass CPU checks. Actual view/lifetime adapter and MV/FG integration remain absent.
+
 - [Experiments.md](Experiments.md): Actual array setter identified; same pointer/count does not prove unchanged content. Secondary +0x158 array absent in 1,214 live owner snapshots and not admitted as previous history.
 
 - [Experiments.md](Experiments.md): Live direct producer saved 31,860 source entries; 676 unique same-frame transform-range joins across 56 meshes. Pinned observer stopped; no lifetime/MV/FG proof.
