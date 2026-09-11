@@ -108,6 +108,29 @@ runtime cache admission follows from these raw fields yet.
 
 ## Array update boundary
 
+### Transform pool allocation is not persistent element identity
+
+Further static tracing connects array allocation `0x3cc2e8`, converted writes
+`0x3cc3c0`, raw 48-byte writes `0x3cc59c`, queueing `0x3cc658`, and release
+`0x3cdeb8`. The pool allocator checks a 131,072-element endpoint. These are RVAs
+for the audited executable, not production discovery signatures or live proof.
+
+The raw writer is called from mesh preparation at `0x1e89bd`. Immediately before
+it, the engine walks 16-bit source indices, gathers the corresponding entries
+from proxy+0x108, and forms a contiguous span. Its destination begins at
+proxy+0x114 plus a running packed offset; the group stores that destination at
++0x50. Therefore pool-allocation generation plus destination index alone cannot
+authorize temporal correspondence when the grouping/order changes. Preserve the
+original source-index mapping, even if pool lifecycle tracking is added.
+
+The previously observed enqueue callers `0x1e5e60` and `0x1e5ec8` use leaf request
+builder `0x1e5f0c`, which explicitly zeroes array spans +0x60..+0x78. The third
+observed caller `0x237974` also zeroes those spans. Repeating only that bounded
+sample is not a reliable way to observe array replacement. The true nonempty-span
+producer and element lifetime remain unresolved. Local evidence is in
+`outputs/glass-transform-pool-route-v1/` and the owned PE disassemblies;
+`outputs/glass-array-enqueue-dispatch-v1/` contains unverified dispatch candidates.
+
 ### Native previous-transform alternative
 
 An offline scalar-dependency trace of the already live-checked native VS
