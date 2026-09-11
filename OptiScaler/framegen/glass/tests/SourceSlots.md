@@ -142,6 +142,35 @@ view/frame-to-FG ownership. No additional game hook was installed in this turn.
 
 ### Connected lifetime diagnostic (not deployed)
 
+### Same-process linked deployment checkpoint
+
+The latest linked pair was subsequently loaded into PID 70152 without restart.
+Before chaining, `DetourChain.cpp` exercised the repository's linked Detours
+library: original and both callbacks executed once, mixed pointer/float arguments
+and byte return were preserved, removing the upper hook restored the earlier
+16-byte patch exactly, and ten concurrent attach/detach cycles across four worker
+threads completed 54,590,641 calls without mismatch. This is a synthetic calling
+contract, not blanket approval of arbitrary engine hooks. Microsoft's current
+[Detours source](https://github.com/microsoft/Detours/blob/main/src/detours.cpp)
+was also reviewed for x64 jump/trampoline handling.
+
+The game preflight verified the known older diagnostic DLL paths/hashes, checked
+each existing E9/FF25 jump destination belongs to its expected resident module,
+and compared the remaining engine function bodies to disk. The destructor and
+unused selection bodies still matched original bytes. Profiles contain the exact
+current-process bodies and are not reusable production game fingerprints. The
+selection leaf remained unhooked. Start/Save returned zero for both new DLLs.
+
+The source query reported ready=1/healthy=1, with 227 destructor callbacks,
+zero rejected lifecycle reads and zero new creations. Thus the owner cache stayed
+empty while the producer filled 4,096 records. CSV recording is stopped; lifecycle
+tracking continues and all forwarding modules remain pinned. The game remained
+responding. No source-generation-populated draw, new MV, FG substitution or
+ghosting improvement was demonstrated. Existing-object bootstrap is the immediate
+missing path; creation-only observation does not populate the already-loaded scene.
+Local evidence: `work/glass-linked-sources-live-v1/preflight.json`,
+`owners-capture/{owners,source-query}.txt`, and `producer-capture/status.txt`.
+
 `SourceQueryConnection.cpp` subsequently loaded the independent fixture DLL
 `SourceQueryProvider.cpp` and exercised the actual exported owner query through
 the producer's `connectSource` and `observe` paths. Missing/relative provider paths

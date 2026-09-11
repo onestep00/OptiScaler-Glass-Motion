@@ -22,7 +22,7 @@
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.
 
-- [SourceSlots.md](SourceSlots.md): SourceQueryConnection/Provider verify real DLL query, generation replacement and pinning in an independent process. Never inject these fixtures; live engine pair and MV/FG incomplete.
+- [SourceSlots.md](SourceSlots.md): DetourChain verifies bounded chaining/restoration; linked game pair is healthy but cache empty without creation events. Bootstrap and MV/FG incomplete; never inject test fixtures.
 
 - [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
 
