@@ -64,13 +64,15 @@ class ExperimentRuntime
         Frame& operator=(const Frame&) = delete;
         explicit operator bool() const { return bool(module); }
         uint64_t revision() const { return module ? module->generation : 0; }
+        bool supports(uint64_t capability) const
+        { return module && (module->api.capabilities & capability) == capability; }
         Lease retain() const { return Lease(module); }
         int32_t dispatch(const GlassExperimentEvent& event)
         {
             if (!module || event.size != sizeof(event) || event.frame != frame ||
                 !(module->api.capabilities & event.kind) ||
                 (event.kind != GlassExperimentDraw && event.kind != GlassExperimentFg &&
-                 event.kind != GlassExperimentCapture) ||
+                 event.kind != GlassExperimentCapture && event.kind != GlassExperimentSubmission) ||
                 (event.payloadBytes && !event.payload))
                 return -1;
             if (event.kind == GlassExperimentFg)

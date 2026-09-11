@@ -1,6 +1,22 @@
 #pragma once
 #include "ExperimentDrawAbi.h"
 inline constexpr uint32_t GLASS_EXPERIMENT_CAPTURE_VERSION = 3; // Nested draw input version 4.
+inline constexpr uint32_t GLASS_EXPERIMENT_SUBMISSION_VERSION = 1;
+
+// Optional GlassExperimentSubmission capability, separate from the unchanged
+// capture payload. Delivered for each captured recording before its actual
+// ExecuteCommandLists occurrence, in command-list order. Scalar observation
+// only: never mutate uploads, issue commands or wait. Scalar identity logging
+// is allowed; borrowed COM pointers must not be called after this callback.
+// This notification alone does not authorize cross-frame resource reuse.
+struct GlassExperimentSubmissionInput
+{
+    uint32_t size, reserved;
+    uint64_t job, recording, submission;
+    void* command;
+    void* queue;
+    uint32_t listIndex, listCount;
+};
 
 enum GlassExperimentCaptureStage
 {

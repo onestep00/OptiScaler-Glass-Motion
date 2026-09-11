@@ -55,6 +55,8 @@ class ExperimentControl
              << "\nloaded_modules=" << module.loaded << "\nunloaded_modules=" << unloaded
              << "\ncapture_pending=" << capture.pending << "\ncapture_recorded=" << capture.recorded
              << "\ncapture_retired=" << capture.retired << "\naccepting=" << capture.accepting
+             << "\ncapture_before_submit=" << capture.beforeSubmitObserved
+             << "\ncapture_before_submit_rejected=" << capture.beforeSubmitRejected
              << "\nsubmission_observer_ready=" << (!submissionReady || submissionReady())
              << "\ncensus_observer_ready=" << censusRegistered
              << "\ntarget_view_hooks=" << views.active << "\ntarget_view_healthy=" << views.healthy
@@ -103,7 +105,8 @@ class ExperimentControl
     ExperimentControl(ID3D12Device* device, const std::filesystem::path& output, bool (*ready)() = nullptr)
         : directory(output), requested(prefix() + L".Request"), responded(prefix() + L".Response"),
           owner(runtime, device, changed.value),
-          host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentCapture | GlassExperimentCensus, device }, submissionReady(ready)
+          host { sizeof(host), GLASS_EXPERIMENT_ABI,
+                 GlassExperimentCapture | GlassExperimentCensus | GlassExperimentSubmission, device }, submissionReady(ready)
     {
         if (!directory.is_absolute() || !std::filesystem::is_directory(directory))
             throw std::runtime_error("Invalid experiment control directory");

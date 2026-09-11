@@ -47,6 +47,9 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
     HANDLE changed = nullptr; // Borrowed process-resident control notification.
     uint64_t recordedCount = 0, retiredCount = 0;
     uint64_t latestFrame = 0, nextJob = 0;
+    uint64_t nextSubmission = 0;
+    uint64_t submissionObserved = 0, submissionRejected = 0;
+    std::atomic<unsigned> submissionJobs = 0;
     DWORD controlThread = GetCurrentThreadId();
 
     int32_t dispatch(Job& job, GlassExperimentCaptureInput& input)
@@ -126,6 +129,7 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
         job.phase = Job::Reserved; job.thread = GetCurrentThreadId();
         job.pipeline = pipeline; job.discarded = job.recorded = false;
         ++frames[frameIndex].users; ++trackers[trackerIndex].users;
+        if (frames[frameIndex].module.supports(GlassExperimentSubmission)) ++submissionJobs;
         job.lifetime.emplace(frames[frameIndex].module.retain(), command, epoch);
         output = {};
         if (prepared.size == sizeof(prepared) && !prepared.reserved)
@@ -159,6 +163,30 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
         selected->phase = Job::Recorded;
         if (recorded) ++recordedCount;
         if (changed) SetEvent(changed);
+    }
+    void beforeSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands) noexcept override
+    {
+        if (!submissionJobs.load(std::memory_order_relaxed)) return;
+        // Same callback serialization as prepare/finish/retired. This optional
+        // observation does not touch resources or create queue dependencies.
+        std::lock_guard call(callbacks);
+        std::lock_guard lock(mutex);
+        if (!queue || (count && !commands) || nextSubmission == UINT64_MAX) return;
+        const auto submission = ++nextSubmission;
+        for (UINT list = 0; list < count; ++list)
+            for (auto& job : jobs)
+                if (job.phase == Job::Recorded && job.recorded && !job.discarded && job.command == commands[list])
+                {
+                    auto& frame = frames[job.frame];
+                    if (!frame.module.supports(GlassExperimentSubmission)) continue;
+                    const GlassExperimentSubmissionInput input { sizeof(input), 0, job.id, job.epoch,
+                        submission, job.command, queue, list, count };
+                    const GlassExperimentEvent event { sizeof(event), GlassExperimentSubmission, frame.id, 0, 0,
+                        GLASS_EXPERIMENT_SUBMISSION_VERSION, sizeof(input), &input };
+                    ++submissionObserved;
+                    if (frame.module.dispatch(event) < 0)
+                    { ++submissionRejected; job.lifetime->submissionUnknown(); }
+                }
     }
     void submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands) noexcept override
     {
@@ -207,11 +235,17 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
         if (GetCurrentThreadId() != controlThread) throw std::runtime_error("Capture resume requires control thread");
         std::lock_guard lock(mutex); accepting = true;
     }
-    struct Status { unsigned pending = 0; uint64_t recorded = 0, retired = 0; bool accepting = false; };
+    struct Status
+    {
+        unsigned pending = 0;
+        uint64_t recorded = 0, retired = 0;
+        bool accepting = false;
+        uint64_t beforeSubmitObserved = 0, beforeSubmitRejected = 0;
+    };
     Status status()
     {
         std::lock_guard lock(mutex);
-        Status result { 0, recordedCount, retiredCount, accepting };
+        Status result { 0, recordedCount, retiredCount, accepting, submissionObserved, submissionRejected };
         for (const auto& job : jobs) if (job.phase != Job::Empty) ++result.pending;
         return result;
     }
@@ -238,6 +272,7 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
             {
                 std::lock_guard lock(mutex);
                 --frames[job.frame].users; --trackers[job.tracker].users;
+                if (frames[job.frame].module.supports(GlassExperimentSubmission)) --submissionJobs;
                 releaseOutsideLock = std::move(job.pipeline);
                 job.lifetime.reset(); job.phase = Job::Empty; ++retired; ++retiredCount;
             }

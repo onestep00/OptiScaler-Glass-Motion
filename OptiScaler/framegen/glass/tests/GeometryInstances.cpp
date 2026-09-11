@@ -685,7 +685,7 @@ int wmain(int argc, wchar_t** argv)
                 checkedInFlight = true;
             }
             else g.finish();
-            if ((recorder && !controlledRecorder) || captureModule)
+            if (recorder && !controlledRecorder)
             {
                 ID3D12CommandList* submitted[] { g.c.Get() };
                 GlassFg::NotifyGeometryCaptureSubmit(g.q.Get(), 1, submitted);

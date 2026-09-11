@@ -16,6 +16,10 @@ struct Context
     unsigned calls = 0;
     GlassExperimentPreparedCapture capture {};
     unsigned prepared = 0, recorded = 0, retired = 0;
+    unsigned submitted = 0;
+    uint64_t lastJob = 0, lastEpoch = 0, lastSubmission = 0;
+    void* lastCommand = nullptr;
+    void* queue = nullptr;
     ~Context() { if (token) access.release(token); }
 };
 Context* fixture = nullptr;
@@ -28,6 +32,20 @@ int32_t create(const GlassExperimentHost* host, void** context)
 }
 int32_t event(void* context, const GlassExperimentEvent* value)
 {
+    if (value && value->kind == GlassExperimentSubmission)
+    {
+        if (value->payloadVersion != GLASS_EXPERIMENT_SUBMISSION_VERSION ||
+            value->payloadBytes != sizeof(GlassExperimentSubmissionInput) || !value->payload) return -40;
+        const auto& input = *static_cast<const GlassExperimentSubmissionInput*>(value->payload);
+        auto& owned = *static_cast<Context*>(context);
+        if (input.size != sizeof(input) || input.reserved || !input.queue || !input.command ||
+            !input.listCount || input.listIndex >= input.listCount || input.job != owned.lastJob ||
+            input.recording != owned.lastEpoch || input.command != owned.lastCommand ||
+            input.submission <= owned.lastSubmission || owned.recorded != owned.submitted + 1 ||
+            (owned.queue && input.queue != owned.queue)) return -41;
+        owned.queue = input.queue; owned.lastSubmission = input.submission;
+        ++owned.submitted; return 0;
+    }
     if (value && value->kind == GlassExperimentCapture)
     {
         if (value->payloadVersion != GLASS_EXPERIMENT_CAPTURE_VERSION || value->payloadBytes != sizeof(GlassExperimentCaptureInput) || !value->payload)
@@ -47,6 +65,7 @@ int32_t event(void* context, const GlassExperimentEvent* value)
         if (input.stage == GlassCaptureRecorded)
         {
             if (!input.command || !input.recorded) return -34;
+            owned.lastJob = input.job; owned.lastEpoch = input.recording; owned.lastCommand = input.command;
             ++owned.recorded; return 0;
         }
         if (input.stage == GlassCaptureRetired)
@@ -98,7 +117,8 @@ int32_t event(void* context, const GlassExperimentEvent* value)
     return static_cast<int32_t>(d.objectCount);
 }
 void destroy(void* context) { delete static_cast<Context*>(context); fixture = nullptr; }
-const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI, GlassExperimentDraw | GlassExperimentCapture, create, event, destroy };
+const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI,
+    GlassExperimentDraw | GlassExperimentCapture | GlassExperimentSubmission, create, event, destroy };
 }
 extern "C" __declspec(dllexport) const GlassExperimentApi* GlassExperimentQuery() { return &api; }
 // Test-only control-thread entry: compile inside the separately loaded DLL from
@@ -146,5 +166,5 @@ extern "C" __declspec(dllexport) void ConfigureCapture(const GlassExperimentPrep
 }
 extern "C" __declspec(dllexport) int32_t VerifyCaptureCounts()
 {
-    return fixture && fixture->prepared == 8 && fixture->recorded == 8 && fixture->retired == 8;
+    return fixture && fixture->prepared == 8 && fixture->recorded == 8 && fixture->retired == 8 && fixture->submitted == 8;
 }

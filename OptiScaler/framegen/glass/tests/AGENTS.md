@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Optional pre-submit module bridge passes actual queue callbacks and legacy capture/unload; unsupported hosts reject it. No live history reuse or FG integration.
+
 - [GeometryShaders.md](GeometryShaders.md): 32-frame single-list GPU history test reuses two buffers without interframe CPU waits/copies; 558 previous vertices match. Game queue admission and dense MV/FG remain incomplete.
 
 - [GeometryShaders.md](GeometryShaders.md): Matching N-2 history is now GPU-rejected; original rendering and mapped capture regression pass. Continuous game history and FG remain incomplete.

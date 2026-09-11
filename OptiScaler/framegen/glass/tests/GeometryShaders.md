@@ -1,13 +1,42 @@
 # Actual vertex-output history and material motion
 
 - Created: 2026-09-11
-- Updated: 2026-09-11
+- Updated: 2026-09-12
 - Status: live vertex snapshots recorded; continuous object history, jitter/view admission and FG integration incomplete
 - Deployment: replaceable vertex diagnostic ran in PID 56340 and unloaded; installed correction unchanged
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
 
 ## Implemented source
+
+The replaceable-module bridge now optionally forwards pre-submit observations
+for each captured recording, in actual command-list order. The separate
+`GlassExperimentSubmission` capability preserves the existing capture ABI.
+Submission payloads include the captured job/recording, queue identity, list
+position/count and a monotonic submission number. They are callback-scoped scalar
+observations; modules must not issue commands, wait or modify uploads in this
+callback. This is not admission to reuse history buffers across frames or queues.
+Modules requiring this event are rejected on a host without the capability.
+An atomic zero-job check bypasses the new lock/scan when no opted-in jobs exist.
+The existing bounded diagnostic job array is reused; no GPU resource or command
+is added by observation. Status responses expose `capture_before_submit` and
+`capture_before_submit_rejected` independently of FG substitution.
+
+The actual public D3D12 observer delivered eight module callbacks in the
+independent `--capture-module` test. Job/epoch/queue/order checks passed; all
+143,360 original pixels, 3,563 motion samples and 896 overlapping samples still
+passed, and the DLL unloaded after GPU completion and recording discard.
+An unsupported host rejected the new module before activation. The older
+coverage capability also passed its two-generation capture/unload test without
+opting into submission events. Evidence is local `work/glass-submit-bridge-v1/`.
+The new bridge is not deployed; live history ownership and dense MV/FG remain
+incomplete. Earlier sections below retain the history of missing host seams.
+Release x64 compilation/linking also passed; the scoped local host artifact has
+SHA-256 `062ae30aeecec772b2cd42621337e1b0ec0d220ea4dfbd8dc25b856d155d9030`.
+Existing XeSS/linker warnings and package missing-file/path messages remain;
+this is not complete package verification. The running PID 72636 still reports
+256 captured/retired jobs, zero pending/loaded modules and `fg_connected=0`.
+It has not loaded this new host.
 
 The history shader now requires a nonzero expected previous frame equal to the
 current frame minus one, as well as matching stored frame and generation tags.

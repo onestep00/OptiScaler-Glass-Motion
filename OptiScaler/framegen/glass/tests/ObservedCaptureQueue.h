@@ -26,6 +26,11 @@ inline bool install(ID3D12Device* device)
     callbacks.barrier = [](void*, ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*) {};
     callbacks.signal = [](void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) {};
     callbacks.wait = [](void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) {};
+    callbacks.beforeSubmit = [](void*, ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+    {
+        GlassFg::InternalD3D12Scope scope;
+        GlassFg::NotifyGeometryCaptureBeforeSubmit(queue, count, lists);
+    };
     callbacks.submit = [](void* p, ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
     {
         ++static_cast<State*>(p)->submitted;

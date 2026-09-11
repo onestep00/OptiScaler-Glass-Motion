@@ -2,6 +2,7 @@
 #include "../ExperimentDrawBridge.h"
 #include "../ExperimentRuntime.h"
 #include "../ExperimentCaptureOwner.h"
+#include "ObservedCaptureQueue.h"
 
 // Resident test callback plus a test-only control-thread preparation entry.
 // The DLL owns the compiled PSO. The fixture drains and discards its commands
@@ -33,7 +34,15 @@ class ExperimentDrawCheck
   public:
     void start(ID3D12Device* device, const std::filesystem::path& directory, bool captureModule = false)
     {
-        const GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentDraw | GlassExperimentCapture, device };
+        const GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI,
+            GlassExperimentDraw | GlassExperimentCapture | GlassExperimentSubmission, device };
+        auto unsupported = host;
+        unsupported.capabilities &= ~uint64_t(GlassExperimentSubmission);
+        bool rejected = false;
+        try { runtime.replace(std::filesystem::absolute(directory / "experiment-draw.dll"), unsupported); }
+        catch (const std::runtime_error&) { rejected = true; }
+        require(rejected && runtime.status().active == 0 && runtime.status().loaded == 0,
+                "Submission-dependent module admitted without host support");
         runtime.replace(std::filesystem::absolute(directory / "experiment-draw.dll"), host);
         current = this;
         require(GlassFg::RegisterExperimentDrawObserver(observe), "Register resident draw bridge");
@@ -41,6 +50,7 @@ class ExperimentDrawCheck
         {
             owner = new GlassFg::ExperimentCaptureOwner(runtime, device);
             require(GlassFg::RegisterGeometryDrawCapture(owner), "Register module capture owner");
+            require(CaptureQueueTest::install(device), "Install actual submission observer for module fixture");
         }
     }
     void prime(const GlassFg::ExperimentPipelineLease& pipeline, const std::filesystem::path& compiler)
@@ -97,6 +107,10 @@ class ExperimentDrawCheck
             const auto verifyCaptures = reinterpret_cast<int32_t (*)()>(
                 GetProcAddress(GetModuleHandleW(L"experiment-draw.dll"), "VerifyCaptureCounts"));
             require(verifyCaptures && verifyCaptures() == 1, "Module lifecycle callbacks missing");
+            const auto stats = owner->status();
+            require(stats.beforeSubmitObserved == 8 && !stats.beforeSubmitRejected,
+                    "Pre-submit observation missing or rejected");
+            puts("PASS pre_submit_module_callbacks=8 actual_queue_observer=1 unsupported_host_rejected=1");
         }
         compiled = nullptr;
         recordedUse = {}; // Caller has completed and discarded all module draws.
