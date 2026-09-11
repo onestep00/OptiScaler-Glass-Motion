@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Original-PS vertex-output capture added and GPU verified. Live recorder connection and object MV/FG remain incomplete.
+
 - [tests/SourceSlots.md](tests/SourceSlots.md): Direct source-slot cache has bounded storage, constant-index lookup and CPU-verified domain/conflict rejection. Engine provenance and motion integration remain incomplete.
 
 - [tests/Experiments.md](tests/Experiments.md): Read-only live evidence shows count=1 can belong to a 40-instance proxy. Source rejects array proxies from proxy-only history admission; not deployed. Original group indices remain the next acquisition task.

@@ -257,10 +257,17 @@ HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const Geomet
         return reject(error, "Coverage audit requires per-instance identity mapping");
     return createTarget(device, root, original, output, error, MaterialMotionTarget::OriginalColorAndCoverageAudit);
 }
+HRESULT GeometryCompiler::createVertexCapture(ID3D12Device* device, const GeometryRoot& root,
+                                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                              ComPtr<ID3D12PipelineState>& output, std::string& error)
+{
+    return createTarget(device, root, original, output, error,
+                        MaterialMotionTarget::OriginalColorAndCapture, true);
+}
 HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot& root,
                                        const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
-                                       MaterialMotionTarget target)
+                                       MaterialMotionTarget target, bool vertexOnly)
 {
     error.clear();
     if (FAILED(implementation->status))
@@ -276,7 +283,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
     D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
     HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
-    if (FAILED(hr) || !options.ROVsSupported)
+    if (!vertexOnly && (FAILED(hr) || !options.ROVsSupported))
         return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
     const auto& blend = original.BlendState.RenderTarget[0];
     const auto source = blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
@@ -291,15 +298,15 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     unsigned historyRegister = UINT32_MAX;
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
                                             root.layout, target)) ||
-        FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                            root.layout, target)))
+        (!vertexOnly && FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
+                                            root.layout, target))))
         return hr;
     // Same-draw capture retains every original export/attachment. Extra MRT
     // slots do not turn the RT0 material equation into a single-target PSO.
     auto modified = original;
     modified.pRootSignature = root.extended.Get();
     modified.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
-    modified.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    if (!vertexOnly) modified.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
     modified.CachedPSO = {};
     ComPtr<ID3D12PipelineState> result;
     hr = device->CreateGraphicsPipelineState(&modified, IID_PPV_ARGS(&result));

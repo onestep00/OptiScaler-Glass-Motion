@@ -9,6 +9,22 @@
 
 ## Implemented source
 
+`GeometryCompiler::createVertexCapture` now supports diagnostic actual VS-output
+recording with the original PS bytecode retained unchanged. It reuses the existing
+history instrumentation and extended root; the caller must still supply bounded
+history resources, immutable constants and verified instance mapping. This mode
+does not capture material coverage, infer topology, or produce an FG input.
+It does not require pixel ROV support, though the existing transparent-pipeline
+admission restrictions otherwise remain in force.
+
+The independent GPU fixture additionally renders this pipeline on each of five
+frames, preserving all 122,880 original material pixels. Its history writes are
+included in the existing exact vertex-output comparisons; all 90 current outputs
+and 36 accepted previous outputs still match. A UAV barrier orders the added
+diagnostic draw after earlier writes. This test passed after rebuilding the
+compiler and fixture with MSVC `/W4 /WX`. The live experiment module has not yet
+been connected to this new preparation method.
+
 The diagnostic now uses `OriginalColorAndCoverageAudit`: the same PS records
 two reference bit regions before any object-map rejection. One records surviving
 PS pixels after original discard and early depth, the other records material

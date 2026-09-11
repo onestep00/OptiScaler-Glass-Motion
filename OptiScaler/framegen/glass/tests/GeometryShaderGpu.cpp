@@ -167,7 +167,7 @@ int wmain(int argc, wchar_t** argv)
                                                   { 0, "GLASS_PREVIOUS", 0, 0, 4, 0 },
                                                   { 0, "GLASS_HISTORY_MISSING", 0, 0, 1, 0 } };
         ComPtr<ID3D12PipelineState> pipeline[4];
-        ComPtr<ID3D12PipelineState> originalColor;
+        ComPtr<ID3D12PipelineState> originalColor, vertexCapture;
         for (UINT i = 0; i < 4; ++i)
         {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pd {};
@@ -212,6 +212,8 @@ int wmain(int argc, wchar_t** argv)
                 auto hr = compiler.create(g.d.Get(), geometryRoot, pd, pipeline[i], pipelineError);
                 if (FAILED(hr))
                     throw std::runtime_error(pipelineError);
+                if (FAILED(compiler.createVertexCapture(g.d.Get(), geometryRoot, pd, vertexCapture, pipelineError)))
+                    throw std::runtime_error(pipelineError);
                 auto rejected = pd;
                 rejected.DepthStencilState.DepthEnable = TRUE;
                 rejected.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -252,6 +254,7 @@ int wmain(int argc, wchar_t** argv)
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
         UINT64 imageBytes;
         g.d->GetCopyableFootprints(&tex, 0, 1, 0, &footprint, nullptr, nullptr, &imageBytes);
+        auto vertexColorReadback = g.buffer(imageBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         auto readback = g.buffer(imageBytes * 4 + SOBytes * 2 + HistoryBytes + CaptureBytes, D3D12_HEAP_TYPE_READBACK,
                                  D3D12_RESOURCE_STATE_COPY_DEST);
         g.begin();
@@ -378,6 +381,21 @@ int wmain(int argc, wchar_t** argv)
                     dst.PlacedFootprint.Offset = 0;
                     g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                     g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    D3D12_RESOURCE_BARRIER order {};
+                    order.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    order.UAV.pResource = history[current].Get();
+                    g.c->ResourceBarrier(1, &order);
+                    saved.replay(g.c.Get(), root.Get());
+                    g.c->SetPipelineState(vertexCapture.Get());
+                    g.c->SetGraphicsRoot32BitConstants(1, 8, &hc, 0);
+                    g.c->SetGraphicsRootShaderResourceView(2, history[previous]->GetGPUVirtualAddress());
+                    g.c->SetGraphicsRootUnorderedAccessView(3, history[current]->GetGPUVirtualAddress());
+                    g.c->ClearRenderTargetView(handles[0], emptyColor, 0, nullptr);
+                    g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+                    g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    dst.pResource = vertexColorReadback.Get();
+                    g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                    g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 }
             }
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -394,6 +412,12 @@ int wmain(int argc, wchar_t** argv)
             D3D12_RANGE range { 0, (SIZE_T) (imageBytes * 4 + SOBytes * 2 + HistoryBytes + CaptureBytes) };
             check(readback->Map(0, &range, &m));
             auto* b = (unsigned char*) m;
+            void* vertexColor = nullptr;
+            D3D12_RANGE vertexRange { 0, SIZE_T(imageBytes) };
+            check(vertexColorReadback->Map(0, &vertexRange, &vertexColor));
+            require(memcmp(b, vertexColor, SIZE_T(imageBytes)) == 0, "Vertex-only capture changed original material");
+            D3D12_RANGE vertexNoWrite { 0, 0 };
+            vertexColorReadback->Unmap(0, &vertexNoWrite);
             require(memcmp(b, b + imageBytes, (size_t) imageBytes) == 0, "Original pixel output changed");
             require(memcmp(b, b + imageBytes * 3, (size_t) imageBytes) == 0,
                     "Original color/discard changed with simultaneous capture");

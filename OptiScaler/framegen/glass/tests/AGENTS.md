@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Vertex-only capture keeps original PS and passes five-frame GPU color/history checks. Game module connection remains pending.
+
 - [SourceSlots.md](SourceSlots.md): Live enqueue probe stopped after 4,096 updates; three associated recorded skinning VS accept history instrumentation. Cross-time owner overlaps are not admitted identity; live MV/FG integration remains absent.
 
 - [Experiments.md](Experiments.md): Actual array setter identified; same pointer/count does not prove unchanged content. Secondary +0x158 array absent in 1,214 live owner snapshots and not admitted as previous history.
