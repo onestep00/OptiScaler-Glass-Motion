@@ -6,6 +6,7 @@
 #include "../GeometryCoverageRecorder.h"
 #include "ExperimentDrawCheck.h"
 extern bool geometryFixturePacket;
+extern bool geometryFixtureMissingIdentity;
 extern std::uint32_t geometryFixtureFrame;
 struct CaptureOwner final : GlassFg::GeometryDrawCaptureOwner
 {
@@ -423,7 +424,10 @@ int wmain(int argc, wchar_t** argv)
                 waitFile(recorderOutput / "request-2" / "active.txt");
             }
             if (recorder)
+            {
                 geometryFixtureFrame = frame;
+                geometryFixtureMissingIdentity = frame >= 5;
+            }
             UINT order[10] {};
             std::array<GlassFg::GeometryInstance, 10> mapping {};
             for (UINT i = 0; i < 3; ++i)
@@ -803,18 +807,48 @@ int wmain(int argc, wchar_t** argv)
                     "Capture request reused an earlier session's recording");
             const auto data = read(captureDirectory / "objects-0.bin");
             constexpr UINT words = 1 + (W * H + 31) / 32;
-            require(data.size() == 3 * words * 4, "Recorder allocation size");
+            require(data.size() == 5 * words * 4, "Recorder allocation size");
             for (UINT i = 0; i < 3; ++i)
                 for (UINT p = 0; p < W * H; ++p)
                 {
                     UINT word;
                     memcpy(&word, data.data() + (i * words + 1 + p / 32) * 4, 4);
-                    require(((word >> (p % 32)) & 1) == expectedCoverage[(frame * 3 + i) * W * H + p],
+                    const unsigned expected = frame >= 5 && i == 1 ? 0u : expectedCoverage[(frame * 3 + i) * W * H + p];
+                    require(((word >> (p % 32)) & 1) == expected,
                             "Recorded engine-mapped material coverage differs from original draw");
                 }
+            require(provenance.find("coverage_format=2\n") != std::string::npos &&
+                        provenance.find("reference_same_draw=1\n") != std::string::npos &&
+                        provenance.find("reference_object_mapping=0\n") != std::string::npos,
+                    "Missing same-draw independent reference metadata");
+            require(provenance.find("recording_epoch=0\n") == std::string::npos &&
+                        provenance.find("recording_epoch=") != std::string::npos &&
+                        read(captureDirectory / "objects-0.vs.dxil") == vs &&
+                        read(captureDirectory / "objects-0.ps.dxil") == ps,
+                    "Original same-draw shader/recording provenance lost");
+            unsigned missingMapped = 0;
+            for (UINT p = 0; p < W * H; ++p)
+            {
+                bool originalCovered = false, mapped = false;
+                for (UINT i = 0; i < 3; ++i)
+                {
+                    originalCovered |= expectedCoverage[(frame * 3 + i) * W * H + p] != 0;
+                    const auto word = reinterpret_cast<const UINT*>(data.data())[i * words + 1 + p / 32];
+                    mapped |= ((word >> (p % 32)) & 1) != 0;
+                }
+                for (UINT reference = 3; reference < 5; ++reference)
+                {
+                    const auto word = reinterpret_cast<const UINT*>(data.data())[reference * words + 1 + p / 32];
+                    require((((word >> (p % 32)) & 1) != 0) == originalCovered,
+                            "Same-draw reference lost original material pixels");
+                }
+                missingMapped += originalCovered && !mapped;
+            }
+            require(frame >= 5 ? missingMapped > 20 : missingMapped == 0,
+                    "Reference did not distinguish deliberately missing object mapping");
             }
             printf("PASS recorder_worker=1 completion_and_discard=1 requests_same_process=2 original_material_samples=%u original_pixels=%llu "
-                   "motion_produced=0 game_hooks=0\n", 2 * 3 * W * H, exact);
+                   "same_draw_reference=1 missing_mapping_detected=1 motion_produced=0 game_hooks=0\n", 2 * 3 * W * H, exact);
             return 0;
         }
         if (coverageOnly)

@@ -8,8 +8,10 @@ namespace GlassFg::Detail
 // Only appended instrumentation is changed here, never the original PS body.
 // Its original exports are retained by RewriteMaterialMotion.
 inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped = false, unsigned instanceMapId = 0,
-                                       bool coverageOnly = false)
+                                       bool coverageOnly = false, bool auditCoverage = false)
 {
+    if (auditCoverage && !coverageOnly)
+        throw std::runtime_error("Coverage audit requires coverage storage");
     if (coverageOnly && !mapped)
         throw std::runtime_error("Coverage requires object mapping");
     for (const auto* condition : { "bad", "empty", "nonfinite" })
@@ -20,7 +22,7 @@ inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped
             instrumentation.erase(at, discard.size());
     }
     instrumentation.erase(instrumentation.find("  call void @dx.op.storeOutput.f32"));
-    if (mapped)
+    if (mapped && !auditCoverage)
     {
         const auto mapInput = instrumentation.find("  %glass.mapindex =");
         if (mapInput == std::string::npos)
@@ -32,6 +34,54 @@ inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped
                                "glass.capturebegin:\n");
     }
     std::ostringstream code;
+    if (auditCoverage)
+    {
+        // No map/history branch precedes these reference writes. Original
+        // material discard and early depth still apply; original color survives.
+        code << R"(  %glass.auditroi = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 2)
+  %glass.auditdest = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 3)
+)";
+        for (unsigned c = 0; c < 4; ++c)
+            code << "  %glass.ar" << c << " = extractvalue %dx.types.CBufRet.i32 %glass.auditroi, " << c << "\n"
+                 << "  %glass.ad" << c << " = extractvalue %dx.types.CBufRet.i32 %glass.auditdest, " << c << "\n";
+        code << R"(  %glass.ax = fptoui float %glass.s0 to i32
+  %glass.ay = fptoui float %glass.s1 to i32
+  %glass.arx = sub i32 %glass.ax, %glass.ar0
+  %glass.ary = sub i32 %glass.ay, %glass.ar1
+  %glass.axok = icmp ult i32 %glass.arx, %glass.ar2
+  %glass.ayok = icmp ult i32 %glass.ary, %glass.ar3
+  %glass.axyok = and i1 %glass.axok, %glass.ayok
+  br i1 %glass.axyok, label %glass.auditaddress, label %glass.auditend
+glass.auditaddress:
+  %glass.arow = mul i32 %glass.ary, %glass.ad1
+  %glass.apixel = add i32 %glass.arow, %glass.arx
+  %glass.abit0 = add i32 %glass.apixel, %glass.ad0
+  %glass.abit1 = add i32 %glass.apixel, %glass.ad3
+  %glass.abound0 = icmp ult i32 %glass.abit0, %glass.ad2
+  %glass.abound1 = icmp ult i32 %glass.abit1, %glass.ad2
+  %glass.abound = and i1 %glass.abound0, %glass.abound1
+  br i1 %glass.abound, label %glass.auditwrite, label %glass.auditend
+glass.auditwrite:
+  %glass.auditbuffer = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 1, i1 false)
+  %glass.aword0 = lshr i32 %glass.abit0, 5
+  %glass.aaddress0 = shl i32 %glass.aword0, 2
+  %glass.ashift0 = and i32 %glass.abit0, 31
+  %glass.amask0 = shl i32 1, %glass.ashift0
+  %glass.aignored0 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %glass.auditbuffer, i32 2, i32 %glass.aaddress0, i32 undef, i32 undef, i32 %glass.amask0)
+  br i1 %glass.hasall, label %glass.auditcontribution, label %glass.auditend
+glass.auditcontribution:
+  %glass.aword1 = lshr i32 %glass.abit1, 5
+  %glass.aaddress1 = shl i32 %glass.aword1, 2
+  %glass.ashift1 = and i32 %glass.abit1, 31
+  %glass.amask1 = shl i32 1, %glass.ashift1
+  %glass.aignored1 = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %glass.auditbuffer, i32 2, i32 %glass.aaddress1, i32 undef, i32 undef, i32 %glass.amask1)
+  br label %glass.auditend
+glass.auditend:
+  %glass.mappedactive = icmp ne i32 %glass.mapindex, -1
+  br i1 %glass.mappedactive, label %glass.capturebegin, label %glass.captureend
+glass.capturebegin:
+)";
+    }
     if (mapped)
         code << R"(  %glass.mapok = icmp ne i32 %glass.mapindex, -1
   %glass.recordok = and i1 %glass.mapok, %glass.hasall

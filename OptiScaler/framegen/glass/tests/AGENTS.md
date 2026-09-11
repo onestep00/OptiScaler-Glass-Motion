@@ -22,7 +22,7 @@
 
 - [GeometryDraws.md](GeometryDraws.md): Mesh range decoder rejects malformed/stale callback inputs; owned-memory fixture only. Coverage sidecar preserves original draw/raster evidence without claiming engine history in the GPU fixture.
 
-- [GeometryShaders.md](GeometryShaders.md): `--recorder` verifies two capture requests in the same process, submission/Reset gates and original per-object material bits on an independent device. Not deployed.
+- [GeometryShaders.md](GeometryShaders.md): `--recorder` verifies two requests, same-draw references independent of missing object mapping, original shaders and submission/Reset gates on an independent device. Not deployed.
 
 - [GeometryShaders.md](GeometryShaders.md): `--coverage` verifies per-object material bits without motion; `--capture-command` verifies production draw insertion/restoration with actual shader-history MV on a standalone device. Neither is game integration.
 

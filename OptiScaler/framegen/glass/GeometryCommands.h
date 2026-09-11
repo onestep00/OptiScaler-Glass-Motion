@@ -23,6 +23,7 @@ GeometryCommandStats GetGeometryCommandStats() noexcept;
 // must separately retain GPU resources through completion AND recording discard.
 const GraphicsRootBindings* ReadGeometryBindings(ID3D12GraphicsCommandList* command) noexcept;
 const GeometryRasterState* ReadGeometryRasterState(ID3D12GraphicsCommandList* command) noexcept;
+std::uint64_t ReadGeometryRecordingEpoch(ID3D12GraphicsCommandList* command) noexcept;
 // One process-resident owner, registered once. The owner handles admission and
 // resource lifetime; this observer guarantees one original draw and restoration.
 bool RegisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept;

@@ -249,6 +249,14 @@ HRESULT GeometryCompiler::createCoverage(ID3D12Device* device, const GeometryRoo
         return reject(error, "Object coverage requires per-instance identity mapping");
     return createTarget(device, root, original, output, error, MaterialMotionTarget::OriginalColorAndCoverage);
 }
+HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
+                                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                              ComPtr<ID3D12PipelineState>& output, std::string& error)
+{
+    if (root.layout != GeometryLayout::PerInstance)
+        return reject(error, "Coverage audit requires per-instance identity mapping");
+    return createTarget(device, root, original, output, error, MaterialMotionTarget::OriginalColorAndCoverageAudit);
+}
 HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot& root,
                                        const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,

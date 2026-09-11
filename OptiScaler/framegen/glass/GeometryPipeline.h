@@ -45,6 +45,9 @@ class GeometryCompiler
     HRESULT createCoverage(ID3D12Device* device, const GeometryRoot& root,
                            const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                            Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
+    HRESULT createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
+                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
 
   private:
     struct Impl;

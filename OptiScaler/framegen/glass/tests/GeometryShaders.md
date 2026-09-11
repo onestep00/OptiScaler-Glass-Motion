@@ -2,12 +2,39 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: repeatable coverage recorder independently GPU verified; continuous engine object history and FG integration incomplete
+- Status: repeatable same-draw coverage audit independently GPU verified; continuous engine object history and FG integration incomplete
 - Deployment: 7769d34 coverage diagnostic observed live; seven captures contain only four covered pixels. Additional draw provenance below is not deployed
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
 
 ## Implemented source
+
+The diagnostic now uses `OriginalColorAndCoverageAudit`: the same PS records
+two reference bit regions before any object-map rejection. One records surviving
+PS pixels after original discard and early depth, the other records material
+color/transmission contribution. Existing per-instance bits follow afterwards.
+This isolates absent material contribution from object-map/storage losses without
+segmenting an image or replaying the material draw. It does not verify the view
+or establish complete object contours; both references still share the original
+material computation in the instrumented draw. Ordinary production/history and
+coverage targets do not include these diagnostic writes.
+
+Format 2 appends the two reference regions after the per-instance regions. The
+`.draw` sidecar supplies their exact first bits, stride, pixel count and the
+recording epoch/pipeline identity. Original VS/PS bytes are saved by the worker
+as `.vs.dxil`/`.ps.dxil`, for local inspection only. The same fixed diagnostic
+budget charges the added buffers; no new readback or shader file write occurs
+on the render thread. These references are not additional per-object full-size
+textures in the proposed continuous correction.
+
+The independent recorder fixture deliberately removes one instance identity in
+the second session. Original color stays exact and both material references
+still match separate original draws. The omitted object's mapped bits remain
+zero. A decoded sample contains 459 contributing pixels and 364 mapped pixels:
+95 missing pixels are exposed, with no excess mapped pixels. Its comparison
+image was inspected. This is owned synthetic geometry, not a recovered game
+silhouette. Original shader artifacts are byte-identical to the fixture inputs.
+The live four-pixel failure below has not yet been recaptured with this audit.
 
 Fresh-process observation of installed DLL SHA-256
 `f025dfbd3512195420504ce8119d66766cc51a96b021a68d00aad02c2cf7e680`
@@ -62,7 +89,9 @@ written only after both events and the actual GPU fence. Copy calls run without
 the recorder mutex, avoiding inversion with the native host's submission lock.
 The independent `--recorder` fixture stops and restarts capture within one
 process, compares 107,520 individual material samples across both requests with
-original draws, and preserves 143,360 original color pixels.
+original draws (including an intentionally inactive mapping), and preserves
+143,360 original color pixels. Both same-draw reference masks match the original
+material union independently of that omitted mapping.
 The fixture supplies test identities, not Cyberpunk objects. This recorder emits
 no MV and makes no FG substitution. The fresh-game limitation is recorded above.
 

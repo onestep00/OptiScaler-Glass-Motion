@@ -15,7 +15,7 @@
 - [tests/Experiments.md](tests/Experiments.md): Dynamic DLL loader, GPU retirement and borrowed draw DLL bridge pass independent checks. FG payload and live observer registration remain incomplete.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Actual mesh chunk range decoder added. Diagnostic draw metadata records counts/bindings, without claiming topology or view identity. New metadata is not deployed.
-- [tests/GeometryShaders.md](tests/GeometryShaders.md): Same-process Stop/Start requests and 64-shape resampling pass independent GPU checks with provenance sidecars. Live re-request and target coverage remain pending.
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Same-process requests and same-draw surviving/contributing references detect deliberate missing mapping on an independent GPU. Original shader/recording artifacts retained locally; live target coverage pending.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Live recorder saved seven nearly empty captures (four pixels total). Readback works; usable target coverage, object MV and FG substitution remain unverified/incomplete.
 

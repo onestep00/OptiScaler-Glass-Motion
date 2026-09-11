@@ -62,7 +62,10 @@ enum class MaterialMotionTarget
     SeparateTarget,
     OriginalColorAndCapture,
     // Diagnostic object coverage only. No motion is produced or implied.
-    OriginalColorAndCoverage
+    OriginalColorAndCoverage,
+    // Diagnostic: also record same-draw surviving/contributing pixels before
+    // object mapping. The two reference bit regions use capture CB base/reserved.
+    OriginalColorAndCoverageAudit
 };
 
 struct MaterialCaptureConstants

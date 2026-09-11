@@ -458,9 +458,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
     try
     {
         need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture ||
-                 target == MaterialMotionTarget::OriginalColorAndCoverage,
+                 target == MaterialMotionTarget::OriginalColorAndCoverage ||
+                 target == MaterialMotionTarget::OriginalColorAndCoverageAudit,
              "Unsupported material target");
-        const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage;
+        const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit;
+        const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage || auditCoverage;
         const bool retainColor = target != MaterialMotionTarget::SeparateTarget;
         need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
         const bool mapped = layout == GeometryLayout::PerInstance;
@@ -745,7 +747,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
         body.replace(body.find("  ret void"), 10,
-                     retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly)
+                     retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly, auditCoverage)
                                  : code.str());
         if (mapped)
         {

@@ -442,6 +442,12 @@ const GeometryRasterState* ReadGeometryRasterState(ID3D12GraphicsCommandList* co
         return &record->raster;
     return nullptr;
 }
+std::uint64_t ReadGeometryRecordingEpoch(ID3D12GraphicsCommandList* command) noexcept
+{
+    if (auto* record = find(command))
+        return record->epoch;
+    return 0;
+}
 
 bool StartGeometryCommands(ID3D12Device* device) noexcept
 {

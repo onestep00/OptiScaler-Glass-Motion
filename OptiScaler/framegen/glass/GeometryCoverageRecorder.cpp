@@ -38,6 +38,7 @@ struct Slot
     GeometryRasterState raster;
     CyberpunkMeshShape meshShape;
     GeometryIndexedArguments arguments {};
+    UINT64 recording = 0;
 };
 void checked(HRESULT result)
 {
@@ -110,7 +111,7 @@ struct Recorder final : GeometryDrawCaptureOwner
     {
         GeometryCompiler dxc(compiler);
         std::string error;
-        if (FAILED(dxc.createCoverage(device.Get(), *slot.lease->root, slot.lease->description, slot.pipeline, error)))
+        if (FAILED(dxc.createCoverageAudit(device.Get(), *slot.lease->root, slot.lease->description, slot.pipeline, error)))
             throw std::runtime_error(error);
         slot.bits = buffer(slot.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true);
         slot.readback = buffer(slot.bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -194,12 +195,14 @@ struct Recorder final : GeometryDrawCaptureOwner
                 slot.frame = draw.frame;
                 slot.chunk = draw.chunk;
                 slot.raster = *raster;
+                slot.recording = ReadGeometryRecordingEpoch(command);
                 // Only for the selected diagnostic draw, not every observed
                 // draw. Copy borrowed engine data before leaving its scope.
                 slot.meshShape = ReadCyberpunkMeshShape(draw);
                 slot.arguments = args;
+                const UINT reference = (args.instances * slot.wordsPerObject + 1) * 32;
                 const MaterialCaptureConstants constants { 0, 0, 1.f / width, 1.f / height, 0, 0, draw.frame, 0,
-                                                           0, 0, width, height, 0, width, 1, 0 };
+                    0, 0, width, height, reference, width, UINT(slot.bytes * 8), reference + slot.wordsPerObject * 32 };
                 memcpy(slot.constantData, &constants, sizeof(constants));
                 prepared = { slot.pipeline.Get(), { 0, args.instances, 0, 0, args.instances, 0, draw.frame, 0 },
                     slot.map->GetGPUVirtualAddress(), slot.dummy->GetGPUVirtualAddress() + 32,
@@ -226,7 +229,7 @@ struct Recorder final : GeometryDrawCaptureOwner
             if (slot.phase == Slot::Empty)
             {
                 const UINT words = UINT(1 + (UINT64(width) * height + 31) / 32);
-                const UINT64 bytes = UINT64(words) * args.instances * 4;
+                const UINT64 bytes = UINT64(words) * (args.instances + 2) * 4;
                 const UINT64 charge = ((bytes + 65535) & ~UINT64(65535)) * 3 + 1024 * 1024;
                 if (allocated + charge > Budget || bytes * 8 > UINT32_MAX)
                     return false;
@@ -318,10 +321,24 @@ struct Recorder final : GeometryDrawCaptureOwner
             throw std::runtime_error("Coverage metadata write failed");
         meta.close();
         binary.close();
+        // Worker-only original shader artifacts for same-draw offline inspection.
+        // The cache lease owns these bytes. Raw game shaders remain local.
+        const auto saveShader = [&](const char* suffix, const std::vector<std::byte>& bytes)
+        {
+            std::ofstream file(stem.string() + suffix, std::ios::binary);
+            file.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+            file.close();
+            if (!file) throw std::runtime_error("Original shader artifact write failed");
+        };
+        saveShader(".vs.dxil", slot.lease->vertexBytes);
+        saveShader(".ps.dxil", slot.lease->pixelBytes);
         std::ofstream draw(stem.string() + ".draw");
         const auto& r = slot.raster;
         const auto& m = slot.meshShape;
-        draw << "engine_mesh_shape=" << bool(m) << "\nvertices=" << m.vertices
+        draw << "recording_epoch=" << slot.recording << "\npipeline_identity=" << slot.lease->identity
+             << "\noriginal_vs_bytes=" << slot.lease->vertexBytes.size()
+             << "\noriginal_ps_bytes=" << slot.lease->pixelBytes.size()
+             << "\nengine_mesh_shape=" << bool(m) << "\nvertices=" << m.vertices
              << "\nindices=" << m.indices << "\nchunk_address=" << m.chunkAddress
              << "\nvertex_buffer=" << m.vertexBuffer << "\nindex_buffer=" << m.indexBuffer
              << "\nindex_offset=" << m.indexOffset << "\nindex_type=" << unsigned(m.indexType)
@@ -337,7 +354,11 @@ struct Recorder final : GeometryDrawCaptureOwner
              << "\ndsv_handle=" << r.depth.ptr << "\nrtv_count=" << r.targetCount;
         for (unsigned i = 0; i < r.targetCount; ++i)
             draw << "\nrtv_handle_" << i << '=' << r.targets[i].ptr;
-        draw << "\nview_identity_proven=0\ntopology_history_proven=0\nmotion_produced=0\n";
+        draw << "\ncoverage_format=2\nreference_surviving_first_bit=" << (slot.instances * slot.wordsPerObject + 1) * 32
+             << "\nreference_contributing_first_bit=" << ((slot.instances + 1) * slot.wordsPerObject + 1) * 32
+             << "\nreference_stride=" << slot.width << "\nreference_pixels=" << UINT64(slot.width) * slot.height
+             << "\nreference_same_draw=1\nreference_object_mapping=0"
+             << "\nview_identity_proven=0\ntopology_history_proven=0\nmotion_produced=0\n";
         draw.close();
         if (!draw || !meta || !binary)
             throw std::runtime_error("Coverage provenance file write failed");
