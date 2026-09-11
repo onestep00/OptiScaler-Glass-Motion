@@ -18,6 +18,10 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
+
+- [GeometryShaders.md](GeometryShaders.md): NativePairGpu adds analytic native pixel-MV checks; depth remains disabled in that fixture, so live pixel deployment is not approved by this result.
+
 - [GeometryShaders.md](GeometryShaders.md): Native-pair live capture and N-1 vertex comparison verified for one draw; screen boundary and FG input still absent.
 
 - [GeometryShaders.md](GeometryShaders.md): NativePairGpu verifies selected native outputs, perspective W, jitter distinction, tags and guards; recorder builds. Actual game pair/boundary capture remains incomplete.

@@ -601,7 +601,8 @@ VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsi
 
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
                                           MaterialDestination destinationFactor, MaterialMotionTarget target,
-                                          unsigned firstHistoryRegister, GeometryLayout layout)
+                                          unsigned firstHistoryRegister, GeometryLayout layout,
+                                          const NativeClipInputs* nativeInputs)
 {
     VertexHistoryShader result;
     try
@@ -613,9 +614,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit;
         const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage || auditCoverage;
         const bool retainColor = target != MaterialMotionTarget::SeparateTarget;
+        need(!nativeInputs || (retainColor && !coverageOnly), "Native motion requires retained-color capture");
         need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
         const bool mapped = layout == GeometryLayout::PerInstance;
         need(!coverageOnly || mapped, "Coverage requires object mapping");
+        need(!nativeInputs || !nativeInputs->countInvocations || mapped, "Native invocation audit requires mapped reserved record");
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
         while (!source.empty() && source.back() == '\0')
@@ -649,6 +652,25 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         auto signatures = split(metadata.get(entry[2]));
         need(signatures.size() == 3 && signatures[2] == "null", "Unsupported pixel signature");
         auto inputs = split(metadata.get(signatures[0])), outputs = split(metadata.get(signatures[1]));
+        if (nativeInputs)
+        {
+            need(source.find("@dx.op.discard") == std::string::npos,
+                 "Native depth-writing capture rejects discard");
+            need(nativeInputs->currentInput != nativeInputs->previousInput, "Identical native pixel inputs");
+            for (unsigned id : {nativeInputs->currentInput, nativeInputs->previousInput})
+            {
+                unsigned found = 0;
+                for (const auto& node : inputs)
+                {
+                    Signature s(metadata.get(node));
+                    if (s.id != id) continue;
+                    need(s.fields[2] == "i8 9" && s.fields[5] == "i8 2" && s.rows == 1 &&
+                             s.columns == 4 && s.fields[9] == "i8 0", "Native clip input must be linear float4");
+                    ++found;
+                }
+                need(found == 1, "Native pixel clip input absent or ambiguous");
+            }
+        }
         auto resources = entry[3] == "null" ? Parts { "null", "null", "null", "null" } : split(metadata.get(entry[3]));
         need(resources.size() == 4 && resources[1] == "null", "Pixel UAV side effects unsupported");
         for (const auto* op : { "dx.op.atomic", "dx.op.bufferStore", "dx.op.rawBufferStore", "dx.op.textureStore",
@@ -799,6 +821,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         code << "\n  br label %glass.pixel\nglass.pixel:\n";
         code << "  %glass.cb = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 " << constantId
              << ", i32 1, i1 false)\n";
+        if (nativeInputs && nativeInputs->countInvocations)
+            code << "  %glass.auditUav = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 1, i1 false)\n"
+                 << "  %glass.auditCount = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %glass.auditUav, i32 0, i32 16, i32 undef, i32 undef, i32 1)\n";
         for (unsigned i = 0; i < 2; ++i)
             code
                 << "  %glass.c" << i
@@ -806,15 +831,23 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                 << i << ")\n";
         for (unsigned c = 0; c < 4; ++c)
         {
-            code << "  %glass.p" << c << " = call float @dx.op.loadInput.f32(i32 4, i32 " << previous << ", i32 0, i8 "
+            code << "  %glass.p" << c << " = call float @dx.op.loadInput.f32(i32 4, i32 " << (nativeInputs ? nativeInputs->previousInput : previous) << ", i32 0, i8 "
                  << c << ", i32 undef)\n";
             code << "  %glass.v" << c << " = extractvalue %dx.types.CBufRet.f32 %glass.c0, " << c << "\n";
         }
         for (unsigned c = 0; c < 3; ++c)
             code << "  %glass.s" << c << " = call float @dx.op.loadInput.f32(i32 4, i32 " << position << ", i32 0, i8 "
                  << c << ", i32 undef)\n";
-        code << "  %glass.valid = call float @dx.op.loadInput.f32(i32 4, i32 " << previous + 1
-             << ", i32 0, i8 0, i32 undef)\n";
+        if (nativeInputs)
+        {
+            code << "  %glass.valid = fadd float 0.000000e+00, 0.000000e+00\n";
+            for (unsigned c = 0; c < 4; ++c)
+                code << "  %glass.nativeCurrent" << c << " = call float @dx.op.loadInput.f32(i32 4, i32 "
+                     << nativeInputs->currentInput << ", i32 0, i8 " << c << ", i32 undef)\n";
+        }
+        else
+            code << "  %glass.valid = call float @dx.op.loadInput.f32(i32 4, i32 " << previous + 1
+                 << ", i32 0, i8 0, i32 undef)\n";
         if (mapped)
             code << "  %glass.mapindex = call i32 @dx.op.loadInput.i32(i32 4, i32 " << previous + 2
                  << ", i32 0, i8 0, i32 undef)\n";
@@ -826,9 +859,17 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
 )";
         for (unsigned c = 0; c < 2; ++c)
         {
+            if (nativeInputs)
+            {
+                code << "  %glass.nativeNdc" << c << " = fdiv float %glass.nativeCurrent" << c << ", %glass.nativeCurrent3\n"
+                     << "  %glass.nativeHalf" << c << " = fmul float %glass.nativeNdc" << c << ", "
+                     << (c ? "-5.000000e-01" : "5.000000e-01") << "\n"
+                     << "  %glass.uv" << c << " = fadd float %glass.nativeHalf" << c << ", 5.000000e-01\n";
+            }
+            else
             code << "  %glass.local" << c << " = fsub float %glass.s" << c << ", %glass.v" << c << "\n"
-                 << "  %glass.uv" << c << " = fmul float %glass.local" << c << ", %glass.v" << c + 2 << "\n"
-                 << "  %glass.ndc" << c << " = fdiv float %glass.p" << c << ", %glass.p3\n"
+                 << "  %glass.uv" << c << " = fmul float %glass.local" << c << ", %glass.v" << c + 2 << "\n";
+            code << "  %glass.ndc" << c << " = fdiv float %glass.p" << c << ", %glass.p3\n"
                  << "  %glass.half" << c << " = fmul float %glass.ndc" << c << ", "
                  << (c ? "-5.000000e-01" : "5.000000e-01") << "\n"
                  << "  %glass.prev" << c << " = fadd float %glass.half" << c << ", 5.000000e-01\n"

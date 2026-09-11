@@ -9,6 +9,59 @@
 
 ## Implemented source
 
+Native pixel capture now ran through replaceable generations 5--7 in PID 68908.
+The first recording and several later mesh/chunk recordings contained only zeros;
+those are failed coverage samples, not boundary images. Generation 7's first
+sample at engine frame 26160 contains 95 depth-tested native PS invocations and
+exactly 95 stamped MV records, with zero object-status flags. It covers render
+coordinates x=1139..1184, y=123..147 at 2560x1440. Median motion is 2.3198 render
+pixels, maximum 2.5283. An optional diagnostic atomic counter at reserved byte 16
+distinguishes PS invocation from later object/MV rejection. It is off by default
+and requires reserving the first 32-byte record. Later samples can still be empty;
+this does not establish the cause of the earlier all-zero frames.
+
+Local artifacts are `work/glass-native-pixels-live-v3/analysis.json`,
+`native-mv-full.png`, `native-coverage-full.png`, and `native-mv-screen.png`.
+The visualization was inspected: it shows only two small disconnected fragments,
+not a complete cup/railing silhouette. Its 65 boundary pixels come from the actual
+raster mask's four-neighbor boundary, including occlusion cuts. It is not image
+segmentation, but neither does it establish the full object's intrinsic outline.
+There is no same-frame scene-color capture identifying the visible object.
+Do not present this as complete object coverage or a new FG input.
+
+`GLASS_CAPTURE_NATIVE_PIXELS` uses one-instance diagnostic draws, full viewport
+32-byte pixel records, and a 512 MiB accounted buffer budget. At 2560x1440 this
+allows one in-flight allocation group, reused after retirement. At most eight
+distinct observed mesh/chunk combinations are requested, with exact matching
+when prepared. This is diagnostic sampling, not a production material whitelist
+or memory strategy. All recorded jobs completed; generation 7 unloaded with
+75 cumulative recorded/retired jobs and zero pending. The resident host and
+existing FG correction remain unchanged during these replaceable experiments.
+
+The independent native test now also compares original and captured D32
+depth-writing draws with a foreground depth occluder and per-instance mapping.
+All 256 color/depth samples match exactly, 12 occluded samples are excluded,
+and 20 visible pixels match both the capture and invocation count. The mapped
+fixture intentionally has zero vertex-history capacity, as in this live native
+path. The existing five-frame geometry regression passed with 122,880 unchanged
+color samples and 6,017 motion samples. Other depth/stencil modes are not covered
+by this particular comparison.
+
+Native pixel-capture source now accepts explicitly identified, perspective-linear
+current/previous clip inputs. It computes normalized motion in the original PS
+and retains original color exports. The native mode requires disabled blending/
+logic operations and no alpha-to-coverage; it rejects original discard, depth
+exports and resource-write side effects. It does not infer material opacity: the
+native G-buffer diagnostic records zero transmission as a coverage marker only.
+Ordinary transparent-material capture remains on its existing admission path.
+
+NativePairGpu now exercises the native pixel writer without previous-frame buffer
+history. Its 32 raster samples agree with independent double-precision barycentric
+correspondence within 1.005e-7 normalized units, with varying current/previous W
+and separate raster jitter. Its subsequent depth comparison and bounded live
+pixel capture are documented above. General object coverage and FG integration
+remain incomplete.
+
 Live native-pair checkpoint: host SHA-256
 `31b145045ee78ed31a041b25066bf1737d615100e46eabd8fd4c6b10722c1853`
 was deployed through MO2 and loaded in PID 68908 together with the existing MFG

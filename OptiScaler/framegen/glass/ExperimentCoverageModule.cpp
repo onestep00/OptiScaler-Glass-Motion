@@ -20,8 +20,13 @@ namespace
 using Microsoft::WRL::ComPtr;
 using namespace GlassFg;
 HMODULE moduleIdentity = nullptr;
-constexpr unsigned SlotCount = 8, MaxInstances = 64, MaxCaptures = 64;
-constexpr uint64_t Budget = 256ull * 1024 * 1024;
+#ifdef GLASS_CAPTURE_NATIVE_PIXELS
+constexpr bool NativePixelDiagnostic = true;
+#else
+constexpr bool NativePixelDiagnostic = false;
+#endif
+constexpr unsigned SlotCount = 8, MaxInstances = 64, MaxCaptures = NativePixelDiagnostic ? 8 : 64;
+constexpr uint64_t Budget = (NativePixelDiagnostic ? 512ull : 256ull) * 1024 * 1024;
 #ifdef GLASS_CAPTURE_VERTEX_COVERAGE
 constexpr bool VertexCoverageDiagnostic = true;
 #else
@@ -82,6 +87,8 @@ struct Slot
     void* mapping = nullptr;
     void* constantData = nullptr;
     uint64_t bytes = 0, vertexBytes = 0, charge = 0, job = 0, recording = 0, frame = 0, retiredAtFrame = 0;
+    uint64_t requestedMesh = 0;
+    unsigned requestedChunk = 0;
     unsigned index = 0, width = 0, height = 0, left = 0, top = 0, instances = 0, words = 0;
     GlassExperimentDrawInput draw {};
     GlassExperimentMesh mesh {};
@@ -102,7 +109,7 @@ class Coverage
     uint64_t nativePipeline = 0;
     uint64_t selectionAccepted = 0, selectionRejected = 0;
     std::array<Slot, SlotCount> slots;
-    struct Selection { uint64_t pipeline; unsigned width, height, instances; };
+    struct Selection { uint64_t pipeline; unsigned width, height, instances; uint64_t mesh; unsigned chunk; };
     std::array<Selection, MaxCaptures> selected {};
     unsigned selections = 0;
     uint64_t allocated = 0;
@@ -134,7 +141,10 @@ class Coverage
         const auto& original = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(view.descriptor);
         // Recorded Cyberpunk layout. Capturing these words is not view/history admission.
         const VertexConstantPair cameraWords { 0, 1, 848, 51 };
-        const auto compiled = VertexCoverageDiagnostic
+        const NativeClipInputs nativeInputs {clipPair.currentOutput,clipPair.previousOutput,true};
+        const auto compiled = NativePixelDiagnostic
+            ? dxc.createNativeMotionCapture(device.Get(), root, original, slot.pipeline, error, nativeInputs)
+            : VertexCoverageDiagnostic
             ? dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error, &cameraWords)
             : NativePairDiagnostic
             ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, nullptr, &clipPair)
@@ -228,6 +238,21 @@ class Coverage
             targets << '\n';
         }
         targets.close(); if (!targets) throw std::runtime_error("Capture target metadata failed");
+        if constexpr (NativePixelDiagnostic)
+        {
+            std::ofstream meta(withSuffix(".draw"));
+            meta << "native_pixel_format=2\nrecord_bytes=32\nfirst_pixel=1\nstatus_word=0\ninvocation_counter_byte=16\nframe=" << slot.frame
+                 << "\nwidth=" << slot.width << "\nheight=" << slot.height << "\nleft=" << slot.left << "\ntop=" << slot.top
+                 << "\nmesh=" << slot.draw.mesh << "\nchunk=" << slot.draw.chunk << "\npipeline=" << slot.view.identity
+                 << "\nproxy=" << slot.objects[0].proxy << "\ncurrent_input=" << clipPair.currentOutput
+                 << "\nprevious_input=" << clipPair.previousOutput
+                 << "\ncoverage=original_native_depth_tested_draw\ntransmission_is_placeholder=1\nfg_substitution=0\n";
+            meta.close(); if(!meta) throw std::runtime_error("Native pixel metadata failed");
+            std::ofstream done(withSuffix(".done"));
+            done << "native_pixel_capture=1\nbytes=" << slot.bytes << "\nframe=" << slot.frame << '\n';
+            done.close(); if(!done) throw std::runtime_error("Native pixel completion failed");
+            return;
+        }
         if constexpr (VertexOutputDiagnostic)
         {
             std::ofstream csv(withSuffix(".csv"));
@@ -415,7 +440,8 @@ class Coverage
             !d->instances || d->instances > MaxInstances || !d->objectAt || !d->meshShape || d->objectCount > 4096 ||
             !d->pipelineIdentity || !d->pipelineAccess.retain || !d->pipelineAccess.view || !d->pipelineAccess.release)
             return 0;
-        if ((NativePairDiagnostic && d->pipelineIdentity != nativePipeline) || !selection.matches(*d))
+        if (((NativePairDiagnostic || NativePixelDiagnostic) && d->pipelineIdentity != nativePipeline) ||
+            (NativePixelDiagnostic && d->instances != 1) || !selection.matches(*d))
         { ++selectionRejected; return 0; }
         ++selectionAccepted;
         for (unsigned i = 0; i < 4; ++i)
@@ -435,6 +461,7 @@ class Coverage
         for (auto& slot : slots)
             if (slot.state == Slot::Ready && slot.view.identity == d->pipelineIdentity && slot.width == width &&
                 slot.height == height && slot.instances == d->instances &&
+                (!NativePixelDiagnostic || (slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk)) &&
                 (!VertexOutputDiagnostic || slot.mesh.vertices == vertexShape.vertices))
             {
                 slot.left = left; slot.top = top; slot.objects = {};
@@ -454,7 +481,7 @@ class Coverage
                     slot.objects[index] = object;
                     mapping[index] = { 0, 0, 0, object.generation, left, top, width, height,
                                        (status + 1) * 32, width, unsigned(slot.bytes * 8), status };
-                    if constexpr (!VertexOutputDiagnostic)
+                    if constexpr (!VertexOutputDiagnostic && !NativePixelDiagnostic)
                         if (!mapping[index].validCoverage(slot.bytes / 4)) return -1;
                 }
                 if constexpr (DrawInstanceDiagnostic && !VertexOutputDiagnostic)
@@ -495,6 +522,16 @@ class Coverage
                 prepared.previous = slot.map->GetGPUVirtualAddress(); prepared.current = slot.dummy->GetGPUVirtualAddress() + 32;
                 prepared.material = slot.constants->GetGPUVirtualAddress(); prepared.capture = slot.bits->GetGPUVirtualAddress();
                 prepared.mapping = slot.map->GetGPUVirtualAddress(); slot.state = Slot::Reserved;
+                if constexpr (NativePixelDiagnostic)
+                {
+                    mapping[0] = {0,0,0,1,left,top,width,height,1,width,unsigned(slot.bytes/32),0};
+                    auto nativeConstants=constants;
+                    nativeConstants.jitterDeltaX=nativeConstants.jitterDeltaY=0;
+                    nativeConstants.base=1; nativeConstants.stride=width;
+                    nativeConstants.capacity=unsigned(slot.bytes/32);
+                    nativeConstants.reserved=0;
+                    memcpy(slot.constantData,&nativeConstants,sizeof(nativeConstants));
+                }
                 if constexpr (VertexOutputDiagnostic)
                 {
                     // Frame-local ordinal storage only. Tags never authorize temporal identity.
@@ -528,14 +565,16 @@ class Coverage
         if constexpr (!VertexOutputDiagnostic)
             for (unsigned i = 0; i < selections; ++i)
                 if (selected[i].pipeline == d->pipelineIdentity && selected[i].width == width &&
-                    selected[i].height == height && selected[i].instances == d->instances) return 0;
+                    selected[i].height == height && selected[i].instances == d->instances &&
+                    (!NativePixelDiagnostic || (selected[i].mesh == d->mesh && selected[i].chunk == d->chunk))) return 0;
         if (selections == MaxCaptures) return 0;
         for (auto& slot : slots) if (slot.state == Slot::Empty)
         {
             const unsigned words = unsigned(1 + (uint64_t(width) * height + 31) / 32);
             const uint64_t vertexBytes = uint64_t(vertexShape.vertices) * d->instances * VertexRecordBytes;
             const uint64_t coverageBytes = uint64_t(words) * (d->instances + 2) * 4;
-            const uint64_t bytes = VertexCoverageDiagnostic ? vertexBytes + coverageBytes
+            const uint64_t bytes = NativePixelDiagnostic ? (uint64_t(width)*height+1)*32
+                : VertexCoverageDiagnostic ? vertexBytes + coverageBytes
                 : VertexOutputDiagnostic ? vertexBytes
                 : uint64_t(words) * (d->instances + 2) * 4;
             slot.vertexBytes = VertexOutputDiagnostic ? vertexBytes : 0;
@@ -546,9 +585,10 @@ class Coverage
             slot.source.access.source = nullptr;
             if (!slot.source.value) return 0;
             slot.width = width; slot.height = height; slot.instances = d->instances; slot.words = words;
+            slot.requestedMesh=d->mesh; slot.requestedChunk=d->chunk;
             slot.bytes = bytes; slot.charge = charge; allocated += charge; slot.index = selections;
             if constexpr (VertexOutputDiagnostic) slot.mesh = vertexShape;
-            selected[selections++] = { d->pipelineIdentity, width, height, d->instances };
+            selected[selections++] = { d->pipelineIdentity, width, height, d->instances, d->mesh, d->chunk };
             slot.state = Slot::Requested; changed.notify_one();
             if constexpr (!VertexOutputDiagnostic) break;
             if (selections == MaxCaptures) break;
@@ -576,7 +616,7 @@ int32_t create(const GlassExperimentHost* host, void** context)
         }
         VertexClipPair pair {};
         uint64_t selectedPipeline = 0;
-        if constexpr (NativePairDiagnostic)
+        if constexpr (NativePairDiagnostic || NativePixelDiagnostic)
         {
             std::string line, marker, extra;
             if (!std::getline(file, line)) return -1;

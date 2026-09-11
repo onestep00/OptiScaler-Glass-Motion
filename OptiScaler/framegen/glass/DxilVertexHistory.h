@@ -59,6 +59,13 @@ struct VertexClipPair
 {
     unsigned currentOutput, previousOutput;
 };
+struct NativeClipInputs
+{
+    unsigned currentInput, previousInput;
+    // Diagnostic only: reserve capture bytes 0..31 and start pixels at >=1.
+    // Adds an invocation counter at byte 16 before object/motion rejection.
+    bool countInvocations = false;
+};
 // Keep an explicitly identified native float4 render target as SV_Target0.
 // Preserves native inputs/calculation/discard; does not identify motion semantics,
 // change depth state, provide previous transforms, or select an object boundary.
@@ -121,7 +128,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                                           MaterialDestination destination,
                                           MaterialMotionTarget target = MaterialMotionTarget::SeparateTarget,
                                           unsigned firstHistoryRegister = UINT32_MAX,
-                                          GeometryLayout layout = GeometryLayout::Contiguous);
+                                          GeometryLayout layout = GeometryLayout::Contiguous,
+                                          const NativeClipInputs* nativeInputs = nullptr);
 // A paired pipeline must pass the rewritten VS's previousRegister. The original
 // PS can omit VS-only outputs (for example SV_ClipDistance), so independently
 // appending to each stage's first free register does not produce a linked pair.

@@ -12,6 +12,10 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
+
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Native PS clip-input motion passes independent perspective comparison; depth-writing preservation and live pixel capture still pending.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Live native pair captures 9,536 vertices; 47 consecutive pairs agree within 0.000153 px. No dense boundary raster or FG substitution; module unloaded.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native clip-pair recorder preserves full current/previous W in 64-byte records; independent GPU/old regression pass. Built replaceable DLL is not deployed; no dense game boundary MV.

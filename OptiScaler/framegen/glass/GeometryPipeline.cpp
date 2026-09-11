@@ -202,7 +202,7 @@ struct GeometryCompiler::Impl
     HRESULT rewrite(D3D12_SHADER_BYTECODE input, bool vertex, MaterialSource source, MaterialDestination destination,
                     ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout,
                     MaterialMotionTarget target, const VertexConstantPair* capture = nullptr,
-                    const VertexClipPair* clipPair = nullptr)
+                    const VertexClipPair* clipPair = nullptr, const NativeClipInputs* nativeInputs = nullptr)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -215,7 +215,7 @@ struct GeometryCompiler::Impl
                                     disassembly->GetBufferSize());
         auto rewritten =
             vertex ? RewriteVertexHistory(text, layout, capture, clipPair)
-                   : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout);
+                   : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs);
         if (!rewritten)
         {
             error = rewritten.error;
@@ -271,23 +271,38 @@ HRESULT GeometryCompiler::createVertexCapture(ID3D12Device* device, const Geomet
     return createTarget(device, root, original, output, error,
                         MaterialMotionTarget::OriginalColorAndCapture, true, capture, clipPair);
 }
+HRESULT GeometryCompiler::createNativeMotionCapture(ID3D12Device* device, const GeometryRoot& root,
+                                       const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                       ComPtr<ID3D12PipelineState>& output, std::string& error,
+                                       const NativeClipInputs& inputs)
+{
+    return createTarget(device, root, original, output, error,
+                        MaterialMotionTarget::OriginalColorAndCapture, false, nullptr, nullptr, &inputs);
+}
 HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot& root,
                                        const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
                                        MaterialMotionTarget target, bool vertexOnly, const VertexConstantPair* capture,
-                                       const VertexClipPair* clipPair)
+                                       const VertexClipPair* clipPair, const NativeClipInputs* nativeInputs)
 {
     error.clear();
     if (FAILED(implementation->status))
         return reject(error, "DXC is unavailable", implementation->status);
     D3D12_BLEND_DESC validatedBlend {};
+    bool nativeBlend = !original.BlendState.AlphaToCoverageEnable;
+    for (UINT i = 0; i < std::min(original.NumRenderTargets, UINT(D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)); ++i)
+    {
+        const auto& rt = original.BlendState.RenderTarget[original.BlendState.IndependentBlendEnable ? i : 0];
+        nativeBlend = nativeBlend && !rt.BlendEnable && !rt.LogicOpEnable;
+    }
     if (!device || !root.extended || !root.original || root.original.Get() != original.pRootSignature ||
         !original.NumRenderTargets || original.NumRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
         original.SampleDesc.Count != 1 || original.GS.BytecodeLength || original.HS.BytecodeLength ||
         original.DS.BytecodeLength || original.StreamOutput.NumEntries || original.StreamOutput.NumStrides ||
-        (!vertexOnly && !readOnly(original.DepthStencilState)) ||
+        (!vertexOnly && !nativeInputs && !readOnly(original.DepthStencilState)) ||
         original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
-        (!vertexOnly && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend)))
+        (nativeInputs && !nativeBlend) ||
+        (!vertexOnly && !nativeInputs && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend)))
         return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
     // Vertex capture replaces the original draw once. Its unmodified PS and
     // depth/stencil/blend state retain native writes; material capture still
@@ -297,10 +312,10 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     if (!vertexOnly && (FAILED(hr) || !options.ROVsSupported))
         return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
     const auto& blend = original.BlendState.RenderTarget[0];
-    const auto source = blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
+    const auto source = nativeInputs ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
                         : blend.SrcBlend == D3D12_BLEND_ONE ? MaterialSource::One
                                                             : MaterialSource::Alpha;
-    const auto destination = blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
+    const auto destination = nativeInputs ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
                              : blend.DestBlend == D3D12_BLEND_ONE           ? MaterialDestination::One
                              : blend.DestBlend == D3D12_BLEND_SRC_ALPHA     ? MaterialDestination::Alpha
                              : blend.DestBlend == D3D12_BLEND_INV_SRC_ALPHA ? MaterialDestination::OneMinusAlpha
@@ -310,7 +325,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
                                             root.layout, target, capture, clipPair)) ||
         (!vertexOnly && FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                            root.layout, target))))
+                                            root.layout, target, nullptr, nullptr, nativeInputs))))
         return hr;
     // Same-draw capture retains every original export/attachment. Extra MRT
     // slots do not turn the RT0 material equation into a single-target PSO.
