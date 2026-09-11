@@ -12,7 +12,11 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include "../DxilVertexHistory.h"
+#include "../GeometryPipeline.h"
+#include "../GraphicsRootBindings.h"
+#include "../CyberpunkCamera.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT h)
 {
@@ -145,45 +149,136 @@ static void upload(ID3D12Resource* r, const void* p, size_t n)
     D3D12_RANGE written { 0, n };
     r->Unmap(0, &written);
 }
+static void checkRoots(ID3D12Device* device)
+{
+    std::array<D3D12_ROOT_PARAMETER1, 36> parameters {};
+    std::array<D3D12_DESCRIPTOR_RANGE1, 36> ranges {};
+    for (UINT i = 0; i < parameters.size(); ++i)
+    {
+        ranges[i] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+                      i == 35 ? UINT_MAX : 4u,
+                      0,
+                      i + 40,
+                      D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+                      D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND };
+        parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[i].DescriptorTable = { 1, &ranges[i] };
+        parameters[i].ShaderVisibility = i < 18 ? D3D12_SHADER_VISIBILITY_VERTEX : D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc {};
+    desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    desc.Desc_1_1 = { 36, parameters.data(), 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT };
+    auto create = [&](const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& definition, bool expected)
+    {
+        ComPtr<ID3DBlob> blob, errors;
+        check(D3D12SerializeVersionedRootSignature(&definition, &blob, &errors));
+        ComPtr<ID3D12RootSignature> original;
+        check(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&original)));
+        GlassFg::GeometryRoot root;
+        std::string error;
+        auto hr = GlassFg::CreateGeometryRoot(device, original.Get(), 0, blob->GetBufferPointer(),
+                                              blob->GetBufferSize(), root, error);
+        require(SUCCEEDED(hr) == expected, "Root admission mismatch");
+        if (!expected)
+        {
+            require(!root.extended && !error.empty(), "Failed root creation changed output");
+            return;
+        }
+        require(root.dwords == 52 && root.originalParameters.size() == 36 && root.captureSlot == 40,
+                "36-table root did not fit in 52 DWORDs");
+        for (UINT i = 0; i < parameters.size(); ++i)
+        {
+            const auto& a = root.originalParameters[i];
+            require(a.ParameterType == parameters[i].ParameterType &&
+                        a.ShaderVisibility == parameters[i].ShaderVisibility &&
+                        a.DescriptorTable.NumDescriptorRanges == 1 &&
+                        !memcmp(a.DescriptorTable.pDescriptorRanges, &ranges[i], sizeof(ranges[i])),
+                    "Original table changed");
+        }
+    };
+    create(desc, true);
+    ranges[0].RegisterSpace = 31;
+    create(desc, false);
+    ranges[0].RegisterSpace = 40;
+    D3D12_ROOT_PARAMETER1 large {};
+    large.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    large.Constants = { 0, 0, 49 };
+    desc.Desc_1_1.NumParameters = 1;
+    desc.Desc_1_1.pParameters = &large;
+    create(desc, false);
+    puts("PASS root_tables=36 extended_dwords=52 original_ranges_preserved=1 collision_and_budget_rejected=1");
+}
+static void checkCameraBounds()
+{
+    std::array<std::byte, 848> bytes {};
+    const std::int32_t origin[] = { 100 * 131072, -20 * 131072, 3 * 131072 };
+    const float matrix[] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, .2f, 0, 0, 1, 0 };
+    const float extent[] = { 2560, 1440 }, jitter[] = { .000244140625f, .000303819455f };
+    memcpy(bytes.data() + 28 * 16, matrix, sizeof(matrix));
+    memcpy(bytes.data() + 38 * 16, origin, sizeof(origin));
+    memcpy(bytes.data() + 47 * 16, extent, sizeof(extent));
+    memcpy(bytes.data() + 51 * 16, jitter, sizeof(jitter));
+    GlassFg::GeometryCamera camera;
+    require(GlassFg::DecodeCyberpunkCamera(bytes, camera), "Camera decoding rejected");
+    require(camera.fixedOrigin[1] == -20 * 131072 && camera.jitterUv[0] * 2560 == .3125f &&
+                std::abs(camera.jitterUv[1] * 1440 + .21875f) < 1.e-7f,
+            "Camera fixed origin or jitter convention");
+    D3D12_VIEWPORT viewport { 32, 16, 320, 180, 0, 1 };
+    D3D12_RECT rect {};
+    const std::array<float, 6> bounds { 99, -21, 7, 101, -19, 9 };
+    require(GlassFg::ProjectGeometryBounds(camera, bounds, viewport, 2, rect) == GlassFg::BoundProjection::Visible &&
+                rect.left == 150 && rect.top == 81 && rect.right == 234 && rect.bottom == 131,
+            "Analytic perspective box/offset viewport bounds");
+    require(GlassFg::ProjectGeometryBounds(camera, { 99, -21, 2, 101, -19, 4 }, viewport, 2, rect) ==
+                    GlassFg::BoundProjection::Visible &&
+                rect.left == 32 && rect.top == 16 && rect.right == 352 && rect.bottom == 196,
+            "Eye-plane bounds truncated");
+    require(GlassFg::ProjectGeometryBounds(camera, { 99, -21, 0, 101, -19, 1 }, viewport, 2, rect) ==
+                GlassFg::BoundProjection::Outside,
+            "Behind-camera bounds admitted");
+    camera.fixedOrigin[0] += 20 * 131072;
+    require(GlassFg::ProjectGeometryBounds(camera, bounds, viewport, 2, rect) == GlassFg::BoundProjection::Outside,
+            "Offscreen bounds admitted");
+    require(!GlassFg::DecodeCyberpunkCamera(std::span(bytes).first(847), camera), "Incomplete camera input admitted");
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    memcpy(bytes.data() + 28 * 16, &invalid, 4);
+    require(!GlassFg::DecodeCyberpunkCamera(bytes, camera), "Nonfinite camera admitted");
+    puts("PASS camera_fixed_origin=1 jitter_uv=1 perspective_bounds=1 shifted_viewport=1 eye_plane_fallback=1 "
+         "invalid_rejected=1");
+}
 int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 2, "gpu directory");
+        require(argc == 3, "gpu directory dxcompiler.dll");
         const std::filesystem::path dir(argv[1]);
+        checkCameraBounds();
         auto vs = read(dir / L"fixture.dxil"), modified = read(dir / L"fixture-history.dxil"),
              ps = read(dir / L"fixture-pixel.dxil"), motion = read(dir / L"fixture-motion.dxil"),
              captureShader = read(dir / L"fixture-capture.dxil");
         Device g;
+        checkRoots(g.d.Get());
         D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
         check(g.d->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)));
         require(options.ROVsSupported, "Rasterizer-ordered views unavailable");
-        D3D12_ROOT_PARAMETER params[6] {};
+        D3D12_ROOT_PARAMETER params[1] {};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants = { 0, 0, 4 };
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        params[1].Constants = { 0, 31, 8 };
-        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-        params[2].Descriptor = { 0, 31 };
-        params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        params[3].Descriptor = { 0, 31 };
-        params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        params[4].Constants = { 1, 31, 16 };
-        params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        params[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        params[5].Descriptor = { 1, 31 };
-        params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_SIGNATURE_DESC rd { 6, params, 0, nullptr,
+        D3D12_ROOT_SIGNATURE_DESC rd { 1, params, 0, nullptr,
                                        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
                                            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT };
         ComPtr<ID3DBlob> rb, error;
         check(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &rb, &error));
-        ComPtr<ID3D12RootSignature> root;
-        check(g.d->CreateRootSignature(0, rb->GetBufferPointer(), rb->GetBufferSize(), IID_PPV_ARGS(&root)));
+        ComPtr<ID3D12RootSignature> originalRoot;
+        check(g.d->CreateRootSignature(0, rb->GetBufferPointer(), rb->GetBufferSize(), IID_PPV_ARGS(&originalRoot)));
+        GlassFg::GeometryRoot geometryRoot;
+        std::string pipelineError;
+        check(GlassFg::CreateGeometryRoot(g.d.Get(), originalRoot.Get(), 0, rb->GetBufferPointer(), rb->GetBufferSize(),
+                                          geometryRoot, pipelineError));
+        require(geometryRoot.dwords == 20 && geometryRoot.materialSlot == 4, "Extended root layout");
+        auto root = geometryRoot.extended;
+        GlassFg::GeometryCompiler compiler { std::filesystem::path(argv[2]) };
         constexpr UINT W = 192, H = 128;
         D3D12_RESOURCE_DESC tex {};
         tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -222,6 +317,7 @@ int wmain(int argc, wchar_t** argv)
                                                   { 0, "GLASS_PREVIOUS", 0, 0, 4, 0 },
                                                   { 0, "GLASS_HISTORY_MISSING", 0, 0, 1, 0 } };
         ComPtr<ID3D12PipelineState> pipeline[4];
+        ComPtr<ID3D12PipelineState> originalColor;
         for (UINT i = 0; i < 4; ++i)
         {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pd {};
@@ -234,6 +330,17 @@ int wmain(int argc, wchar_t** argv)
                       : i == 2 ? motion.size()
                                : ps.size() };
             pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            if (i != 2)
+            {
+                auto& blend = pd.BlendState.RenderTarget[0];
+                blend.BlendEnable = TRUE;
+                blend.SrcBlend = D3D12_BLEND_ONE;
+                blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                blend.BlendOp = D3D12_BLEND_OP_ADD;
+                blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+                blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+                blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            }
             pd.SampleMask = UINT_MAX;
             pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
             pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -246,7 +353,24 @@ int wmain(int argc, wchar_t** argv)
             UINT stride = i ? sizeof(Record) : sizeof(Clip);
             if (i < 2)
                 pd.StreamOutput = { so, i ? 3u : 1u, &stride, 1, 0 };
-            check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pipeline[i])));
+            if (i == 3)
+            {
+                pd.pRootSignature = originalRoot.Get();
+                pd.VS = { vs.data(), vs.size() };
+                pd.PS = { ps.data(), ps.size() };
+                check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&originalColor)));
+                auto hr = compiler.create(g.d.Get(), geometryRoot, pd, pipeline[i], pipelineError);
+                if (FAILED(hr))
+                    throw std::runtime_error(pipelineError);
+                auto rejected = pd;
+                rejected.DepthStencilState.DepthEnable = TRUE;
+                rejected.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                ComPtr<ID3D12PipelineState> absent;
+                require(FAILED(compiler.create(g.d.Get(), geometryRoot, rejected, absent, pipelineError)) && !absent,
+                        "Depth-writing pipeline admitted");
+            }
+            else
+                check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pipeline[i])));
         }
         const Vertex verts[] = { { 0, 0, 0, 0, 0 },       { 0, 0, 0, 0, 0 },      { -.35f, -.5f, 0, 0, 1 },
                                  { -.35f, .5f, 0, 0, 0 }, { .35f, .5f, 0, 1, 0 }, { .35f, -.5f, 0, 1, 1 } };
@@ -264,6 +388,7 @@ int wmain(int argc, wchar_t** argv)
         constexpr UINT CapturePixels = RoiBase + RoiStride * RoiHeight + 17, CaptureBytes = CapturePixels * 32;
         auto capture = g.buffer(CaptureBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto materialConstants = g.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         auto zeros =
             g.buffer(HistoryBytes + SOBytes + CaptureBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         std::vector<char> allzero(HistoryBytes + SOBytes + CaptureBytes);
@@ -310,6 +435,12 @@ int wmain(int argc, wchar_t** argv)
             invalid.generation = 0;
             require(!invalid.valid(Slots), "Uninitialized history generation admitted");
             require(!hc.valid(0), "Empty history buffer admitted");
+            GlassFg::MaterialCaptureConstants pc { 0,       0,         1.f / W,       1.f / H, 0,        0,
+                                                   frame,   0,         RoiLeft,       RoiTop,  RoiWidth, RoiHeight,
+                                                   RoiBase, RoiStride, CapturePixels, 0 };
+            require(pc.valid(CapturePixels), "Capture allocation contract");
+            require(!pc.valid(CapturePixels - 1), "Capture buffer smaller than advertised capacity admitted");
+            upload(materialConstants.Get(), &pc, sizeof(pc));
             g.begin();
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -320,18 +451,32 @@ int wmain(int argc, wchar_t** argv)
                     g.c->CopyBufferRegion(stream[i].Get(), 0, zeros.Get(), 0, SOBytes);
                     g.barrier(stream[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_STREAM_OUT);
                 }
-                g.c->SetGraphicsRootSignature(root.Get());
+                GlassFg::GraphicsRootBindings saved;
+                if (i == 3)
+                {
+                    saved.reset(originalColor.Get());
+                    saved.setRoot(originalRoot.Get());
+                    g.c->SetGraphicsRootSignature(originalRoot.Get());
+                    g.c->SetPipelineState(originalColor.Get());
+                    saved.constants(0, 2, fc, 0);
+                    saved.constants(0, 2, fc + 2, 2);
+                    g.c->SetGraphicsRoot32BitConstants(0, 2, fc, 0);
+                    g.c->SetGraphicsRoot32BitConstants(0, 2, fc + 2, 2);
+                    require(saved.canReplay(geometryRoot, originalColor.Get()), "Tracked root not restorable");
+                    auto invalidState = saved;
+                    invalidState.invalidate();
+                    require(!invalidState.canReplay(geometryRoot, originalColor.Get()),
+                            "Unknown command state admitted");
+                    saved.replay(g.c.Get(), root.Get());
+                }
+                else
+                    g.c->SetGraphicsRootSignature(root.Get());
                 g.c->SetPipelineState(pipeline[i].Get());
                 g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
                 g.c->SetGraphicsRoot32BitConstants(1, 8, &hc, 0);
                 g.c->SetGraphicsRootShaderResourceView(2, history[previous]->GetGPUVirtualAddress());
                 g.c->SetGraphicsRootUnorderedAccessView(3, history[current]->GetGPUVirtualAddress());
-                GlassFg::MaterialCaptureConstants pc { 0,       0,         1.f / W,       1.f / H, 0,        0,
-                                                       frame,   0,         RoiLeft,       RoiTop,  RoiWidth, RoiHeight,
-                                                       RoiBase, RoiStride, CapturePixels, 0 };
-                require(pc.valid(CapturePixels), "Capture allocation contract");
-                require(!pc.valid(CapturePixels - 1), "Capture buffer smaller than advertised capacity admitted");
-                g.c->SetGraphicsRoot32BitConstants(4, 16, &pc, 0);
+                g.c->SetGraphicsRootConstantBufferView(4, materialConstants->GetGPUVirtualAddress());
                 g.c->SetGraphicsRootUnorderedAccessView(5, capture->GetGPUVirtualAddress());
                 D3D12_VIEWPORT viewport { 0, 0, (float) W, (float) H, 0, 1 };
                 D3D12_RECT scissor { 0, 0, W, H };
@@ -369,6 +514,21 @@ int wmain(int argc, wchar_t** argv)
                 dst.PlacedFootprint.Offset = i * imageBytes;
                 g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                 g.barrier(color[i].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                if (i == 3)
+                {
+                    saved.replay(g.c.Get(), originalRoot.Get());
+                    g.c->SetPipelineState(saved.pipeline);
+                    g.c->OMSetRenderTargets(1, &handles[0], FALSE, nullptr);
+                    const float emptyColor[4] {};
+                    g.c->ClearRenderTargetView(handles[0], emptyColor, 0, nullptr);
+                    // No root setter here: use the restored original constants.
+                    g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+                    g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    src.pResource = color[0].Get();
+                    dst.PlacedFootprint.Offset = 0;
+                    g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                    g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
             }
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
             g.c->CopyBufferRegion(readback.Get(), imageBytes * 4 + SOBytes * 2, history[current].Get(), 0,

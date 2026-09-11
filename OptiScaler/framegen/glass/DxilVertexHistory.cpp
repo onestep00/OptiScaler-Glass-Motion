@@ -391,7 +391,8 @@ glass.end:
     return result;
 }
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
-                                          MaterialDestination destinationFactor, MaterialMotionTarget target)
+                                          MaterialDestination destinationFactor, MaterialMotionTarget target,
+                                          unsigned firstHistoryRegister)
 {
     VertexHistoryShader result;
     try
@@ -460,8 +461,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                                           zero + ", i8 4, i32 1, i8 4, i32 " + std::to_string(row) + ", i8 0, " +
                                           mask15));
         }
-        const auto previous = nextId(metadata, inputs), row = extent(metadata, inputs);
-        need(row + 2 <= 32, "No pixel history registers available");
+        const auto previous = nextId(metadata, inputs), usedRows = extent(metadata, inputs);
+        const auto row = firstHistoryRegister == UINT32_MAX ? usedRows : firstHistoryRegister;
+        need(row >= usedRows && row <= 30, "Pixel history register collision or overflow");
         inputs.push_back(metadata.add("i32 " + std::to_string(previous) + ", !\"GLASS_PREVIOUS\", i8 9, i8 0, " + zero +
                                       ", i8 2, i32 1, i8 4, i32 " + std::to_string(row) + ", i8 0, " + mask15));
         inputs.push_back(metadata.add("i32 " + std::to_string(previous + 1) +

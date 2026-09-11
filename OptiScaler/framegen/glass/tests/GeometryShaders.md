@@ -17,6 +17,12 @@ All changes are confined to this module. `GlassFg.props` compiles the rewriter, 
 
 `OriginalColorAndCapture` preserves the original color exports and appends a rasterizer-ordered raw-buffer capture in the same draw. A bounded per-object rectangle stores surface motion/depth and RGB transmission without a second material evaluation. Original discard still executes. Missing history or an out-of-range capture address skips only the added storage. The host must validate `MaterialCaptureConstants` against the actual allocation and prove the original pass has read-only depth/stencil before using its early-depth variant.
 
+`GeometryPipeline.cpp` creates a separate extended root and validated VS/PS pipeline. It preserves original parameters, ranges, flags and static samplers. Added parameters cost 16 DWORDs: a 36-table game layout fits in 52 DWORDs. Material data uses a root CBV instead of 16 inline constants. Collisions in register space 31 and roots exceeding the hardware budget are rejected. `GraphicsRootBindings.h` restores observed original root values after insertion, including partially set constants; unknown command state must bypass insertion. Creation and shader compilation belong on a worker, never in a draw callback.
+
+VS and PS signature extents can differ. The recorded VS-only `SV_ClipDistance` made independently appended history varyings occupy different registers; all 68 original shader/input/root combinations initially failed modified PSO creation despite passing individual DXIL validation. `GeometryCompiler` now passes the actual rewritten VS register to the PS rewriter. All 68 combinations then passed creation on an independent NVIDIA device. Missing rasterizer/alpha-blend fields in that local audit used neutral values, so this is shader/root linkage evidence rather than a complete original-game PSO replay. The public fixture now includes an unused VS-only clip-distance output to cover this failure.
+
+`CyberpunkCamera.h` decodes an already identified 848-byte camera constant block and projects engine bounds to a storage rectangle. Bounds never define material coverage or motion. The adapter still has to prove b1 binding, executable layout, recording/frame identity, stable upload bytes and conservative bounds. The producer must detect coverage escaping the rectangle and reject that object. An eye-plane crossing uses a budget-dependent full-viewport fallback.
+
 ## GPU validation
 
 Run `build_geometry_shader.ps1` from an x64 Visual Studio Developer PowerShell. It uses the repository's pinned DXC binary, generates shaders from the included synthetic HLSL, runs the actual production rewriter/assembler/validator, and creates an independent NVIDIA D3D12 device. It does not attach to or modify a game. It has no Python dependency.
@@ -32,6 +38,7 @@ Observed in the current test:
 - Material scalar attenuation matches the fixture's original alpha within `3e-7`; history writes leave the allocation exterior unchanged.
 - CPU allocation checks reject overflowing instance/address ranges, zero generation, and empty buffers.
 - The simultaneous color/capture pipeline preserves all 122,880 original color pixels. Its 6,017 captured motion/depth records exactly match the separate material pass; RGB transmission matches the original material. A padded, offset rectangle leaves storage outside the allocation unchanged.
+- A draw after restoring the original root/PSO produces the same original color. The 36-table root test preserves descriptor ranges (including an unbounded range) and rejects collisions/overflow. Analytic camera tests cover fixed origins, jitter signs, offset viewports, perspective bounds, eye-plane crossings and invalid inputs.
 
 The test found that an interpolated valid value of one becomes `0.999999940395` at some pixels. Comparing it exactly to one created coverage holes. The implementation instead interpolates a missing-history flag: zero means valid. Zero interpolation is exact, and a nonzero contribution from a vertex with missing history rejects the sample. This avoids loosening the validity threshold.
 

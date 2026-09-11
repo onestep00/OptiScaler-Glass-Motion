@@ -87,7 +87,11 @@ static_assert(sizeof(MaterialCaptureConstants) == 64);
 // b1/space31: viewport origin XY, inverse extent XY, jitter delta UV, unused XY.
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource source,
                                           MaterialDestination destination,
-                                          MaterialMotionTarget target = MaterialMotionTarget::SeparateTarget);
+                                          MaterialMotionTarget target = MaterialMotionTarget::SeparateTarget,
+                                          unsigned firstHistoryRegister = UINT32_MAX);
+// A paired pipeline must pass the rewritten VS's previousRegister. The original
+// PS can omit VS-only outputs (for example SV_ClipDistance), so independently
+// appending to each stage's first free register does not produce a linked pair.
 // OriginalColorAndCapture preserves every original color export/discard and
 // writes u1/space31 as a rasterizer-ordered raw buffer. It requires read-only
 // depth/stencil, ROV hardware support, one nonoverlapping owned region per object,
