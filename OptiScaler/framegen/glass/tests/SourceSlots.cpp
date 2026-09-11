@@ -1,10 +1,35 @@
 #include "../GeometrySourceSlots.h"
+#include "../GeometrySourceOwners.h"
 #include <iostream>
 #include <stdexcept>
 
 void require(bool value) { if (!value) throw std::runtime_error("Source slot provenance failed"); }
 int main()
 {
+    GlassFg::GeometrySourceOwners<2> owners;
+    using OwnerSource = decltype(owners)::Source;
+    const OwnerSource source {10, 20, 30, 496, 40};
+    const auto creation = owners.created(100, 200, source);
+    require(creation && owners.size() == 1);
+    // Source can arrive before an engine registry slot exists. Its generation
+    // remains distinct from the separately validated registry generation.
+    require(owners.find(200, 30).generation == creation);
+    require(!owners.find(200, 31));
+    require(owners.created(101, 201, source) && owners.size() == 2);
+    require(!owners.created(102, 202, source) && owners.find(200, 30));
+    owners.destroyed(999, 200); // unrelated owner must not remove this source
+    require(bool(owners.find(200, 30)));
+    owners.destroyed(100, 200);
+    require(!owners.find(200, 30) && owners.size() == 1);
+    const auto reused = owners.created(100, 200, source);
+    require(reused > creation && owners.find(200, 30).generation == reused);
+    owners.destroyed(100, 200);
+    owners.destroyed(101, 201);
+    require(owners.size() == 0 && !owners.find(201, 30));
+    require(!owners.created(0, 200, source));
+    require(!owners.created(100, 200, {10, 20, 30, UINT32_MAX, 2}));
+    require(owners.created(100, 200, source));
+    require(!owners.created(102, 200, {}) && !owners.find(200, 30));
     using Span = GlassFg::GeometrySourceSpan;
     // The first successful renderer is for a later source group. The renderer
     // ordinal is zero, but its source index must remain 107, not zero or 100.
@@ -60,6 +85,6 @@ int main()
     require(slots.resolve(fourth, 2) == replaced);
     auto invalid = slots.begin(0, 12);
     require(!slots.publish(invalid, 2, a) && !slots.seal(invalid));
-    std::cout << "PASS skipped_source_groups=1 span_bounds=1 reorder=1 stale_submission=1 ambiguity=1 generation_passthrough=1 "
-                 "allocation=0 scans_per_lookup=0 live_engine=0 motion_produced=0\n";
+    std::cout << "PASS source_owner_cancel=1 owner_reuse=1 bounded_owners=1 skipped_source_groups=1 span_bounds=1 reorder=1 stale_submission=1 ambiguity=1 generation_passthrough=1 "
+                 "allocation=0 slot_scans_per_lookup=0 live_engine=0 motion_produced=0\n";
 }

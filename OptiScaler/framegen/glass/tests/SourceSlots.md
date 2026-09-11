@@ -37,6 +37,40 @@ registered owner lifetime plus verified source-array identity to this handoff.
 Do not use the prior offline same-frame range matches alone to populate admitted
 vertex history. No production call site has been added yet.
 
+## Source-owner lifetime cache
+
+`GeometrySourceOwners.h` retains creation-source metadata separately from the
+later renderer registry slot. Its caller must synchronously serialize creation,
+destruction and queries, and observe destruction before engine memory release.
+It does not infer lifetime from a pointer or add an engine hook. Every creation
+gets a new nonwrapping serial, even when handle/proxy/source addresses match a
+previous record. Cancellation checks the handle as well as the proxy, so a
+different owner's delayed cancellation cannot delete the replacement. A malformed
+new creation invalidates the old proxy association instead of preserving stale
+history. Events delayed across reuse of the same handle address are not supported;
+the required synchronous destruction seam must prevent that ordering.
+
+Storage consists of fixed entries and hash buckets plus a free list. Creation,
+lookup and removal allocate nothing and copy no engine resources. Lookup walks
+one hash chain; unlike the direct source-slot table, it is not a guaranteed
+single-index operation. Capacity exhaustion rejects new owners without evicting
+live entries. The large production-capacity object must be heap-owned, never
+placed on a draw callback's stack. Registry generations, source mutation, actual
+producer indices and frame/GPU ordering remain independent admission checks.
+
+The existing SourceSlots fixture now covers creation before registration, bounded
+capacity, cancellation, reused addresses, wrong render mesh, malformed replacement
+and source-range overflow. `/O2 /W4 /WX` build and execution passed. These tests
+do not certify the engine callbacks or complete runtime MV integration.
+
+The audited renderer-handle constructor at 0x296d3c installs vtable 0x2ac86b0 and
+retains the original proxy at handle+0x10. Its first vtable entry, 0x29665c, calls
+destructor body 0x296688 before optional deallocation. That body removes associated
+state and releases handle+0x10. This supplies a concrete candidate cancellation
+seam for pending-source metadata, subject to live hook and call-contract checks.
+No new destructor hook has been installed. Local function disassemblies are under
+`work/glass-engine-identity-probe-v2/`.
+
 ## Producer/consumer investigation
 
 ### Node-owned renderer handles and skipped source groups
