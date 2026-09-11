@@ -72,3 +72,14 @@ path still needs inspection before moving array instances can retain history
 across updates. Invalidating every update would avoid false association but would
 also lose motion history for continuously updated arrays; that is not accepted as
 the complete moving-object solution. No array mutation hook was installed.
+
+Further static tracing identified the enqueue implementation itself. It copies
+the source transform span into an owned update record and retains the owner;
+the update worker subsequently reads that record. Its address is installed at
+offset 0x80 in a constructor-proven virtual table in this executable. There are
+no validated direct calls to the enqueue implementation, so tracing only direct
+calls would stop before the source owner. The table has no usable standard MSVC
+RTTI locator immediately before it; nearby strings must not be used as a type
+name. The next observation point is this virtual enqueue call and its input
+span producer, not another scan of the destination transform array. The call
+path is static evidence only and has not been hooked or correlated live.
