@@ -16,7 +16,7 @@
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
-- [tests/SourceSlots.md](tests/SourceSlots.md): Live source chains verified; exported scalar owner query passes destruction/failure checks. Query consumer/deployment and temporal MV/FG integration remain incomplete.
+- [tests/SourceSlots.md](tests/SourceSlots.md): Producer consumes guarded owner-query ABI once per scope in independent checks. Linked pair not deployed; temporal MV/FG integration remains incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
 

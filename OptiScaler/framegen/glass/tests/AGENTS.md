@@ -22,7 +22,7 @@
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.
 
-- [SourceSlots.md](SourceSlots.md): NodeLifetimes verifies scalar owner-query ABI and refusal after destruction/tracking failure. New query not deployed or consumed; live MV/FG incomplete.
+- [SourceSlots.md](SourceSlots.md): Producer query consumption verifies count/range handling, once-per-scope lookup and exception containment. Provider discovery/live pair and MV/FG remain unverified.
 
 - [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
 

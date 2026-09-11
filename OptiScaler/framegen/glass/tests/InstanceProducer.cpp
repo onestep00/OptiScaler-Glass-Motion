@@ -9,6 +9,19 @@ std::array<unsigned char, 0x118> proxyData {};
 std::array<unsigned char, 0x58> groupData {};
 std::array<std::uint16_t, 40> sourceData {};
 unsigned testTick = 50, forwards = 0;
+unsigned sourceQueries = 0, sourceMode = 0;
+std::int32_t querySource(std::uint64_t proxy, std::uint64_t mesh, std::uint32_t count,
+                         GlassExperimentSourceOwner* result)
+{
+    if (proxy != reinterpret_cast<std::uint64_t>(proxyData.data()) || mesh != 0x30000 || count != 40)
+        throw std::runtime_error("Wrong source query input");
+    ++sourceQueries;
+    if (sourceMode == 2) throw std::runtime_error("Diagnostic query failure");
+    *result = {};
+    result->node = 0x40000; result->buffer = 0x50000; result->generation = 17;
+    result->first = 107; result->count = sourceMode == 1 ? 39 : 40;
+    return 1;
+}
 Selection::Descriptor testDescriptor { 20160, 40, 0, 0, 0x10000, 0x10000 + 40 * 48 };
 void require(bool okay) { if (!okay) throw std::runtime_error("Producer callback failure"); }
 unsigned char fakeOuter(void* a, void*, void*, std::uint64_t depth)
@@ -73,8 +86,20 @@ int main()
     observe(proxyData.data(), &linearDescriptor, true); require(used == 3);
     linearDescriptor.globalStart = start; linearDescriptor.begin = 0x10000;
     observe(proxyData.data(), &linearDescriptor, true); require(used == 3);
+    linearDescriptor.begin = 0; sourceQuery = querySource;
+    observe(proxyData.data(), &linearDescriptor, true);
+    observe(proxyData.data(), &linearDescriptor, true);
+    require(used == 5 && sourceQueries == 1 && rows[3].sourceOwner.generation == 17 &&
+            rows[4].sourceOwner.first + rows[4].indices[39] == 146);
+    scope.sourceChecked = false; scope.sourceOwner = {}; sourceMode = 1;
+    observe(proxyData.data(), &linearDescriptor, true);
+    require(used == 6 && sourceQueries == 2 && !rows[5].sourceOwner.generation);
+    scope.sourceChecked = false; scope.sourceOwner = {}; sourceMode = 2;
+    observe(proxyData.data(), &linearDescriptor, true);
+    require(used == 7 && sourceQueries == 3 && !rows[6].sourceOwner.generation);
     current = nullptr; enabled = false;
     std::cout << "PASS current_group_direct=1 wrong_caller_rejected=1 nested_scope=1 consumed_once=1 "
                  "frame_mismatch_rejected=1 original_return_preserved=1 linear_source=1 "
-                 "no_missing_group_fallback=1 malformed_linear_rejected=1 game_hooks_installed=0\n";
+                 "no_missing_group_fallback=1 malformed_linear_rejected=1 source_query_once=1 "
+                 "source_mismatch_rejected=1 source_exception_contained=1 game_hooks_installed=0\n";
 }

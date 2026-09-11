@@ -142,6 +142,22 @@ view/frame-to-FG ownership. No additional game hook was installed in this turn.
 
 ### Connected lifetime diagnostic (not deployed)
 
+The producer now consumes the scalar owner-query ABI. An optional UTF-8 `.source`
+sidecar contains one absolute path to an already-loaded owner-query DLL. Start
+resolves its named export and pins the module; it neither loads a guessed DLL nor
+reads this file per frame. Missing sidecar preserves source-index-only diagnosis.
+A configured but unavailable provider makes Start fail before installing hooks.
+
+Each outer producer scope queries at most once and validates ABI, count, range,
+nonzero generation and identities. Its CSV retains the original local source
+index and additionally writes source node/buffer/generation and absolute buffer
+index. A missing/malformed result leaves those ownership fields unavailable;
+exceptions do not escape into the engine. The fixture verifies one query for
+multiple records in a scope, index translation, count mismatch and exception
+containment. Build and execution passed. This tests a callback substitute, not
+module discovery/pinning or a live linked pair. The currently pinned game
+producer predates this consumer; no new pair was deployed.
+
 The lifetime diagnostic now exports `GlassSourceOwnerQuery` through
 `ExperimentSourceAbi.h`. A synchronous same-process caller supplies its live
 proxy, render mesh and original array count. The query returns only node/buffer
@@ -156,8 +172,8 @@ for that observer, because an unobserved destruction could leave stale entries.
 Stopping CSV capture still leaves lifecycle tracking active. `NodeLifetimes.cpp`
 passed source query, ABI rejection, post-destruction rejection and sticky failure
 checks using the actual exported function pointer. This is an independent callback
-test; the new export is not loaded into the current game, and no producer/draw
-consumer calls it yet. Returned scalar metadata is not a GPU lifetime lease or
+test; the new export is not loaded into the current game. The source producer
+consumer above is not deployed. Returned scalar metadata is not a GPU lifetime lease or
 proof of consecutive-frame correspondence.
 
 `GLASS_NODE_LIFETIME` connects the actual node-creation adapter to the bounded

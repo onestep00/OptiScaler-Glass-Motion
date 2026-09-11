@@ -1,6 +1,7 @@
 // Standalone, process-resident CPU diagnostic. Never linked into OptiScaler.
 // Exports run outside DllMain. Stop disables recording; hooks/DLL stay resident.
 #include "CyberpunkInstanceSelection.h"
+#include "ExperimentSourceAbi.h"
 #include "DetourThreads.h"
 #include <atomic>
 #include <filesystem>
@@ -26,11 +27,14 @@ std::atomic<unsigned> active = 0, used = 0, dropped = 0;
 bool installed = false;
 std::mutex control;
 std::filesystem::path output;
+GlassExperimentSourceQuery sourceQuery = nullptr;
 struct Scope
 {
     std::uint64_t proxy = 0, group = 0;
     unsigned frame = 0;
     std::uint64_t outerContext = 0, producerContext = 0;
+    bool sourceChecked = false;
+    GlassExperimentSourceOwner sourceOwner;
 };
 thread_local Scope* current = nullptr;
 struct Row
@@ -43,6 +47,7 @@ struct Row
     std::array<std::uint64_t, 3> producerHeader {};
     bool producerHeaderValid = false;
     bool linear = false;
+    GlassExperimentSourceOwner sourceOwner;
     std::array<unsigned, 64> indices {};
 };
 std::array<Row, 4096> rows;
@@ -115,6 +120,22 @@ void observe(void* owner, void* descriptor, bool linear = false)
     row.valid = 1;
     for (unsigned i = 0; i < row.descriptor.count; ++i)
         if (!selection.originalIndex(i, row.indices[i], read)) { row.valid = 0; break; }
+    if (row.valid && sourceQuery && !current->sourceChecked)
+    {
+        current->sourceChecked = true; // At most once per owned producer scope.
+        GlassExperimentSourceOwner value;
+        try
+        {
+            if (sourceQuery(row.proxy, row.mesh, row.originalCount, &value) == 1 &&
+                value.size == sizeof(value) && value.version == 1 && !value.reserved &&
+                value.node && value.buffer && value.generation && value.count == row.originalCount &&
+                std::uint64_t(value.first) + value.count <= (std::uint64_t {1} << 32))
+                current->sourceOwner = value;
+        }
+        catch (...) {} // Diagnostic failure must not escape into the engine.
+    }
+    if (row.valid && current->sourceOwner.count == row.originalCount)
+        row.sourceOwner = current->sourceOwner;
     const auto index = used.fetch_add(1, std::memory_order_relaxed);
     if (index < rows.size()) rows[index] = row;
     else { ++dropped; enabled.store(false, std::memory_order_release); }
@@ -179,6 +200,35 @@ bool install()
     installed = DetourTransactionCommit() == NO_ERROR;
     return installed;
 }
+bool connectSource()
+{
+    sourceQuery = nullptr;
+    wchar_t path[32768];
+    const auto length = GetModuleFileNameW(self, path, 32768);
+    if (!length || length >= 32768) return false;
+    auto config = std::filesystem::path(path); config.replace_extension(L".source");
+    if (!std::filesystem::exists(config)) return true;
+    std::ifstream file(config, std::ios::binary);
+    std::string utf8;
+    if (!std::getline(file, utf8) || utf8.empty() || utf8.size() > 32767) return false;
+    if (utf8.back() == '\r') utf8.pop_back();
+    if (file.peek() != std::char_traits<char>::eof()) return false;
+    const auto count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                                         static_cast<int>(utf8.size()), nullptr, 0);
+    if (!count) return false;
+    std::wstring wide(count, L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                            static_cast<int>(utf8.size()), wide.data(), count) != count ||
+        wide.find(L'\0') != std::wstring::npos || !std::filesystem::path(wide).is_absolute()) return false;
+    const auto module = GetModuleHandleW(wide.c_str()); // Explicit already-loaded provider only.
+    if (!module) return false;
+    const auto query = GetProcAddress(module, "GlassSourceOwnerQuery");
+    HMODULE pinned = nullptr;
+    if (!query || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                     reinterpret_cast<LPCWSTR>(query), &pinned) || pinned != module) return false;
+    sourceQuery = reinterpret_cast<GlassExperimentSourceQuery>(query);
+    return true;
+}
 }
 extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory)
 {
@@ -187,7 +237,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory
         std::lock_guard lock(control);
         if (enabled || active || !directory) return 1;
         const std::filesystem::path next(static_cast<const wchar_t*>(directory));
-        if (!next.is_absolute() || std::filesystem::exists(next) || !install()) return 2;
+        if (!next.is_absolute() || std::filesystem::exists(next) || !connectSource() || !install()) return 2;
         if (!std::filesystem::create_directory(next)) return 3;
         output = next; used = dropped = 0;
         enabled.store(true, std::memory_order_release); return 0;
@@ -204,7 +254,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
         while (active.load(std::memory_order_acquire) && GetTickCount64() < deadline) Sleep(1);
         if (active || output.empty()) return 1;
         std::ofstream file(output / "source-indices.csv");
-        file << "frame,proxy,mesh,owner_slot,group,source_array,source_indices,original_count,global_start,first,count,valid,ordinal,source_index,outer_context,producer_context,producer_0,producer_8,producer_16,producer_header_valid,linear_source\n";
+        file << "frame,proxy,mesh,owner_slot,group,source_array,source_indices,original_count,global_start,first,count,valid,ordinal,source_index,outer_context,producer_context,producer_0,producer_8,producer_16,producer_header_valid,linear_source,source_node,source_buffer,source_generation,buffer_index\n";
         const auto count = (std::min)(used.load(), unsigned(rows.size()));
         for (unsigned i = 0; i < count; ++i)
         {
@@ -215,7 +265,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
                      << row.descriptor.globalStart << ',' << row.descriptor.first << ',' << row.descriptor.count << ','
                      << row.valid << ',' << j << ',' << row.indices[j] << ',' << row.outerContext << ','
                      << row.producerContext << ',' << row.producerHeader[0] << ',' << row.producerHeader[1] << ','
-                     << row.producerHeader[2] << ',' << row.producerHeaderValid << ',' << row.linear << '\n';
+                     << row.producerHeader[2] << ',' << row.producerHeaderValid << ',' << row.linear << ','
+                     << row.sourceOwner.node << ',' << row.sourceOwner.buffer << ',' << row.sourceOwner.generation << ','
+                     << (row.sourceOwner.generation ? std::uint64_t(row.sourceOwner.first) + row.indices[j] : UINT64_MAX)
+                     << '\n';
         }
         file.close(); if (!file) return 2;
         std::ofstream(output / "status.txt") << "rows=" << count << "\ndropped=" << dropped.load()
