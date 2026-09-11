@@ -57,7 +57,9 @@ class Recorder
         lock.lock(); prepareResult = result;
     }
   public:
-    explicit Recorder(std::filesystem::path path, uint64_t preparePipeline) : output(std::move(path)), prepareIdentity(preparePipeline)
+    uint64_t observedMesh = 0;
+    explicit Recorder(std::filesystem::path path, uint64_t preparePipeline, uint64_t mesh = 0)
+        : output(std::move(path)), prepareIdentity(preparePipeline), observedMesh(mesh)
     {
         if (!output.is_absolute() || !std::filesystem::create_directory(output))
             throw std::runtime_error("Fresh absolute output directory required");
@@ -75,6 +77,7 @@ class Recorder
             event.payloadBytes != sizeof(GlassExperimentCensusInput) || !event.payload) return -1;
         const auto& input = *static_cast<const GlassExperimentCensusInput*>(event.payload);
         const auto& d = input.draw;
+        if (observedMesh && d.mesh != observedMesh) return 0;
         if (input.size != sizeof(input) || d.size != sizeof(d) || !d.bindingAt ||
             !d.pipelineIdentity || !d.pipelineAccess.retain || !d.pipelineAccess.view || !d.pipelineAccess.release)
             return 0;
@@ -198,17 +201,27 @@ int32_t create(const GlassExperimentHost* host, void** context)
         if (!std::getline(input, output)) return -1;
         if (!output.empty() && output.back() == '\r') output.pop_back();
         uint64_t prepareIdentity = 0;
+        uint64_t observedMesh = 0;
         if (input.peek() != std::char_traits<char>::eof())
         {
             std::string line, format; uint32_t process = 0;
             if (!std::getline(input, line)) return -1;
             std::istringstream selection(line);
-            if (!(selection >> format >> process >> prepareIdentity) || format != "prepare-vertex-v1" ||
-                process != GetCurrentProcessId() || !prepareIdentity) return -1;
+            uint64_t identity = 0;
+            if (!(selection >> format >> process >> identity) ||
+                process != GetCurrentProcessId() || !identity) return -1;
+            if (format == "prepare-vertex-v1")
+            {
+                prepareIdentity = identity;
+                selection >> std::ws;
+                if (!selection.eof() && (!(selection >> observedMesh) || !observedMesh)) return -1;
+            }
+            else if (format == "observe-mesh-v1") observedMesh = identity;
+            else return -1;
             selection >> std::ws;
             if (!selection.eof() || input.peek() != std::char_traits<char>::eof()) return -1;
         }
-        *context = new Recorder(std::filesystem::path(std::u8string(output.begin(), output.end())), prepareIdentity);
+        *context = new Recorder(std::filesystem::path(std::u8string(output.begin(), output.end())), prepareIdentity, observedMesh);
         return 0;
     }
     catch (...) { return -1; }

@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Existing-source bootstrap and producer/draw correspondence observed without restart. Null transient pointer no longer rejects owner metadata; MV/FG remain incomplete.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Source bootstrap and same-process native VS capture verified. Mesh-filtered preparation reaches current pipeline; 45 N-1 pairs match. Pixel coverage remains insufficient; new FG input absent.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 

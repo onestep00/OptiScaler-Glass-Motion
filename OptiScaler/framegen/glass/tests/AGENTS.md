@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [SourceBootstrap.md](SourceBootstrap.md): Same-process registration admits 3,930 sources; simultaneous census joins 2,144 ranges. No new MV/FG input or complete lifecycle/view proof.
+- [SourceBootstrap.md](SourceBootstrap.md): Source registration and current native vertex pairs observed; optional mesh-filtered preparation tested live. Five native pixel jobs capture only five pixels; complete silhouette/FG remain absent.
 
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 

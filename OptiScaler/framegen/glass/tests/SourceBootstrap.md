@@ -60,3 +60,34 @@ Consume this correspondence in the ordered rendering path, then verify actual
 current/previous geometry and material coverage. Source-array mutation, omitted
 creation routes, view/submission identity and GPU resource lifetime remain
 required checks. Never substitute an older available frame for missing N-1.
+
+## Current native-output checkpoint
+
+A separate same-process binding capture found the native material PS hash
+13eb28e98e1cd1d95bb35fe440fe59c9, matching the earlier verified shader. Its current
+observation identity was 9223372036854776630, not the older process's 955.
+Neither this observation identity nor its low bits selected a capture-ready
+pipeline. Both diagnostic attempts captured zero jobs and were unloaded.
+
+The binding recorder now accepts an optional mesh after the pipeline in
+`prepare-vertex-v1 PID PIPELINE [MESH]`. This filters observation before reserving
+rows or retaining pipelines, while the existing worker requests preparation.
+The request succeeded and the recorder observed prepared identity 1375, with
+139 rows, two pipelines and zero dropped rows. This is process-local diagnostic
+selection; it is not a production object whitelist.
+
+Native VS outputs 4/5 then yielded 64 captures and 9,536 valid vertex records.
+Comparison requires matching proxy, mesh, registry generation, chunk, vertex
+layout and viewport plus exactly consecutive frame numbers. Forty-five pairs
+passed, with maximum previous-versus-prior-current error 0.000086499 pixels.
+Largest captured displacement was 1.949 pixels. This is one mesh chunk; view
+identity and all-transparency coverage are not established. It is independent
+of the array-source bootstrap above, not evidence that those arrays supply MV.
+
+A following native pixel capture returned five jobs but only five total pixels
+(0, 1, 4, 0, 0). Thus the selected chunk is unsuitable as proof of a full object
+silhouette. All jobs retired and the module unloaded. No FG input changed.
+Local evidence: `work/glass-current-native-bindings-v1/`,
+`work/glass-current-native-prepare-v1/capture/bindings.done`,
+`work/glass-current-native-pair-v3/analysis.json` and
+`work/glass-current-native-pixels-v1/analysis.json`.
