@@ -127,6 +127,17 @@ original shader disassembly and the prior `glass-bindings-live-v12` layouts.
 Keep grouped source identity/history work active; a matching root layout alone
 does not remove that requirement. No shader swap or game input change was made.
 
+A current-cache audit then expanded to all 270 velocity techniques whose base
+factory is MeshStatic, including Discarded/PreSkinned variants: 93 unique VS.
+All expose three INSTANCE_TRANSFORM rows and none expose SV_InstanceID. Seven
+shaders have dynamically indexed constant-buffer loads, all at b8/b9, not b7.
+Those seven belong to skin-family and spline variants. Other resource reads still
+require dataflow analysis; this inventory does not prove absence of a separate
+previous-instance path. Non-MeshStatic factories are outside this audit. Cache
+SHA-256 was rechecked before extraction. Local scripts and results are
+`work/audit-static-velocity-variants.py` and
+`work/glass-static-velocity-variants-v1/{audit,dynamic-reads}.json`.
+
 Static direct-call tracing located the array setter's caller in an engine update
 worker. The worker passes an owner, bounds and a span of 48-byte transforms from
 an update record, then consumes the setter's AL result. This establishes a
