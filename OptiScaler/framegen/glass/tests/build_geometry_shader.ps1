@@ -22,5 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Material fixture compilation failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Vertex rewriting or DXIL validation failed' }
 & $tool $dxc material (Join-Path $build 'fixture-pixel.dxil') (Join-Path $build 'fixture-motion.dxil') '-'
 if ($LASTEXITCODE -ne 0) { throw 'Material rewriting or DXIL validation failed' }
+& $tool $dxc capture (Join-Path $build 'fixture-pixel.dxil') (Join-Path $build 'fixture-capture.dxil') '-'
+if ($LASTEXITCODE -ne 0) { throw 'Simultaneous color/capture rewriting or DXIL validation failed' }
 & $gpu $build
 if ($LASTEXITCODE -ne 0) { throw 'Actual vertex history/material motion GPU test failed' }

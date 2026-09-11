@@ -128,6 +128,14 @@ struct History
     float clip[4];
     uint32_t frame, generation, unused[2];
 };
+struct CaptureRecord
+{
+    float motion[2], depth;
+    uint32_t frame;
+    float transmission[3];
+    uint32_t reserved;
+};
+static_assert(sizeof(CaptureRecord) == 32);
 static void upload(ID3D12Resource* r, const void* p, size_t n)
 {
     void* m;
@@ -144,9 +152,13 @@ int wmain(int argc, wchar_t** argv)
         require(argc == 2, "gpu directory");
         const std::filesystem::path dir(argv[1]);
         auto vs = read(dir / L"fixture.dxil"), modified = read(dir / L"fixture-history.dxil"),
-             ps = read(dir / L"fixture-pixel.dxil"), motion = read(dir / L"fixture-motion.dxil");
+             ps = read(dir / L"fixture-pixel.dxil"), motion = read(dir / L"fixture-motion.dxil"),
+             captureShader = read(dir / L"fixture-capture.dxil");
         Device g;
-        D3D12_ROOT_PARAMETER params[5] {};
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
+        check(g.d->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)));
+        require(options.ROVsSupported, "Rasterizer-ordered views unavailable");
+        D3D12_ROOT_PARAMETER params[6] {};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants = { 0, 0, 4 };
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
@@ -160,9 +172,12 @@ int wmain(int argc, wchar_t** argv)
         params[3].Descriptor = { 0, 31 };
         params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        params[4].Constants = { 1, 31, 8 };
+        params[4].Constants = { 1, 31, 16 };
         params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_SIGNATURE_DESC rd { 5, params, 0, nullptr,
+        params[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        params[5].Descriptor = { 1, 31 };
+        params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC rd { 6, params, 0, nullptr,
                                        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
                                            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT };
         ComPtr<ID3DBlob> rb, error;
@@ -181,7 +196,7 @@ int wmain(int argc, wchar_t** argv)
         tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         D3D12_HEAP_PROPERTIES hp {};
         hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        ComPtr<ID3D12Resource> color[3];
+        ComPtr<ID3D12Resource> color[4];
         D3D12_CLEAR_VALUE clear {};
         clear.Format = tex.Format;
         for (auto& r : color)
@@ -189,11 +204,11 @@ int wmain(int argc, wchar_t** argv)
                                                &clear, IID_PPV_ARGS(&r)));
         D3D12_DESCRIPTOR_HEAP_DESC hd {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 3;
+        hd.NumDescriptors = 4;
         ComPtr<ID3D12DescriptorHeap> rtvs;
         check(g.d->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvs)));
-        D3D12_CPU_DESCRIPTOR_HANDLE handles[3];
-        for (UINT i = 0; i < 3; ++i)
+        D3D12_CPU_DESCRIPTOR_HANDLE handles[4];
+        for (UINT i = 0; i < 4; ++i)
         {
             handles[i] = rtvs->GetCPUDescriptorHandleForHeapStart();
             handles[i].ptr += i * g.d->GetDescriptorHandleIncrementSize(hd.Type);
@@ -206,13 +221,18 @@ int wmain(int argc, wchar_t** argv)
         const D3D12_SO_DECLARATION_ENTRY so[] = { { 0, "SV_Position", 0, 0, 4, 0 },
                                                   { 0, "GLASS_PREVIOUS", 0, 0, 4, 0 },
                                                   { 0, "GLASS_HISTORY_MISSING", 0, 0, 1, 0 } };
-        ComPtr<ID3D12PipelineState> pipeline[3];
-        for (UINT i = 0; i < 3; ++i)
+        ComPtr<ID3D12PipelineState> pipeline[4];
+        for (UINT i = 0; i < 4; ++i)
         {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pd {};
             pd.pRootSignature = root.Get();
             pd.VS = { i ? modified.data() : vs.data(), i ? modified.size() : vs.size() };
-            pd.PS = { i == 2 ? motion.data() : ps.data(), i == 2 ? motion.size() : ps.size() };
+            pd.PS = { i == 3   ? captureShader.data()
+                      : i == 2 ? motion.data()
+                               : ps.data(),
+                      i == 3   ? captureShader.size()
+                      : i == 2 ? motion.size()
+                               : ps.size() };
             pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             pd.SampleMask = UINT_MAX;
             pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -239,8 +259,14 @@ int wmain(int argc, wchar_t** argv)
         D3D12_INDEX_BUFFER_VIEW iv { ib->GetGPUVirtualAddress(), sizeof(indices), DXGI_FORMAT_R16_UINT };
         constexpr UINT Slots = 64, HistoryBytes = Slots * sizeof(History), SOBytes = 4096;
         std::array<char, SOBytes> zero {};
-        auto zeros = g.buffer(HistoryBytes + SOBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-        std::vector<char> allzero(HistoryBytes + SOBytes);
+        constexpr UINT RoiLeft = 16, RoiTop = 12, RoiWidth = W - 32, RoiHeight = H - 24, RoiStride = RoiWidth + 8,
+                       RoiBase = 17;
+        constexpr UINT CapturePixels = RoiBase + RoiStride * RoiHeight + 17, CaptureBytes = CapturePixels * 32;
+        auto capture = g.buffer(CaptureBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
+                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto zeros =
+            g.buffer(HistoryBytes + SOBytes + CaptureBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        std::vector<char> allzero(HistoryBytes + SOBytes + CaptureBytes);
         upload(zeros.Get(), allzero.data(), allzero.size());
         ComPtr<ID3D12Resource> history[2], stream[2];
         for (auto& r : history)
@@ -251,7 +277,7 @@ int wmain(int argc, wchar_t** argv)
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
         UINT64 imageBytes;
         g.d->GetCopyableFootprints(&tex, 0, 1, 0, &footprint, nullptr, nullptr, &imageBytes);
-        auto readback = g.buffer(imageBytes * 3 + SOBytes * 2 + HistoryBytes, D3D12_HEAP_TYPE_READBACK,
+        auto readback = g.buffer(imageBytes * 4 + SOBytes * 2 + HistoryBytes + CaptureBytes, D3D12_HEAP_TYPE_READBACK,
                                  D3D12_RESOURCE_STATE_COPY_DEST);
         g.begin();
         for (auto& r : history)
@@ -259,9 +285,11 @@ int wmain(int argc, wchar_t** argv)
             g.c->CopyBufferRegion(r.Get(), 0, zeros.Get(), 0, HistoryBytes);
             g.barrier(r.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
+        g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, CaptureBytes);
+        g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         g.finish();
         std::vector<Clip> last(18);
-        uint64_t exactColors = 0, exactHistory = 0, validSamples = 0, motionPixels = 0;
+        uint64_t exactColors = 0, exactHistory = 0, validSamples = 0, motionPixels = 0, capturePixels = 0;
         double maxMotionError = 0;
         for (UINT frame = 1; frame <= 5; ++frame)
         {
@@ -285,7 +313,7 @@ int wmain(int argc, wchar_t** argv)
             g.begin();
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            for (UINT i = 0; i < 3; ++i)
+            for (UINT i = 0; i < 4; ++i)
             {
                 if (i < 2)
                 {
@@ -298,8 +326,13 @@ int wmain(int argc, wchar_t** argv)
                 g.c->SetGraphicsRoot32BitConstants(1, 8, &hc, 0);
                 g.c->SetGraphicsRootShaderResourceView(2, history[previous]->GetGPUVirtualAddress());
                 g.c->SetGraphicsRootUnorderedAccessView(3, history[current]->GetGPUVirtualAddress());
-                float pc[] = { 0, 0, 1.f / W, 1.f / H, 0, 0, 0, 0 };
-                g.c->SetGraphicsRoot32BitConstants(4, 8, pc, 0);
+                GlassFg::MaterialCaptureConstants pc { 0,       0,         1.f / W,       1.f / H, 0,        0,
+                                                       frame,   0,         RoiLeft,       RoiTop,  RoiWidth, RoiHeight,
+                                                       RoiBase, RoiStride, CapturePixels, 0 };
+                require(pc.valid(CapturePixels), "Capture allocation contract");
+                require(!pc.valid(CapturePixels - 1), "Capture buffer smaller than advertised capacity admitted");
+                g.c->SetGraphicsRoot32BitConstants(4, 16, &pc, 0);
+                g.c->SetGraphicsRootUnorderedAccessView(5, capture->GetGPUVirtualAddress());
                 D3D12_VIEWPORT viewport { 0, 0, (float) W, (float) H, 0, 1 };
                 D3D12_RECT scissor { 0, 0, W, H };
                 g.c->RSSetViewports(1, &viewport);
@@ -322,7 +355,7 @@ int wmain(int argc, wchar_t** argv)
                 if (i < 2)
                 {
                     g.barrier(stream[i].Get(), D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    g.c->CopyBufferRegion(readback.Get(), imageBytes * 3 + i * SOBytes, stream[i].Get(), 0, SOBytes);
+                    g.c->CopyBufferRegion(readback.Get(), imageBytes * 4 + i * SOBytes, stream[i].Get(), 0, SOBytes);
                     g.barrier(stream[i].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
                 }
                 g.barrier(color[i].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -338,18 +371,24 @@ int wmain(int argc, wchar_t** argv)
                 g.barrier(color[i].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
             }
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            g.c->CopyBufferRegion(readback.Get(), imageBytes * 3 + SOBytes * 2, history[current].Get(), 0,
+            g.c->CopyBufferRegion(readback.Get(), imageBytes * 4 + SOBytes * 2, history[current].Get(), 0,
                                   HistoryBytes);
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.c->CopyBufferRegion(readback.Get(), imageBytes * 4 + SOBytes * 2 + HistoryBytes, capture.Get(), 0,
+                                  CaptureBytes);
+            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             g.finish();
             void* m;
-            D3D12_RANGE range { 0, (SIZE_T) (imageBytes * 3 + SOBytes * 2 + HistoryBytes) };
+            D3D12_RANGE range { 0, (SIZE_T) (imageBytes * 4 + SOBytes * 2 + HistoryBytes + CaptureBytes) };
             check(readback->Map(0, &range, &m));
             auto* b = (unsigned char*) m;
             require(memcmp(b, b + imageBytes, (size_t) imageBytes) == 0, "Original pixel output changed");
+            require(memcmp(b, b + imageBytes * 3, (size_t) imageBytes) == 0,
+                    "Original color/discard changed with simultaneous capture");
             exactColors += W * H;
-            auto* base = b + imageBytes * 3;
+            auto* base = b + imageBytes * 4;
             require(*(uint64_t*) base == 18 * sizeof(Clip), "Reference SO length");
             require(*(uint64_t*) (base + SOBytes) == 18 * sizeof(Record), "History SO length");
             const auto* ref = (const Clip*) (base + 256);
@@ -376,12 +415,38 @@ int wmain(int argc, wchar_t** argv)
                     const History empty {};
                     require(memcmp(&hist[j], &empty, sizeof(History)) == 0, "History wrote outside admitted range");
                 }
+            const auto* captured = (const CaptureRecord*) (b + imageBytes * 4 + SOBytes * 2 + HistoryBytes);
+            for (UINT j = 0; j < CapturePixels; ++j)
+            {
+                const bool inside =
+                    j >= RoiBase && j < RoiBase + RoiStride * RoiHeight && (j - RoiBase) % RoiStride < RoiWidth;
+                if (!inside)
+                {
+                    const CaptureRecord empty {};
+                    require(memcmp(&captured[j], &empty, sizeof(empty)) == 0, "Capture wrote outside owned region");
+                }
+            }
             for (UINT y = 0; y < H; ++y)
                 for (UINT x = 0; x < W; ++x)
                 {
                     const auto* original = (const float*) (b + y * footprint.Footprint.RowPitch + x * 16);
                     const auto* mv = (const float*) (b + imageBytes * 2 + y * footprint.Footprint.RowPitch + x * 16);
                     const bool covered = original[3] > 0;
+                    if (x >= RoiLeft && y >= RoiTop && x < RoiLeft + RoiWidth && y < RoiTop + RoiHeight)
+                    {
+                        const auto& record = captured[RoiBase + (y - RoiTop) * RoiStride + x - RoiLeft];
+                        require((record.frame == frame) == (covered && shouldValid),
+                                "Simultaneous capture coverage mismatch");
+                        if (record.frame == frame)
+                        {
+                            require(record.motion[0] == mv[0] && record.motion[1] == mv[1] && record.depth == mv[3],
+                                    "Simultaneous and separate geometry motion differ");
+                            for (float transmission : record.transmission)
+                                require(std::abs(transmission - (1 - original[3])) < 3e-7f,
+                                        "Simultaneous transmission mismatch");
+                            ++capturePixels;
+                        }
+                    }
                     if ((mv[2] >= 0) != (covered && shouldValid))
                         printf("OUTLINE frame=%u x=%u y=%u expected=%u original=%g,%g,%g,%g motion=%g,%g,%g,%g\n",
                                frame, x, y, covered && shouldValid, original[0], original[1], original[2], original[3],
@@ -448,10 +513,12 @@ int wmain(int argc, wchar_t** argv)
             D3D12_RANGE noWrite { 0, 0 };
             readback->Unmap(0, &noWrite);
         }
+        require(capturePixels > 0, "No simultaneous capture pixels");
         printf("PASS original_pixels=%llu exact_current_vertices=%llu exact_previous_vertices=%llu motion_pixels=%llu "
+               "capture_pixels=%llu "
                "max_motion_error_px=%.9f frames=5 generation_and_stale_rejection=1 outside_range_unchanged=1 "
-               "original_material_outline=1\n",
-               exactColors, exactHistory, validSamples, motionPixels, maxMotionError);
+               "original_material_outline=1 simultaneous_color_capture=1\n",
+               exactColors, exactHistory, validSamples, motionPixels, capturePixels, maxMotionError);
         return 0;
     }
     catch (const std::exception& e)

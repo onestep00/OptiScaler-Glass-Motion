@@ -15,6 +15,8 @@
 
 All changes are confined to this module. `GlassFg.props` compiles the rewriter, but no production call site currently invokes it. The original static-world correction remains installed.
 
+`OriginalColorAndCapture` preserves the original color exports and appends a rasterizer-ordered raw-buffer capture in the same draw. A bounded per-object rectangle stores surface motion/depth and RGB transmission without a second material evaluation. Original discard still executes. Missing history or an out-of-range capture address skips only the added storage. The host must validate `MaterialCaptureConstants` against the actual allocation and prove the original pass has read-only depth/stencil before using its early-depth variant.
+
 ## GPU validation
 
 Run `build_geometry_shader.ps1` from an x64 Visual Studio Developer PowerShell. It uses the repository's pinned DXC binary, generates shaders from the included synthetic HLSL, runs the actual production rewriter/assembler/validator, and creates an independent NVIDIA D3D12 device. It does not attach to or modify a game. It has no Python dependency.
@@ -29,6 +31,7 @@ Observed in the current test:
 - Across 6,017 accepted motion pixels, the maximum difference from double-precision perspective correspondence is 0.001586 pixels (including rasterization precision).
 - Material scalar attenuation matches the fixture's original alpha within `3e-7`; history writes leave the allocation exterior unchanged.
 - CPU allocation checks reject overflowing instance/address ranges, zero generation, and empty buffers.
+- The simultaneous color/capture pipeline preserves all 122,880 original color pixels. Its 6,017 captured motion/depth records exactly match the separate material pass; RGB transmission matches the original material. A padded, offset rectangle leaves storage outside the allocation unchanged.
 
 The test found that an interpolated valid value of one becomes `0.999999940395` at some pixels. Comparing it exactly to one created coverage holes. The implementation instead interpolates a missing-history flag: zero means valid. Zero interpolation is exact, and a nonzero contribution from a vertex with missing history rejects the sample. This avoids loosening the validity threshold.
 
@@ -44,4 +47,4 @@ Local, unpublished game shader inputs were also processed: 17 vertex shaders (in
 - Separate per-object coverage before detecting boundaries. A union mask loses outlines behind other transparent objects.
 - Correct FG frame, jitter convention, viewports, and resource-scale mapping, then actual FG input replacement.
 
-The separate material pass is useful for validation but would duplicate material shading. A proposed runtime path would append capture writes to the original color shader, using a bounded per-object target and rasterizer-ordered access. That path is not implemented here. It must preserve original color exports/discard and only use early depth/stencil when original depth/stencil writes are absent. See [Microsoft's ROV ordering contract](https://learn.microsoft.com/en-us/windows/win32/direct3d12/rasterizer-order-views) and [early depth/stencil semantics](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-attributes-earlydepthstencil). No live performance or ghosting-improvement claim follows from this independent test.
+The same-draw capture implementation is independently tested but has no production caller yet. ROV ordering applies within one draw; overlapping writes from different draws require a UAV barrier or another proven dependency. The current fixture does not verify overlapping fragments or depth-occluded capture. Per-object allocation, engine identity, live ordering and FG consumption remain incomplete. See [Microsoft's ROV ordering contract](https://microsoft.github.io/DirectX-Specs/d3d/RasterOrderViews.html) and [early depth/stencil semantics](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-attributes-earlydepthstencil). No live performance or ghosting-improvement claim follows from this independent test.

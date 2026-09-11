@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DxilVertexHistory.h"
+#include "RovCaptureShader.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -390,11 +391,14 @@ glass.end:
     return result;
 }
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
-                                          MaterialDestination destinationFactor)
+                                          MaterialDestination destinationFactor, MaterialMotionTarget target)
 {
     VertexHistoryShader result;
     try
     {
+        need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture,
+             "Unsupported material target");
+        const bool retainColor = target == MaterialMotionTarget::OriginalColorAndCapture;
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
         while (!source.empty() && source.back() == '\0')
@@ -514,9 +518,31 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             }
         metadata.append(
             resources[2],
-            metadata.add(
-                "i32 " + std::to_string(constantId) +
-                ", %Glass.PixelConstants* undef, !\"GlassPixelConstants\", i32 31, i32 1, i32 1, i32 32, null"));
+            metadata.add("i32 " + std::to_string(constantId) +
+                         ", %Glass.PixelConstants* undef, !\"GlassPixelConstants\", i32 31, i32 1, i32 1, i32 " +
+                         std::to_string(retainColor ? 64 : 32) + ", null"));
+        if (retainColor)
+        {
+            metadata.append(resources[1],
+                            metadata.add("i32 0, %Glass.RasterOrderedBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
+                                         "i32 1, i32 11, i1 false, i1 false, i1 true, null"));
+            auto properties = entry[4] == "null" ? Parts {} : split(metadata.get(entry[4]));
+            need(properties.size() % 2 == 0, "Malformed pixel properties");
+            bool found = false;
+            for (size_t i = 0; i < properties.size(); i += 2)
+                if (properties[i] == "i32 0")
+                {
+                    need(properties[i + 1].starts_with("i64 "), "Invalid shader flags");
+                    properties[i + 1] = "i64 " + std::to_string(std::stoull(properties[i + 1].substr(4)) | 262168ull);
+                    found = true;
+                }
+            if (!found)
+            {
+                properties.push_back("i32 0");
+                properties.push_back("i64 262168");
+            }
+            entry[4] = metadata.add(join(properties));
+        }
         if (entry[3] == "null")
         {
             entry[3] = metadata.add(join(resources));
@@ -525,11 +551,13 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         }
         else
             metadata.get(entry[3]) = join(resources);
-        metadata.get(signatures[1]) =
-            metadata.add("i32 0, !\"SV_Target\", i8 9, i8 16, " + zero + ", i8 0, i32 1, i8 4, i32 0, i8 0, " + mask15);
+        if (!retainColor)
+            metadata.get(signatures[1]) = metadata.add("i32 0, !\"SV_Target\", i8 9, i8 16, " + zero +
+                                                       ", i8 0, i32 1, i8 4, i32 0, i8 0, " + mask15);
         metadata.get(ep) = join(entry);
         // Removing void color stores does not rename or remove any SSA value.
-        body = std::regex_replace(body, std::regex(R"(  call void @dx.op.storeOutput\.[^\n]+\n)"), "");
+        if (!retainColor)
+            body = std::regex_replace(body, std::regex(R"(  call void @dx.op.storeOutput\.[^\n]+\n)"), "");
         std::ostringstream code;
         code << "\n  br label %glass.pixel\nglass.pixel:\n";
         code << "  %glass.cb = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 " << constantId
@@ -627,11 +655,26 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float %glass.alpha)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
-        body.replace(body.find("  ret void"), 10, code.str());
+        body.replace(body.find("  ret void"), 10, retainColor ? Detail::CaptureOriginalColor(code.str()) : code.str());
+        if (retainColor)
+        {
+            for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {
+                     { { "Glass.RasterOrderedBuffer", "{ i32 }" },
+                       { "dx.types.CBufRet.i32", "{ i32, i32, i32, i32 }" },
+                       { "dx.types.ResRet.i32", "{ i32, i32, i32, i32, i32 }" } } })
+                if (body.find(std::string("%") + name + " = type") == std::string::npos)
+                    body.insert(body.find("define void "), std::string("%") + name + " = type " + fields + "\n\n");
+            for (const auto* declaration :
+                 { "%dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32, %dx.types.Handle, i32)",
+                   "%dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32, %dx.types.Handle, i32, i32)",
+                   "void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8)" })
+                if (body.find(std::string("declare ") + declaration) == std::string::npos)
+                    body += std::string("declare ") + declaration + "\n";
+        }
         for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {
                  { { "dx.types.Handle", "{ i8* }" },
                    { "dx.types.CBufRet.f32", "{ float, float, float, float }" },
-                   { "Glass.PixelConstants", "{ float, float, float, float, float, float, float, float }" } } })
+                   { "Glass.PixelConstants", "{ [16 x float] }" } } })
             if (body.find(std::string("%") + name + " = type") == std::string::npos)
                 body.insert(body.find("define void "), std::string("%") + name + " = type " + fields + "\n\n");
         for (const auto* declaration :
@@ -641,6 +684,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                "void @dx.op.discard(i32, i1)", "i1 @dx.op.isSpecialFloat.f32(i32, float)" })
         {
             const auto text = std::string("declare ") + declaration;
+            if (retainColor && std::string_view(declaration) == "void @dx.op.discard(i32, i1)" &&
+                body.find("@dx.op.discard(") == std::string::npos)
+                continue;
             if (body.find(text) == std::string::npos)
                 body += text + "\n";
         }

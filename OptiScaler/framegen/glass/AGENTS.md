@@ -14,7 +14,7 @@
 
 - [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
 - [EngineGeometry.md](EngineGeometry.md): All in-world transparency scope, 32 geometry-route inventory, verified rigid history and skinning offset/binding observations. Actual per-instance/FG frame association, procedural/particle coverage and runtime producer remain incomplete; no new correction deployed.
-- [tests/GeometryShaders.md](tests/GeometryShaders.md): Original VS output/history and original material coverage/MV rewriter, independently verified on GPU. Compiled module source has no runtime call site yet; deployment and FG application remain incomplete.
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Original VS history and simultaneous original-color/material-MV capture independently verified on GPU. Compiled module source has no runtime call site yet; deployment and FG application remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
 - [tests/ObjectMotion.md](tests/ObjectMotion.md): Separate-object boundary weights and geometry MV reference. Synthetic inputs only; engine history and FG quality remain unverified.

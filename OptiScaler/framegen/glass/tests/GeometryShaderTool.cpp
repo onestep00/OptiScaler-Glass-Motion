@@ -56,9 +56,9 @@ int wmain(int argc, wchar_t** argv)
             check(compiler->Disassemble(input.Get(), &disassembly));
             output = disassembly;
         }
-        else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material")
+        else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material" || mode == L"capture")
         {
-            if (mode == L"rewrite" || mode == L"material")
+            if (mode == L"rewrite" || mode == L"material" || mode == L"capture")
             {
                 ComPtr<IDxcCompiler> compiler;
                 check(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
@@ -66,12 +66,15 @@ int wmain(int argc, wchar_t** argv)
                 check(compiler->Disassemble(input.Get(), &disassembly));
                 const auto assembly =
                     std::string_view((const char*) disassembly->GetBufferPointer(), disassembly->GetBufferSize());
-                auto patched = mode == L"rewrite"
-                                   ? GlassFg::RewriteVertexHistory(assembly)
-                                   : GlassFg::RewriteMaterialMotion(assembly, GlassFg::MaterialSource::One,
-                                                                    std::wstring(argv[5]) == L"dual"
-                                                                        ? GlassFg::MaterialDestination::SecondSourceRgb
-                                                                        : GlassFg::MaterialDestination::OneMinusAlpha);
+                auto patched =
+                    mode == L"rewrite"
+                        ? GlassFg::RewriteVertexHistory(assembly)
+                        : GlassFg::RewriteMaterialMotion(
+                              assembly, GlassFg::MaterialSource::One,
+                              std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb
+                                                               : GlassFg::MaterialDestination::OneMinusAlpha,
+                              mode == L"capture" ? GlassFg::MaterialMotionTarget::OriginalColorAndCapture
+                                                 : GlassFg::MaterialMotionTarget::SeparateTarget);
                 if (!patched)
                     throw std::runtime_error(patched.error);
                 check(library->CreateBlobWithEncodingOnHeapCopy(patched.assembly.data(),

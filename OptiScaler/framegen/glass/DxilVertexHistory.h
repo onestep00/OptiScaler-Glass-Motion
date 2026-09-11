@@ -2,6 +2,7 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <cmath>
 
 namespace GlassFg
 {
@@ -54,6 +55,30 @@ enum class MaterialDestination
     OneMinusAlpha,
     SecondSourceRgb
 };
+enum class MaterialMotionTarget
+{
+    SeparateTarget,
+    OriginalColorAndCapture
+};
+
+struct MaterialCaptureConstants
+{
+    float viewportX, viewportY, inverseWidth, inverseHeight;
+    float jitterDeltaX, jitterDeltaY;
+    std::uint32_t frame, reverseDepth;
+    std::uint32_t left, top, width, height;
+    std::uint32_t base, stride, capacity, reserved;
+    bool valid(std::uint64_t allocatedCapacity) const
+    {
+        return frame && width && height && stride >= width && capacity && capacity <= UINT32_MAX / 32 &&
+               capacity <= allocatedCapacity && std::isfinite(viewportX) && std::isfinite(viewportY) &&
+               std::isfinite(inverseWidth) && std::isfinite(inverseHeight) && inverseWidth > 0 && inverseHeight > 0 &&
+               std::isfinite(jitterDeltaX) && std::isfinite(jitterDeltaY) &&
+               std::uint64_t(base) + std::uint64_t(height - 1) * stride + width <= capacity &&
+               std::uint64_t(left) + width <= 32768 && std::uint64_t(top) + height <= 32768;
+    }
+};
+static_assert(sizeof(MaterialCaptureConstants) == 64);
 
 // Preserves the original material computation/discard, replacing only its
 // color exports with (normalized MV.xy, mean RGB attenuation, device depth).
@@ -61,5 +86,13 @@ enum class MaterialDestination
 // Must render into an owned target; never substitute this for the color draw.
 // b1/space31: viewport origin XY, inverse extent XY, jitter delta UV, unused XY.
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource source,
-                                          MaterialDestination destination);
+                                          MaterialDestination destination,
+                                          MaterialMotionTarget target = MaterialMotionTarget::SeparateTarget);
+// OriginalColorAndCapture preserves every original color export/discard and
+// writes u1/space31 as a rasterizer-ordered raw buffer. It requires read-only
+// depth/stencil, ROV hardware support, one nonoverlapping owned region per object,
+// MaterialCaptureConstants validated against the bound buffer, and ordering
+// between overlapping draws. ROV ordering alone covers a single Draw call;
+// overlapping writes from different Draw calls require a UAV barrier/dependency.
+// Records: float MV.xy/depth, uint frame; float transmission.rgb, uint zero.
 } // namespace GlassFg
