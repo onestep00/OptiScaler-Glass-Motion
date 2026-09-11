@@ -22,7 +22,7 @@
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.
 
-- [SourceSlots.md](SourceSlots.md): Outer node-group observer passes mixed ABI, skipped creation and unmapped-transform tests. Runtime temporal identity/MV remain incomplete; unsafe leaf stays disabled.
+- [SourceSlots.md](SourceSlots.md): Live reload yielded 4,096 original source/proxy links; later typed render-mesh chain verified. Temporal identity/MV remain incomplete; unsafe leaf stays disabled.
 
 - [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
 

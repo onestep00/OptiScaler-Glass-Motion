@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: slot cache and checked source-span decoding implemented; node-to-proxy append path verified in resident code; lifetime/view adapter incomplete
+- Status: live original node/range/proxy creation correspondence verified; temporal lifetime/view adapter incomplete
 - Deployment: none; no motion or FG input changes
 - Deprecated: no
 - Scope: bounded CPU correspondence within one proven producer/consumer domain
@@ -304,6 +304,33 @@ saved interval contained zero calls (zero rows and zero rejected observations).
 Recording is stopped; the process remained responding. This is installation
 evidence only, not live source/proxy data or broad stability proof. Local output:
 `work/glass-node-groups-live-v1/capture/`. The quarantined leaf was not installed.
+
+After the user reloaded the same save in PID 70152, capture-2 reached its 4,096-row
+bound with zero rejected observations. All calls returned to 0x2542cf. Every
+record's span endpoints matched the decoded original shared-buffer index/count,
+and every renderer array grew by exactly one. The records cover 4,090 node
+addresses, 4,069 definitions, 64 shared buffers and 4,082 proxy addresses.
+In 4,084 records the original source index differs from the renderer ordinal.
+Fourteen repeated proxy addresses each have different source tuples, reinforcing
+that address-only temporal history is invalid. Recording is stopped.
+
+A later read-only snapshot followed node handle -> node-owned renderer array ->
+renderer handle -> proxy for 4,002 records; all their current array counts matched
+the recorded source counts. A first exploratory check incorrectly required the
+node's CMesh pointer to equal the proxy's CRenderMesh pointer and rejected all.
+SDK CMesh+0x1F0 and the audited 0x3c93e0 preparation code establish the explicit
+CMesh-to-render-resource link. Repeating with that typed link accepted 3,987
+current chains across 426 render meshes. These are separate observation times,
+not a claim that the difference of 15 proves destruction. One accepted group has
+40 instances beginning at shared source index 496; its visual object identity
+has not been established. Node field q7 is CMesh, not a draw's render-mesh key.
+
+Evidence: `capture-2/analysis.json`, `chain-stages.json` and
+`current-chain-typed.json` under the same workspace diagnostic directory.
+`current-chain.json` retains the rejected untyped comparison for auditability.
+Current address/handle agreement is not a lifetime-generation proof, and none of
+these reads supplies previous vertices or changes FG input. Connecting the
+captured provenance to registered generations and the draw consumer is next.
 
 `ExperimentInstanceUpdates.cpp` also builds with `GLASS_ARRAY_WRAPPER`. This
 separate diagnostic observes the audited three-argument wrapper before enqueue,
