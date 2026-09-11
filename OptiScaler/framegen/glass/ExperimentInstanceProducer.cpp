@@ -138,7 +138,7 @@ bool install()
     // Absolute addresses never cross processes; unknown live bytes reject install.
     std::array<unsigned, 7> header {};
     if (!file.read(reinterpret_cast<char*>(header.data()), sizeof(header)) ||
-        (header[0] != 0x49535031 && header[0] != 0x49535032))
+        (header[0] != 0x49535031 && header[0] != 0x49535032 && header[0] != 0x49535033))
         return false;
     image = reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
@@ -147,7 +147,8 @@ bool install()
     const auto imageBytes = nt->OptionalHeader.SizeOfImage;
     if (header[4] > imageBytes - 4 || header[5] >= imageBytes || header[6] >= imageBytes) return false;
     unsigned linearRva = 0;
-    if (header[0] == 0x49535032 &&
+    const bool selectionHook = header[0] != 0x49535033;
+    if (header[0] != 0x49535031 &&
         (!file.read(reinterpret_cast<char*>(&linearRva), 4) || !linearRva || linearRva >= imageBytes ||
          linearRva == header[6])) return false;
     for (unsigned i = 0; i < 3; ++i)
@@ -172,7 +173,7 @@ bool install()
     GlassFg::DetourThreads threads;
     if (!threads.gather() || DetourTransactionBegin() != NO_ERROR) return false;
     if (DetourAttach(reinterpret_cast<PVOID*>(&originalOuter), outer) != NO_ERROR ||
-        DetourAttach(reinterpret_cast<PVOID*>(&originalSelect), select) != NO_ERROR ||
+        (selectionHook && DetourAttach(reinterpret_cast<PVOID*>(&originalSelect), select) != NO_ERROR) ||
         DetourAttach(reinterpret_cast<PVOID*>(&originalPacket), packet) != NO_ERROR || !threads.enlist())
     { DetourTransactionAbort(); return false; }
     installed = DetourTransactionCommit() == NO_ERROR;

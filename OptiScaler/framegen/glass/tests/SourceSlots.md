@@ -75,6 +75,29 @@ No new destructor hook has been installed. Local function disassemblies are unde
 
 ### Same-process follow-up and whole-array route
 
+The whole-array-only profile 0x49535033 was subsequently built and tested in
+PID 70152 without restarting. It uses the extended header but installs only the
+outer producer and packet hooks. It deliberately does not install the selection
+leaf hook; that function's broader internal register contract needs separate
+review. All three recorded bodies matched resident bytes before loading, and
+Start/Save returned zero. The first interval recorded 20,987 linear source entries
+over five frames, spanning 3,121 proxies and 273 meshes with 2--48 source elements.
+
+A second interval overlapped hot census generation 4. Its 20,857 source entries
+cover frames 52570--52574; the census covers 52568--52575. Matching exact
+frame/render-mesh/global-slot keys resolved every instance in 3,230 anonymous
+draw ranges (17,434 instance occurrences), with zero conflicting source keys.
+Another 2,689 ranges had no source overlap; bounded recording intervals and the
+grouped route remain limitations. No partial/ambiguous range occurred among the
+overlapping keys. This is not a lifetime/view admission proof or all-transparency
+coverage. The source observer stopped recording and stays pinned forwarding;
+the census module unloaded with no pending GPU captures. The game remained
+responding. No object MV or new FG input was produced.
+
+Local evidence: `work/glass-instance-producer-live-v3/preflight.json`,
+`capture/analysis.json`, `capture-2/source-indices.csv`, and
+`work/glass-node-draw-census-v4/capture/linear-source-join.json`.
+
 PID 70152 remained responding during a new census-only generation-2 load and
 unload, with zero GPU captures pending or recorded. The new census has 32,768
 draw rows, including 29,806 rows across seven known engine frames. Its 37,685
