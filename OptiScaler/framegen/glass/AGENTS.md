@@ -16,7 +16,7 @@
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
-- [tests/SourceSlots.md](tests/SourceSlots.md): Node-owned proxy append verified in resident code; checked span decoder avoids skipped-group ordinal errors. Unsafe leaf hook remains disabled; lifecycle/view/FG integration incomplete.
+- [tests/SourceSlots.md](tests/SourceSlots.md): Outer node-group observer forwards mixed float/pointer inputs and records successful source/proxy correspondence; independent fixtures pass. Unsafe leaf remains disabled; lifecycle/view/FG incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
 

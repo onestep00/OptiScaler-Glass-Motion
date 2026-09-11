@@ -278,6 +278,33 @@ All RVAs describe the audited binary only; no production hook or signature was a
 
 ### Upstream wrapper diagnostic
 
+The separate `GLASS_NODE_GROUP` mode observes the outer creation function with
+its four original arguments: node instance, float distance parameter, source span
+and bounds. It snapshots the original node/shared-buffer range before forwarding,
+then records only a single successfully appended renderer handle and its owner.
+The decoded source span remains independent of the compacted renderer ordinal.
+It copies scalar headers only, with no transform-array or GPU readback. This
+mode uses profile magic 0x49555034 and the same bounded Start/Save control.
+
+`NodeGroups.cpp` passes exact mixed float/pointer forwarding, skipped creation,
+reordered source spans, allocation-bound rejection and disabled observation.
+The transform allocation in the fixture is deliberately unmapped. Existing
+ArrayWrapper, InstanceUpdates and TransformRange fixtures also pass. MSVC
+`/O2 /W4 /WX` builds passed. These are ordinary-ABI fixtures; audited caller
+liveness remains necessary before runtime use. Neither source addresses nor
+successful append events establish temporal generations by themselves.
+
+The node-group DLL (SHA-256
+`d9f2992f3485508e30a814b5296f48e448dfb22eb03e2c8fd2987a5c649fba46`)
+was loaded into PID 70152 after the resident creation/parent bodies were checked
+against disk. The two audited direct caller paths do not carry the leaf's R10
+dependency across this outer call; the mixed float input is forwarded in XMM1.
+The 401-byte creation profile installed, and Start/Save returned zero. The first
+saved interval contained zero calls (zero rows and zero rejected observations).
+Recording is stopped; the process remained responding. This is installation
+evidence only, not live source/proxy data or broad stability proof. Local output:
+`work/glass-node-groups-live-v1/capture/`. The quarantined leaf was not installed.
+
 `ExperimentInstanceUpdates.cpp` also builds with `GLASS_ARRAY_WRAPPER`. This
 separate diagnostic observes the audited three-argument wrapper before enqueue,
 so the recorded caller distinguishes its upstream producers. It forwards all
