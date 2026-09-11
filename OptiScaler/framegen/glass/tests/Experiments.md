@@ -429,3 +429,31 @@ priority is real per-object boundary MV across common rendering routes; per-obje
 manual discovery and complex overlapping-layer mixing are not implementation
 strategies. Reference: Microsoft's Detours calling convention/transaction contract
 at https://github.com/microsoft/Detours/wiki/Using-Detours .
+
+## Live direct source-index observation
+
+The standalone observer was loaded into the existing PID 56340 with no restart.
+Its exact-body profile admitted all three current functions before attaching;
+Start returned 0. DLL SHA-256 is
+84FEC9917E6BB5FF6461E2859F39406353E06E908B9E0B7B2DFFC11227B99EBE.
+It remains explicitly pinned at work/glass-instance-producer-live-v1/observer.dll;
+Save returned 0 and recording is disabled. This resident observer is separate from
+the replaceable coverage module and must not be reported as unloaded.
+
+The first run saved 4096 group records, 31,860 instance entries and 1,214 owner
+proxies over 49 observed engine frames. 14,629 entries have an original source
+index different from their group ordinal. All saved entries passed source range
+checks. Capacity stopped admission (dropped=1); this is not exhaustive coverage.
+No source mesh whitelist, group-table scan or GPU copy was used.
+
+A second recording overlapped the existing coverage/census module in the same
+process. Joining exact engine frame, mesh, global transform start and count found
+676 unique range matches across 56 meshes; no matching key had competing owner
+candidates. This is CPU producer/range evidence, not final GPU ordering, FG frame
+correlation, array lifetime or previous-vertex validity. Local evidence:
+outputs/glass-source-indices-live-v1, outputs/glass-source-indices-live-v2, and
+outputs/glass-experiment-sourcejoin-v5/source-range-join.json. The coverage module
+saved 22 more jobs; all 120 cumulative jobs retired and all five coverage DLL
+versions unloaded. The separately pinned CPU observer remains stopped/resident.
+No new MV correction was applied. Next work must carry source identity through
+the actual draw and obtain owner/array lifetime before authorizing shader history.

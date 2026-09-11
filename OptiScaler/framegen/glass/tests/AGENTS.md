@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [Experiments.md](Experiments.md): Live direct producer saved 31,860 source entries; 676 unique same-frame transform-range joins across 56 meshes. Pinned observer stopped; no lifetime/MV/FG proof.
+
 - [Experiments.md](Experiments.md): Direct current-group/source-index callback preparation; bounded scalar reads and nested-scope fixture pass. Standalone observer not deployed; no object MV.
 
 - [Experiments.md](Experiments.md): Close-angle 40-instance cups captured after raising diagnostic capacity to 64; actual overlap up to five slots. Union/reference exact; no new MV or FG correction.
