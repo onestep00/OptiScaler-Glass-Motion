@@ -141,6 +141,47 @@ int main()
         ComPtr<ID3D12PipelineState> original, second;
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&original)));
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&second)));
+#ifdef GLASS_OBSERVATION_RETRY
+        {
+            const auto retryPixel = read("work/glass-optiscaler-source/artifacts/glass-tests/observation-depth-ps.dxil");
+            auto retryDesc = d;
+            retryDesc.PS = { retryPixel.data(), retryPixel.size() };
+            retryDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            auto& blend = retryDesc.BlendState.RenderTarget[0];
+            blend.BlendEnable = TRUE;
+            blend.SrcBlend = D3D12_BLEND_SRC_ALPHA; blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+            blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            blend.SrcBlendAlpha = D3D12_BLEND_ONE; blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+            ComPtr<ID3D12PipelineState> retryPso;
+            check(device.d->CreateGraphicsPipelineState(&retryDesc, IID_PPV_ARGS(&retryPso)));
+            GlassFg::GeometryPipelineCache cache(device.d.Get(), std::filesystem::absolute(
+                "work/glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll"));
+            const auto drain = [&] {
+                const auto deadline = GetTickCount64() + 10000;
+                while (cache.stats().pending && GetTickCount64() < deadline) Sleep(1);
+                require(!cache.stats().pending, "Retry worker timed out");
+            };
+            require(cache.rootCreated(root.Get(), 0, serialized->GetBufferPointer(), serialized->GetBufferSize()), "Retry root");
+            require(cache.pipelineCreated(retryPso.Get(), retryDesc), "Initial material request");
+            drain();
+            const auto failed = cache.stats();
+            require(failed.rejected == 1 && !cache.find(retryPso.Get()), "Depth-output material must fail");
+            require(!cache.pipelineCreated(retryPso.Get(), retryDesc), "Failed material reported success");
+            require(cache.pipelineCreated(retryPso.Get(), retryDesc, true), "Vertex recovery request");
+            drain();
+            const auto recovered = cache.find(retryPso.Get());
+            const auto after = cache.stats();
+            require(recovered && recovered->vertexOnlyCapture && recovered->instrumented,
+                    "Vertex recovery not prepared");
+            require(after.pipelines == failed.pipelines && after.retainedBytes == failed.retainedBytes &&
+                    after.ready == 1 && after.rejected == 1, "Recovery duplicated retained payload");
+            require(!memcmp(recovered->description.PS.pShaderBytecode, retryPixel.data(), retryPixel.size()),
+                    "Recovery changed original pixel shader");
+            require(cache.pipelineCreated(retryPso.Get(), retryDesc, true) && !cache.stats().pending,
+                    "Prepared recovery requeued");
+            puts("VERTEX_RECOVERY_OK material_failed vertex_ready same_payload original_pixel_preserved");
+        }
+#endif
         {
             GlassFg::GeometryObservationCache cache;
             auto readOnly = d;

@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/GeometryObservation.md](tests/GeometryObservation.md): Removed depth-write restriction from bounded descriptor observation; independent checks pass. Missing live mesh-chunk pipeline is not recovered; host deployment and FG remain incomplete.
+- [tests/GeometryObservation.md](tests/GeometryObservation.md): Bounded observation and failed-material to vertex-only recovery pass independent checks without duplicate shader storage. Missing live mesh-chunk pipeline, host deployment and FG remain incomplete.
 
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped capture permits separate chunks/ranges within a frame; selector checks and 64 live captures pass. Selected mesh yielded one chunk only; complete outlines and temporal/FG remain incomplete.
 

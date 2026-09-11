@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: depth-independent observation passes independent descriptor ownership tests; live missing-pipeline recovery remains incomplete
+- Status: depth-independent observation and failed-material to vertex-only recovery pass independent tests; live missing-pipeline recovery remains incomplete
 - Deployment: not installed in the running game
 - Deprecated: no
 - Scope: bounded diagnostic census of VS/PS triangle graphics pipelines, independent of depth-write state
@@ -200,3 +200,27 @@ proven to be the depth predicate. Cache exhaustion, unsupported descriptors and
 creation coverage remain possible. This source change is not installed in the
 resident host and cannot recover a descriptor discarded earlier by that host.
 No new object MV, complete silhouette or FG input was produced.
+
+## Failed material compilation and explicit vertex recovery
+
+Previously `pipelineCreated` returned true for every existing cache key, including
+a completed failed material rewrite. An explicit vertex request therefore queued
+nothing for those keys. The worker now marks completion under its cache lock.
+An explicit vertex-only request may requeue a completed failed material entry
+once, provided its root was extended successfully. The entry was never published
+by `find`; ready entries stay immutable. Pending requests remain deduplicated,
+ordinary completed failures report false, and failed vertex attempts do not loop.
+The retry reuses owned shader/layout bytes and the same cache identity. Rejection
+statistics remain cumulative attempt counts. No byte or entry budget increases.
+
+`GeometryObservationDepth.hlsl` supplies a real depth-output PS that the material
+rewriter rejects. Build it as ps_6_0 into
+`artifacts/glass-tests/observation-depth-ps.dxil`. Compile GeometryObservation.cpp
+with GLASS_OBSERVATION_NATIVE and GLASS_OBSERVATION_RETRY, linking
+GeometryPipelineCache.cpp, GeometryPipeline.cpp and DxilVertexHistory.cpp, using
+the tests PCH stub and existing DXIL vertex/pixel fixtures. The independent test
+observes one material failure, then successful vertex-only preparation, unchanged
+retained bytes/entry count, unchanged original PS bytes and duplicate suppression.
+It passes with `VERTEX_RECOVERY_OK` and `GEOMETRY_OBSERVATION_OK` under `/O2 /W4 /WX`.
+This compiles real D3D12 PSOs but does not submit game draws or prove live recovery.
+Local binary: `work/glass-observation-general-v1/retry.exe`.

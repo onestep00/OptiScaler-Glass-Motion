@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [GeometryObservation.md](GeometryObservation.md): Original-only cache admits read-only/depth-disabled PSOs under unchanged budgets; independent ownership/replay-isolation checks pass. Live missing-chunk descriptor and FG remain incomplete.
+- [GeometryObservation.md](GeometryObservation.md): Depth-independent observation and one-time failed-material to vertex-only recovery pass independent D3D12 checks; retained payload is reused. Live missing-chunk descriptor and FG remain incomplete.
 
 - [SourceBootstrap.md](SourceBootstrap.md): CaptureSelection checks mesh-scoped and exact selectors. Live mesh capture retains changing instance counts; multi-chunk collection is not yet demonstrated. MRT/stencil coverage checks remain passing.
 

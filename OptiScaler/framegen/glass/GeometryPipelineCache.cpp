@@ -51,6 +51,7 @@ struct GeometryPipelineCache::Impl
         std::shared_ptr<RootWork> root;
         std::shared_ptr<GeometryPipelineEntry> entry;
         bool ready = false;
+        bool completed = false;
     };
     using Job = std::variant<std::shared_ptr<RootWork>, std::shared_ptr<PipelineWork>>;
     Microsoft::WRL::ComPtr<ID3D12Device> device;
@@ -132,6 +133,8 @@ struct GeometryPipelineCache::Impl
                         ++counters.rejected;
                         counters.lastError = error;
                     }
+                    if (auto* item = std::get_if<std::shared_ptr<PipelineWork>>(&job))
+                        (**item).completed = true;
                 }
             }
         }
@@ -227,8 +230,21 @@ bool GeometryPipelineCache::pipelineCreated(ID3D12PipelineState* identity,
         std::lock_guard lock(r.mutex);
         if (r.stopping)
             return false;
-        if (r.pipelines.contains(identity))
+        if (const auto existing = r.pipelines.find(identity); existing != r.pipelines.end())
+        {
+            auto& work = *existing->second;
+            if (work.ready || !work.completed) return true;
+            // A rejected material rewrite must not permanently block explicit
+            // vertex-only capture. Failed entries have never been published.
+            if (!vertexOnly || work.entry->vertexOnlyCapture || !work.root->result) return false;
+            r.jobs.emplace_back(existing->second);
+            work.entry->vertexOnlyCapture = true;
+            work.entry->instrumented.Reset();
+            work.completed = false;
+            ++r.counters.pending;
+            r.changed.notify_one();
             return true;
+        }
         const auto root = r.roots.find(desc.pRootSignature);
         const std::size_t bytes = desc.VS.BytecodeLength + desc.PS.BytecodeLength +
                                   desc.InputLayout.NumElements * (sizeof(D3D12_INPUT_ELEMENT_DESC) + 128);
