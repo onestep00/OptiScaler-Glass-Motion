@@ -38,6 +38,15 @@ class ExperimentRuntime
     }
 
   public:
+    class Lease
+    {
+        friend class ExperimentRuntime;
+        std::shared_ptr<Module> module;
+        explicit Lease(std::shared_ptr<Module> value) : module(std::move(value)) {}
+      public:
+        Lease() = default;
+        explicit operator bool() const { return bool(module); }
+    };
     class Frame
     {
         friend class ExperimentRuntime;
@@ -54,6 +63,7 @@ class ExperimentRuntime
         Frame& operator=(const Frame&) = delete;
         explicit operator bool() const { return bool(module); }
         uint64_t revision() const { return module ? module->generation : 0; }
+        Lease retain() const { return Lease(module); }
         int32_t dispatch(const GlassExperimentEvent& event)
         {
             if (!module || event.size != sizeof(event) || event.frame != frame ||

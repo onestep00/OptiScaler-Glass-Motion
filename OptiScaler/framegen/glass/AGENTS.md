@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/Experiments.md](tests/Experiments.md): Dynamic DLL loader and CPU frame-generation lifetime checks pass. GPU retirement, engine/FG payloads and game integration remain incomplete.
+- [tests/Experiments.md](tests/Experiments.md): Dynamic DLL loader, CPU phases and actual D3D12 module-resource retirement checks pass. Engine/FG payloads and live observer integration remain incomplete.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Actual mesh chunk range decoder added. Diagnostic draw metadata records counts/bindings, without claiming topology or view identity. New metadata is not deployed.
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Resampling source reuses completed slots for up to 64 candidate shapes under the existing budget, with draw provenance sidecars. Independent recorder GPU check passes; game resampling pending.
