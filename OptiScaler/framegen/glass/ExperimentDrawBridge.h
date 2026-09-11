@@ -1,5 +1,6 @@
 #pragma once
 #include "ExperimentDrawAbi.h"
+#include "ExperimentPipelineService.h"
 #include "GeometryDrawCapture.h"
 #include "GeometryRasterState.h"
 #include "CyberpunkDraws.h"
@@ -43,7 +44,7 @@ inline int32_t ExperimentMeshShape(const void* source, GlassExperimentMesh* out)
 inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t recording,
                                   const GeometryDrawView& draw, const GeometryIndexedArguments& args,
                                   const GeometryRasterState& raster, const GraphicsRootBindings& bindings,
-                                  const GeometryPipelineEntry* pipeline) noexcept
+                                  const ExperimentPipelineLease& pipeline) noexcept
 {
     const auto observer = experimentDrawObserver.load(std::memory_order_acquire);
     if (!observer) return;
@@ -57,6 +58,7 @@ inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t r
     input.rasterKnown = raster.usable();
     if (pipeline)
     {
+        input.pipelineAccess = BorrowExperimentPipeline(pipeline);
         input.pipelineIdentity = pipeline->identity;
         input.descriptor = &pipeline->description; input.descriptorBytes = sizeof(pipeline->description);
         input.rootReplayable = bindings.canReplay(*pipeline->root, pipeline->original.Get());
@@ -71,7 +73,7 @@ inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t r
         for (unsigned i = 0; i < raster.targetCount; ++i) input.renderTargets[i] = raster.targets[i].ptr;
     }
     input.source = &draw; input.objectAt = ExperimentObjectAt; input.meshShape = ExperimentMeshShape;
-    const GlassExperimentEvent event { sizeof(event), GlassExperimentDraw, draw.frame, 0, 0, 1,
+    const GlassExperimentEvent event { sizeof(event), GlassExperimentDraw, draw.frame, 0, 0, 2,
                                        sizeof(input), &input };
     observer(event);
 }

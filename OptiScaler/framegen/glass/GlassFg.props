@@ -19,6 +19,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentRecording.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentDrawAbi.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentDrawBridge.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentPipelineAbi.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentPipelineService.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryRasterState.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.cpp" />

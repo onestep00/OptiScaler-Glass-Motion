@@ -399,6 +399,7 @@ int wmain(int argc, wchar_t** argv)
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
+            if (experiment && frame == 2) experimentCheck.prepare(argv[2]);
             if (recorder && frame == 5)
             {
                 g.begin(); // Discard the preceding recording before stopping.
@@ -528,6 +529,7 @@ int wmain(int argc, wchar_t** argv)
                     captureOwner.prepared = { capturePso.Get(), hc, history[previous]->GetGPUVirtualAddress(),
                         history[current]->GetGPUVirtualAddress(), pixelConstants->GetGPUVirtualAddress(),
                         capture->GetGPUVirtualAddress(), mappingBuffer->GetGPUVirtualAddress() };
+                    if (experimentCheck.pipeline()) captureOwner.prepared.pipeline = experimentCheck.pipeline();
                     captureOwner.enabled = true;
                     geometryFixturePacket = true;
                 }
@@ -884,7 +886,12 @@ int wmain(int argc, wchar_t** argv)
                    "bindings_ready=%llu game_hooks=0\n",
                    exact, stats.indexed, stats.packets, stats.bindingsReady);
         }
-        if (experiment) experimentCheck.verify();
+        if (experiment)
+        {
+            g.begin(); // Discard the final module-PSO recording before unloading.
+            g.finish();
+            experimentCheck.verify();
+        }
         printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u instance_rebatch=1 "
                "isolated_contours=1 inactive_instances=1 inactive_recovery=1 opaque_depth_rejection=1 "
                "partial_history_flag=1 "

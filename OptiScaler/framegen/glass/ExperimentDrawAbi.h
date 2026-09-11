@@ -1,5 +1,6 @@
 #pragma once
 #include "ExperimentAbi.h"
+#include "ExperimentPipelineAbi.h"
 
 struct GlassExperimentObject
 {
@@ -13,7 +14,8 @@ struct GlassExperimentMesh
     uint32_t streamOffsets[5], indexType, vertexFactory;
 };
 // Borrowed observation only: no GPU commands or retained raw pointers through
-// this payload. A GPU capture uses the separately owned draw-preparation seam.
+// this payload. The explicit pipeline service may retain immutable compiler
+// inputs only. GPU capture uses the separately owned draw-preparation seam.
 struct GlassExperimentDrawInput
 {
     uint32_t size, descriptorBytes;
@@ -32,4 +34,5 @@ struct GlassExperimentDrawInput
     const void* source;
     int32_t (*objectAt)(const void*, uint32_t, GlassExperimentObject*);
     int32_t (*meshShape)(const void*, GlassExperimentMesh*);
+    GlassExperimentPipelineAccess pipelineAccess;
 };

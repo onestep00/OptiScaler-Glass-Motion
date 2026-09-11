@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: loader, GPU retirement and borrowed draw DLL bridge pass independent checks; game integration incomplete
+- Status: loader, GPU retirement and module-compiled geometry capture pass independent checks; game integration incomplete
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -17,20 +17,37 @@ capture preparation across the DLL boundary remain incomplete.
 pipeline/root, shader descriptor, viewport/scissor and target handles to a
 resident observer. Object entries and the mesh range decoder are accessed on
 demand inside the callback. No vertex/bone/image buffer is copied by this bridge.
-The payload does not authorize retained pointers or GPU recording. Missing mesh
+The payload does not authorize GPU recording or arbitrary retained pointers. Missing mesh
 or compiled pipeline data stays explicit; descriptor handles do not establish
 resource lifetime, view identity or FG correlation. The observer is invoked only
 for direct indexed draws with an engine packet and tracked command recording;
 it does not yet census missing packets or all rendering families.
 
+Draw payload version 2 adds `ExperimentPipelineAbi.h` / `ExperimentPipelineService.h`.
+An explicit opaque token retains the existing immutable pipeline-cache entry.
+Only its host-provided release function destroys it; no shared_ptr or allocator
+ownership crosses the DLL ABI. The versioned view supplies original descriptor,
+owned shader/input-layout bytes through that descriptor, original/extended roots
+and binding slots. One new token allocates a small CPU owner; reuse it per needed
+pipeline rather than acquiring one on every draw. It makes no shader or game GPU
+buffer copy. Retention can keep the original cache/COM resources alive, so modules
+must bound retained pipelines and release on a worker/control thread after use.
+
 `GeometryInstances --experiment` loads `experiment-draw.dll` through the real
 runtime and production command bridge on an independent D3D12 device. It checks
 32 callbacks / 48 object entries, bounds rejection, absent engine mesh metadata,
 actual DLL unload, 143,360 unchanged original color pixels and the existing 3,563
-geometry MV reference samples. The fixture supplies synthetic object identities;
-its read-only module allocates no GPU resources and invokes no FG. No production
+geometry MV reference samples. After the first frame, the separately loaded DLL
+uses its retained compiler inputs to compile and own a capture PSO. Seven later
+draws run that PSO through the production insertion/restoration path; the same
+color and MV reference checks pass. Compilation runs on the fixture control thread
+after callbacks, not inside a draw. Its final GPU work is completed and recording
+discarded before module release; a failed test retains the module conservatively.
+The fixture supplies synthetic identities and a test-only PSO preparation export.
+It does not invoke FG or supply the general production GPU preparation ABI. No production
 startup observer registration has been added yet. Build the fixture DLL from
-`ExperimentDrawFixture.cpp` beside GeometryInstances; `build_geometry_shader.ps1`
+`ExperimentDrawFixture.cpp`, `GeometryPipeline.cpp` and `DxilVertexHistory.cpp`
+beside GeometryInstances with DXC includes and d3d12/dxgi libraries; `build_geometry_shader.ps1`
 includes this check.
 
 `ExperimentRuntime.h` loads absolute paths on its control thread. Invalid ABI,

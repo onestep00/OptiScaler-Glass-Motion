@@ -25,8 +25,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
     (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
-& cl.exe @common /LD (Join-Path $PSScriptRoot 'ExperimentDrawFixture.cpp') `
-    "/Fe$build/experiment-draw.dll" /link "/IMPLIB:$build/experiment-draw.lib"
+& cl.exe @common /LD "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'ExperimentDrawFixture.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') `
+    "/Fe$build/experiment-draw.dll" /link d3d12.lib dxgi.lib "/IMPLIB:$build/experiment-draw.lib"
 if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryIndirect.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `

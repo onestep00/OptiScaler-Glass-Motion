@@ -376,7 +376,7 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
                 {
                     auto pipeline = FindGeometryPipeline(r->bindings.pipeline);
                     const GeometryIndexedArguments arguments { indices, instances, startIndex, baseVertex, startInstance };
-                    ObserveExperimentDraw(command, r->epoch, draw, arguments, r->raster, r->bindings, pipeline.get());
+                    ObserveExperimentDraw(command, r->epoch, draw, arguments, r->raster, r->bindings, pipeline);
                     if (pipeline)
                     {
                         ++state->pipelinesReady;
