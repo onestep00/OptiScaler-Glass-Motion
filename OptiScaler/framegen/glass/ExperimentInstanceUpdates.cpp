@@ -122,6 +122,12 @@ EnqueueResult enqueue(void* a, void* b
 }
 bool install()
 {
+#ifdef GLASS_TRANSFORM_RANGE
+    // Quarantined: audited callers keep R10 live across the original leaf.
+    // An ordinary C++ detour does not preserve this internal calling contract.
+    // Keep the decoder fixture available, but never install this adapter.
+    return false;
+#else
     if (original) return true;
     wchar_t path[32768];
     const auto length = GetModuleFileNameW(self, path, 32768);
@@ -151,6 +157,7 @@ bool install()
     { DetourTransactionAbort(); original = nullptr; return false; }
     if (DetourTransactionCommit() != NO_ERROR) { original = nullptr; return false; }
     return true;
+#endif
 }
 }
 static DWORD start(void* directory, bool onlyArrays)

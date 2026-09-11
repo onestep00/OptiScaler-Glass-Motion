@@ -22,7 +22,7 @@
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.
 
-- [SourceSlots.md](SourceSlots.md): Shared-range accessor diagnostic preserves pointer return/output; original and wrapper regressions pass. Grouped identity/MV remain incomplete.
+- [SourceSlots.md](SourceSlots.md): Shared-range hook installation disabled after internal register-contract defect; ordinary-ABI fixtures were insufficient. Grouped identity/MV remain incomplete.
 
 - [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
 

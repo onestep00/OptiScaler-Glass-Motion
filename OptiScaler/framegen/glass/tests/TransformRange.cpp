@@ -16,6 +16,7 @@ void require(bool value) { if (!value) throw std::runtime_error("Transform range
 int main()
 {
     original = forward;
+    require(!install()); // Quarantine must precede even the cached-target path.
     std::array<std::uint64_t, 7> buffer {};
     buffer[6] = 0x40000; // Intentionally unmapped transform data.
     std::array<std::uint64_t, 3> range {

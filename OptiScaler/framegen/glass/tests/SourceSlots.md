@@ -332,6 +332,19 @@ not a claim of static object motion, all-transparency coverage or FG integration
 
 ### Shared-range accessor diagnostic
 
+**Quarantined after PID 62100 exited during the reload investigation.** No new
+matching crash dump or Windows Application Error record was found, so crash
+attribution is not proven. However, caller 0x25422c keeps R10 across its call at
+0x254263 and immediately dereferences it at 0x254268; the original leaf preserves
+R10 but the C++ diagnostic does not guarantee that. Successful ordinary-ABI
+fixtures did not cover this internal register contract. The install function now
+unconditionally refuses this mode, including the cached-target path. The old
+local binary has a QUARANTINED marker and must not be injected. Resolve this
+through full call-site liveness analysis and an independently verified preserving
+adapter before any further game deployment. The other retained observations do
+not prove their hook contracts safe by association. The following paragraphs
+describe the earlier, insufficient verification and are not deployment approval.
+
 The same standalone source now supports `GLASS_TRANSFORM_RANGE`, mutually
 exclusive with wrapper mode. This mode forwards the audited two-argument
 accessor first and preserves its pointer return and output span. It reads the
