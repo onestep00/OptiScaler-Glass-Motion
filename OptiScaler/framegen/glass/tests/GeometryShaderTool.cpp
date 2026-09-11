@@ -53,7 +53,19 @@ int wmain(int argc, wchar_t** argv)
             mode.resize(mode.size() - 7);
         const auto layout = mapped ? GlassFg::GeometryLayout::PerInstance : GlassFg::GeometryLayout::Contiguous;
         const bool cameraCapture = mode == L"rewrite-camera";
-        if (cameraCapture)
+        const bool pairCapture = mode == L"rewrite-pair";
+        GlassFg::VertexClipPair clipPair {};
+        if (pairCapture)
+        {
+            const std::wstring selection(argv[5]);
+            const auto comma = selection.find(L',');
+            if (comma == std::wstring::npos || !comma || comma + 1 == selection.size() ||
+                selection.find_first_not_of(L"0123456789,", 0) != std::wstring::npos ||
+                selection.find(L',', comma + 1) != std::wstring::npos)
+                throw std::runtime_error("Expected current-output-id,previous-output-id");
+            clipPair = {std::stoul(selection.substr(0, comma)), std::stoul(selection.substr(comma + 1))};
+        }
+        if (cameraCapture || pairCapture)
             mode = L"rewrite";
         // Explicit recorded Cyberpunk diagnostic layout, not a generic camera detector.
         const GlassFg::VertexConstantPair camera { 0, 1, 848, 51 };
@@ -91,7 +103,8 @@ int wmain(int argc, wchar_t** argv)
                 }
                 auto patched =
                     mode == L"native-motion" ? GlassFg::ExtractNativeMotionTarget(assembly, unsigned(std::stoul(argv[5]))) : mode == L"rewrite"
-                        ? GlassFg::RewriteVertexHistory(assembly, layout, cameraCapture ? &camera : nullptr)
+                        ? GlassFg::RewriteVertexHistory(assembly, layout, cameraCapture ? &camera : nullptr,
+                                                       pairCapture ? &clipPair : nullptr)
                         : GlassFg::RewriteMaterialMotion(
                               assembly, GlassFg::MaterialSource::One,
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb

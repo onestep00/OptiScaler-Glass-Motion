@@ -13,6 +13,7 @@ struct GeometryPipelineEntry
     Microsoft::WRL::ComPtr<ID3D12PipelineState> original, instrumented;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
     std::uint64_t identity = 0;
+    bool vertexOnlyCapture = false;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputs;
@@ -41,7 +42,8 @@ class GeometryPipelineCache
     GeometryPipelineCache& operator=(const GeometryPipelineCache&) = delete;
 
     bool rootCreated(ID3D12RootSignature* root, UINT nodeMask, const void* bytes, SIZE_T size) noexcept;
-    bool pipelineCreated(ID3D12PipelineState* pipeline, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) noexcept;
+    bool pipelineCreated(ID3D12PipelineState* pipeline, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+                         bool vertexOnly = false) noexcept;
     std::shared_ptr<const GeometryPipelineEntry> find(ID3D12PipelineState* original) const;
     GeometryCacheStats stats() const;
     bool tryCounters(GeometryCacheStats& result) const;

@@ -12,6 +12,7 @@
 #include <fstream>
 #include <mutex>
 #include <thread>
+#include <sstream>
 #include <utility>
 
 namespace
@@ -26,7 +27,14 @@ constexpr bool VertexCoverageDiagnostic = true;
 #else
 constexpr bool VertexCoverageDiagnostic = false;
 #endif
-#if defined(GLASS_CAPTURE_VERTEX_OUTPUTS) || defined(GLASS_CAPTURE_VERTEX_COVERAGE)
+#ifdef GLASS_CAPTURE_NATIVE_PAIR
+constexpr bool NativePairDiagnostic = true;
+static_assert(!VertexCoverageDiagnostic, "Native pair and coverage use different record layouts");
+#else
+constexpr bool NativePairDiagnostic = false;
+#endif
+constexpr unsigned VertexRecordBytes = NativePairDiagnostic ? 64 : 32;
+#if defined(GLASS_CAPTURE_VERTEX_OUTPUTS) || defined(GLASS_CAPTURE_VERTEX_COVERAGE) || defined(GLASS_CAPTURE_NATIVE_PAIR)
 constexpr bool VertexOutputDiagnostic = true;
 #else
 constexpr bool VertexOutputDiagnostic = false;
@@ -90,6 +98,7 @@ class Coverage
     std::thread worker;
     ExperimentCensusLog census;
     ExperimentCaptureSelection selection;
+    VertexClipPair clipPair {};
     uint64_t selectionAccepted = 0, selectionRejected = 0;
     std::array<Slot, SlotCount> slots;
     struct Selection { uint64_t pipeline; unsigned width, height, instances; };
@@ -126,6 +135,8 @@ class Coverage
         const VertexConstantPair cameraWords { 0, 1, 848, 51 };
         const auto compiled = VertexCoverageDiagnostic
             ? dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error, &cameraWords)
+            : NativePairDiagnostic
+            ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, nullptr, &clipPair)
             : VertexOutputDiagnostic
             ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, &cameraWords)
             : dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error);
@@ -229,7 +240,12 @@ class Coverage
             }
             csv.close(); if (!csv) throw std::runtime_error("Vertex metadata write failed");
             std::ofstream meta(withSuffix(".draw"));
-            meta << "vertex_format=2\nrecord_bytes=32\nextra_word_offset=24\nextra_cb_space=0\nextra_cb_binding=1\nextra_cb_bytes=848\nextra_cb_row=51\nframe=" << slot.frame
+            if constexpr (NativePairDiagnostic)
+                meta << "vertex_format=3\nrecord_bytes=64\ncurrent_clip_offset=32\nprevious_clip_offset=48\ncurrent_output="
+                     << clipPair.currentOutput << "\nprevious_output=" << clipPair.previousOutput;
+            else
+                meta << "vertex_format=2\nrecord_bytes=32\nextra_word_offset=24\nextra_cb_space=0\nextra_cb_binding=1\nextra_cb_bytes=848\nextra_cb_row=51";
+            meta << "\nframe=" << slot.frame
                  << "\nrecording=" << slot.recording << "\nvertices=" << slot.mesh.vertices
                  << "\nretirement_observed_frame=" << slot.retiredAtFrame
                  << "\ninstances=" << slot.instances << "\nmesh=" << slot.draw.mesh
@@ -337,8 +353,9 @@ class Coverage
         }
     }
   public:
-    Coverage(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o, ExperimentCaptureSelection select)
-        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select)
+    Coverage(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o, ExperimentCaptureSelection select,
+             VertexClipPair pair)
+        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select), clipPair(pair)
     {
         if (!d || !compiler.is_absolute() || !std::filesystem::is_regular_file(compiler) || !output.is_absolute() ||
             !std::filesystem::create_directory(output)) throw std::runtime_error("Invalid capture module paths");
@@ -490,7 +507,7 @@ class Coverage
                                 unsigned((slot.bytes - slot.vertexBytes) * 8), status };
                         }
                     }
-                    const InstanceHistoryConstants vertices { 0, d->instances, unsigned(slot.vertexBytes / 32),
+                    const InstanceHistoryConstants vertices { 0, d->instances, unsigned(slot.vertexBytes / VertexRecordBytes),
                         0, d->instances, 0, unsigned(event.frame), 0 };
                     memcpy(prepared.history, &vertices, sizeof(vertices));
                     prepared.previous = slot.zeros->GetGPUVirtualAddress();
@@ -514,7 +531,7 @@ class Coverage
         for (auto& slot : slots) if (slot.state == Slot::Empty)
         {
             const unsigned words = unsigned(1 + (uint64_t(width) * height + 31) / 32);
-            const uint64_t vertexBytes = uint64_t(vertexShape.vertices) * d->instances * 32;
+            const uint64_t vertexBytes = uint64_t(vertexShape.vertices) * d->instances * VertexRecordBytes;
             const uint64_t coverageBytes = uint64_t(words) * (d->instances + 2) * 4;
             const uint64_t bytes = VertexCoverageDiagnostic ? vertexBytes + coverageBytes
                 : VertexOutputDiagnostic ? vertexBytes
@@ -554,12 +571,22 @@ int32_t create(const GlassExperimentHost* host, void** context)
         if (std::getline(file, select))
         {
             if (!select.empty() && select.back() == '\r') select.pop_back();
-            if (file.peek() != std::char_traits<char>::eof()) return -1;
         }
+        VertexClipPair pair {};
+        if constexpr (NativePairDiagnostic)
+        {
+            std::string line, marker, extra;
+            if (!std::getline(file, line)) return -1;
+            std::istringstream fields(line);
+            if (!(fields >> marker >> pair.currentOutput >> pair.previousOutput) || marker != "clip-pair-v1" ||
+                (fields >> extra) || pair.currentOutput == pair.previousOutput ||
+                pair.currentOutput >= 32 || pair.previousOutput >= 32) return -1;
+        }
+        if (file.peek() != std::char_traits<char>::eof()) return -1;
         *context = new Coverage(static_cast<ID3D12Device*>(host->device),
             std::filesystem::path(std::u8string(compiler.begin(), compiler.end())),
             std::filesystem::path(std::u8string(output.begin(), output.end())),
-            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()));
+            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()), pair);
         return 0;
     }
     catch (...) { return -1; }

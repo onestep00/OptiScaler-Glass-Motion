@@ -9,6 +9,23 @@
 static ID3D12PipelineState* observedOriginal = nullptr;
 static uint64_t expectedAddress = 0;
 static bool censusOkay = false;
+#ifdef GLASS_OBSERVATION_NATIVE
+extern bool geometryFixturePacket;
+static bool nativeTestActive = false;
+static struct NativeOwner final : GlassFg::GeometryDrawCaptureOwner
+{
+    bool received = false;
+    bool prepare(ID3D12GraphicsCommandList*, const GlassFg::GeometryDrawView& draw,
+                 const GlassFg::GeometryIndexedArguments&, const GlassFg::ExperimentPipelineLease& pipeline,
+                 const GlassFg::GraphicsRootBindings&, GlassFg::GeometryPreparedDraw&) noexcept override
+    {
+        received = pipeline && pipeline->vertexOnlyCapture && pipeline->instrumented && pipeline->root->extended &&
+                   pipeline->original.Get() == observedOriginal && !draw.objects.empty();
+        return false; // Test dispatch only. No GPU resources or replacement are reserved.
+    }
+    void finish(ID3D12GraphicsCommandList*, bool) noexcept override {}
+} nativeOwner;
+#endif
 #ifdef GLASS_OBSERVATION_MODULE
 static const GlassExperimentApi* bindingsApi = nullptr;
 static void* bindingsContext = nullptr;
@@ -18,6 +35,15 @@ static const GlassFg::ExperimentCensusObserver census {
     nullptr, [](void*) noexcept { return true; },
     [](void*, const GlassExperimentEvent& event) noexcept
     {
+#ifdef GLASS_OBSERVATION_NATIVE
+        if (nativeTestActive)
+        {
+#ifdef GLASS_OBSERVATION_MODULE
+            if (bindingsApi) bindingsApi->event(bindingsContext, &event);
+#endif
+            return;
+        }
+#endif
         if (event.kind != GlassExperimentCensus || event.payloadVersion != GLASS_EXPERIMENT_CENSUS_VERSION ||
             event.payloadBytes != sizeof(GlassExperimentCensusInput)) return;
         const auto& input = *static_cast<const GlassExperimentCensusInput*>(event.payload);
@@ -55,7 +81,12 @@ int main()
         const auto modulePath = std::filesystem::absolute("work/glass-optiscaler-source/artifacts/glass-tests/experiment-bindings.dll");
         const auto outputPath = modulePath.parent_path() / ("binding-module-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         auto configPath = modulePath; configPath.replace_extension(".config");
-        { std::ofstream config(configPath); config << outputPath.generic_string() << '\n'; }
+        {
+            std::ofstream config(configPath); config << outputPath.generic_string() << '\n';
+#ifdef GLASS_OBSERVATION_NATIVE
+            config << "prepare-vertex-v1 " << GetCurrentProcessId() << " 9223372036854775809\n";
+#endif
+        }
         HMODULE bindingsModule = LoadLibraryW(modulePath.c_str());
         require(bindingsModule != nullptr, "Load binding module");
         const auto query = reinterpret_cast<GlassExperimentQueryFn>(GetProcAddress(bindingsModule, "GlassExperimentQuery"));
@@ -86,6 +117,14 @@ int main()
                               "float4 PS():SV_Target{return float4(1,0,0,1);}";
         check(D3DCompile(shader, sizeof(shader), nullptr, nullptr, nullptr, "VS", "vs_5_0", 0, 0, &vs, &error));
         check(D3DCompile(shader, sizeof(shader), nullptr, nullptr, nullptr, "PS", "ps_5_0", 0, 0, &ps, &error));
+#ifdef GLASS_OBSERVATION_NATIVE
+        const auto nativeCode = read("work/glass-optiscaler-source/artifacts/glass-tests/observation-native-vs.dxil");
+        vs.Reset(); check(D3DCreateBlob(nativeCode.size(), &vs));
+        memcpy(vs->GetBufferPointer(), nativeCode.data(), nativeCode.size());
+        const auto nativePixel = read("work/glass-optiscaler-source/artifacts/glass-tests/observation-native-ps.dxil");
+        ps.Reset(); check(D3DCreateBlob(nativePixel.size(), &ps));
+        memcpy(ps->GetBufferPointer(), nativePixel.data(), nativePixel.size());
+#endif
         D3D12_GRAPHICS_PIPELINE_STATE_DESC d {};
         d.pRootSignature = root.Get();
         d.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
@@ -104,6 +143,9 @@ int main()
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&second)));
 #ifdef GLASS_OBSERVATION_HOST
         observedOriginal = original.Get();
+#ifdef GLASS_OBSERVATION_NATIVE
+        auto observedLease = GlassFg::FindObservedGeometryPipeline(original.Get());
+#endif
         auto constantBuffer = device.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         expectedAddress = constantBuffer->GetGPUVirtualAddress();
         device.begin();
@@ -114,8 +156,48 @@ int main()
         device.c->DrawInstanced(0, 0, 0, 0); // Exercise forwarding; no raster work or submission.
         check(device.c->Close());
         require(censusOkay, "Original-only census delivery or replay isolation failed");
+#ifdef GLASS_OBSERVATION_NATIVE
+        void* nativeToken = GlassFg::RetainExperimentPipeline(&observedLease);
+        GlassExperimentPipelineView nativeView {}; nativeView.size = sizeof(nativeView);
+        require(GlassFg::ViewExperimentPipeline(nativeToken, &nativeView) && nativeView.requestVertexCapture &&
+                !nativeView.extendedRoot, "Missing original-only request service");
+#ifndef GLASS_OBSERVATION_MODULE
+        require(nativeView.requestVertexCapture(nativeToken) == 1, "Explicit vertex request rejected");
+#endif
+        GlassFg::ExperimentPipelineLease preparedNative;
+        const auto deadline = GetTickCount64() + 10000;
+        while (!(preparedNative = GlassFg::FindGeometryPipeline(original.Get())) && GetTickCount64() < deadline)
+            Sleep(1); // Independent control-thread compiler wait only.
+        require(preparedNative && preparedNative->vertexOnlyCapture && preparedNative->instrumented &&
+                preparedNative->root->extended, "Native worker preparation failed");
+        const auto requested = GlassFg::GetGeometryCreationStats().cache.pipelines;
+        require(nativeView.requestVertexCapture(nativeToken) == 1 &&
+                GlassFg::GetGeometryCreationStats().cache.pipelines == requested, "Request was not deduplicated");
+        require(!memcmp(preparedNative->description.PS.pShaderBytecode, ps->GetBufferPointer(), ps->GetBufferSize()),
+                "Native original PS changed in cache");
+        require(GlassFg::RegisterGeometryDrawCapture(&nativeOwner), "Native owner registration");
+        nativeTestActive = true; geometryFixturePacket = true;
+        device.begin();
+        device.c->SetGraphicsRootSignature(root.Get());
+        device.c->SetGraphicsRootConstantBufferView(0, expectedAddress);
+        device.c->SetPipelineState(original.Get());
+        const uint16_t nativeIndices[] { 0, 1, 2, 0, 2, 3 };
+        auto nativeIb = device.buffer(sizeof(nativeIndices), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        upload(nativeIb.Get(), nativeIndices, sizeof(nativeIndices));
+        D3D12_INDEX_BUFFER_VIEW nativeIv { nativeIb->GetGPUVirtualAddress(), sizeof(nativeIndices), DXGI_FORMAT_R16_UINT };
+        device.c->IASetIndexBuffer(&nativeIv);
+        device.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        device.c->DrawIndexedInstanced(6, 1, 0, 2, 7);
+        check(device.c->Close()); geometryFixturePacket = false;
+        require(nativeOwner.received, "Native prepared entry did not reach actual indexed hook owner");
+#endif
         GlassFg::StopGeometryCreation();
         require(!GlassFg::FindObservedGeometryPipeline(original.Get()), "Stopped observation remained active");
+#ifdef GLASS_OBSERVATION_NATIVE
+        require(nativeView.requestVertexCapture(nativeToken) == 0, "Stopped host accepted native request");
+        GlassFg::ReleaseExperimentPipeline(nativeToken);
+        puts("NATIVE_REQUEST_OK explicit deduplicated worker_compiled indexed_owner_reached stopped_rejected");
+#endif
 #ifdef GLASS_OBSERVATION_MODULE
         require(moduleAccepted, "Binding module rejected actual census");
         bindingsApi->destroy(bindingsContext); bindingsContext = nullptr;
@@ -125,7 +207,13 @@ int main()
                 "Saved CBV address differs");
         const auto done = read(outputPath / "bindings.done");
         std::string completion(done.begin(), done.end()); std::erase(completion, '\r');
+#ifdef GLASS_OBSERVATION_NATIVE
+        require(completion.find("prepare_queued=1\nprepare_request_result=1\nprepared_pipeline_observed=1\n") != std::string::npos,
+                "Module worker request or prepared observation missing");
+        require(completion.find("rows=2\npipelines=2\n") != std::string::npos,
+#else
         require(completion.find("rows=1\npipelines=1\n") != std::string::npos,
+#endif
                 "Module count/completion invalid");
         require(read(outputPath / "9223372036854775809.root.bin") == serializedCopy, "Saved root bytes differ");
         require(FreeLibrary(bindingsModule) != 0, "Binding module unload");

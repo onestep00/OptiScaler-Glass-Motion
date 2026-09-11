@@ -16,6 +16,10 @@ struct GlassExperimentPipelineView
     const void* rootParameters; // Owned D3D12_ROOT_PARAMETER1 array, token lifetime.
     uint32_t serializedRootBytes, originalNodeMask;
     const void* serializedRoot; // Exact post-override creation bytes, token lifetime.
+    uint32_t vertexOnlyCapture;
+    // Invoke on a worker/control thread with this view's retained token. Queues
+    // bounded preparation; does not wait, authorize a draw or mutate this view.
+    int32_t (*requestVertexCapture)(const void* token);
 };
 struct GlassExperimentPipelineAccess
 {

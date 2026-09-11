@@ -2,10 +2,20 @@
 #include "ExperimentPipelineAbi.h"
 #include "GeometryPipelineCache.h"
 #include <new>
+#include <atomic>
 
 namespace GlassFg
 {
 using ExperimentPipelineLease = std::shared_ptr<const GeometryPipelineEntry>;
+using ExperimentVertexCaptureRequest = bool (*)(ID3D12PipelineState*) noexcept;
+inline std::atomic<ExperimentVertexCaptureRequest> experimentVertexCaptureRequest = nullptr;
+inline int32_t RequestExperimentVertexCapture(const void* token)
+{
+    const auto request = experimentVertexCaptureRequest.load(std::memory_order_acquire);
+    if (!token || !request) return 0;
+    const auto& lease = *static_cast<const ExperimentPipelineLease*>(token);
+    return lease && request(lease->original.Get()) ? 1 : 0;
+}
 inline void* RetainExperimentPipeline(const void* source)
 {
     if (!source) return nullptr;
@@ -24,7 +34,8 @@ inline int32_t ViewExperimentPipeline(const void* token, GlassExperimentPipeline
              root.dwords, root.constantsSlot, root.previousSlot, root.currentSlot, root.materialSlot,
              root.captureSlot, root.instanceSlot, sizeof(D3D12_ROOT_PARAMETER1),
              static_cast<uint32_t>(root.originalParameters.size()), root.originalParameters.data(),
-             static_cast<uint32_t>(root.originalSerialized.size()), root.originalNodeMask, root.originalSerialized.data() };
+             static_cast<uint32_t>(root.originalSerialized.size()), root.originalNodeMask, root.originalSerialized.data(),
+             lease->vertexOnlyCapture ? 1u : 0u, RequestExperimentVertexCapture };
     return 1;
 }
 inline void ReleaseExperimentPipeline(void* token)

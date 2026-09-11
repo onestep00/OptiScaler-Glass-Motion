@@ -28,6 +28,7 @@ struct VertexHistoryShader
     std::string error;
     unsigned previousRegister = 0;
     unsigned missingRegister = 0;
+    unsigned recordBytes = 32;
     explicit operator bool() const { return !assembly.empty(); }
 };
 
@@ -47,13 +48,25 @@ struct VertexConstantPair
 {
     unsigned space, binding, bytes, row;
 };
+// Explicitly audited native VS output IDs, not automatically identified motion.
+// Diagnostic records are 64 bytes: original clip float4 and frame/gen/padding,
+// followed by selected current and previous clip float4 at bytes 32 and 48.
+// Both buffers must use this stride, with capacity <= UINT32_MAX / 64.
+// Preserve W for perspective-correct rasterization. Original outputs are unchanged.
+// Mutually exclusive with VertexConstantPair. Reject nonfinite saved values
+// before interpreting motion; native previous inputs still require validation.
+struct VertexClipPair
+{
+    unsigned currentOutput, previousOutput;
+};
 // Keep an explicitly identified native float4 render target as SV_Target0.
 // Preserves native inputs/calculation/discard; does not identify motion semantics,
 // change depth state, provide previous transforms, or select an object boundary.
 VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsigned targetIndex);
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly,
                                          GeometryLayout layout = GeometryLayout::Contiguous,
-                                         const VertexConstantPair* capture = nullptr);
+                                         const VertexConstantPair* capture = nullptr,
+                                         const VertexClipPair* clipPair = nullptr);
 
 enum class MaterialSource
 {

@@ -15,7 +15,7 @@ namespace GlassFg
 namespace
 {
 thread_local bool compilingGeometry = false;
-bool candidate(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d)
+bool candidate(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool vertexOnly)
 {
     D3D12_BLEND_DESC ignored {};
     const auto keep = [](const D3D12_DEPTH_STENCILOP_DESC& s)
@@ -30,10 +30,10 @@ bool candidate(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d)
            !d.StreamOutput.NumEntries && !d.StreamOutput.NumStrides &&
            d.PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE && d.InputLayout.NumElements <= 32 &&
            (!d.InputLayout.NumElements || d.InputLayout.pInputElementDescs) &&
-           (!d.DepthStencilState.DepthEnable || d.DepthStencilState.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ZERO) &&
+           (vertexOnly || ((!d.DepthStencilState.DepthEnable || d.DepthStencilState.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ZERO) &&
            (!d.DepthStencilState.StencilEnable || !d.DepthStencilState.StencilWriteMask ||
             (keep(d.DepthStencilState.FrontFace) && keep(d.DepthStencilState.BackFace))) &&
-           tryMaterialCaptureBlend(d.BlendState, MaterialCapture::SourceColor, ignored);
+           tryMaterialCaptureBlend(d.BlendState, MaterialCapture::SourceColor, ignored)));
 }
 } // namespace
 
@@ -108,8 +108,11 @@ struct GeometryPipelineCache::Impl
                     if (work.root->result)
                     {
                         auto& entry = *work.entry;
-                        status = compiler.create(device.Get(), *work.root->result, entry.description,
-                                                 entry.instrumented, error);
+                        status = entry.vertexOnlyCapture
+                            ? compiler.createVertexCapture(device.Get(), *work.root->result, entry.description,
+                                                           entry.instrumented, error)
+                            : compiler.create(device.Get(), *work.root->result, entry.description,
+                                              entry.instrumented, error);
                         if (SUCCEEDED(status))
                         {
                             entry.root = work.root->result;
@@ -214,9 +217,9 @@ bool GeometryPipelineCache::rootCreated(ID3D12RootSignature* identity, UINT node
 }
 
 bool GeometryPipelineCache::pipelineCreated(ID3D12PipelineState* identity,
-                                            const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) noexcept
+                                            const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc, bool vertexOnly) noexcept
 {
-    if (compilingGeometry || !identity || !candidate(desc))
+    if (compilingGeometry || !identity || !candidate(desc, vertexOnly))
         return false;
     try
     {
@@ -235,6 +238,7 @@ bool GeometryPipelineCache::pipelineCreated(ID3D12PipelineState* identity,
         work->root = root->second;
         work->entry = std::make_shared<GeometryPipelineEntry>();
         auto& entry = *work->entry;
+        entry.vertexOnlyCapture = vertexOnly;
         entry.original = identity;
         entry.description = desc;
         entry.vertexBytes.resize(desc.VS.BytecodeLength);

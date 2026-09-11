@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: implemented; independent D3D12 creation/draw census, root layout and binding observation passed
+- Status: explicit native vertex preparation and replaceable-DLL request passed independent host checks; live capture incomplete
 - Deployment: not installed in the running game
 - Deprecated: no
 - Scope: bounded diagnostic census of VS/PS triangle graphics pipelines that write depth
@@ -122,6 +122,56 @@ the installed game DLL was not replaced.
 The remaining native-pass capture gap is explicit: `GeometryCommands` calls the
 capture owner only for compiler-prepared entries, and `GeometryPreparedDraw`
 binds that entry's extended root/history slots. Original-only observations cannot
-use this path. Census callbacks must not issue GPU commands. A native auxiliary
-draw needs a separately prepared pipeline/root, checked state restoration and
-the existing completion plus recording-discard lifetime gates before admission.
+use this path until explicitly prepared as described below. Census callbacks must
+not issue GPU commands. Original replacement still needs checked state restoration
+and the existing completion plus recording-discard lifetime gates before admission.
+
+## Explicit native vertex preparation
+
+`requestVertexCapture` in the retained pipeline view accepts the retained token
+on a worker/control thread. The resident service resolves the same original COM
+PSO in its observation cache, then queues bounded compilation using the preserved
+original descriptor/root. It does not dereference GPU addresses, wait for the
+compiler, or authorize rendering. Ordinary creation still uses the existing
+material eligibility rules; there is no automatic compilation of all native PSOs.
+Repeated requests reuse the queued entry and do not copy shaders again. Failed
+compilations remain rejected; a successful request is not readiness proof.
+
+Successful native preparation publishes an immutable `vertexOnlyCapture` entry
+through the existing prepared lookup. A subsequent indexed engine-mapped draw can
+therefore reach the normal capture owner. The original PS and depth/blend state
+are preserved; this mode replaces the original draw once. The owner still needs
+instance mapping, valid raster state, resources and lifetime admission. Material
+coverage compilation continues to reject writable depth. No new automatic FG
+substitution follows from preparation.
+
+The binding recorder accepts an optional second config line:
+
+```text
+prepare-vertex-v1 <current-process-id> <observed-pipeline-identity>
+```
+
+It retains the selected pipeline once and wakes a single worker to make the
+request. Other observed pipelines remain read-only. Status records the selected
+identity, request result and a subsequently observed prepared identity matched by
+the original PSO, not a reused ordinal. Preparation changes the cache identity;
+use the recorded prepared identity when selecting the later vertex capture. The
+worker is joined before saving/releasing tokens. No GPU command or game buffer
+copy occurs in this recorder. This selector is process-local diagnostic data,
+not a production material whitelist.
+
+`GLASS_OBSERVATION_NATIVE` adds DXIL VS/PS fixtures compiled from
+`GeometryObservationVertex.hlsl` and `GeometryObservationPixel.hlsl` into
+`artifacts/glass-tests/observation-native-vs.dxil` and `observation-native-ps.dxil`.
+With the existing HOST and MODULE defines, the actual DLL's worker queues native
+preparation. The test waits on its own control thread, verifies deduplication and
+unchanged original PS bytes, and observes the prepared entry at the production
+indexed hook's capture owner using synthetic engine identities. The owner declines
+replacement; this test never submits that draw. It then checks stopped-host
+rejection, two recorded pipeline states, saved root bytes and module unload.
+
+The test passed with `NATIVE_REQUEST_OK` and `BINDING_MODULE_OK`. The initial mixed
+DXIL-VS/legacy-PS fixture failed PSO creation; using DXIL for both stages resolved
+the fixture failure. Actual Cyberpunk previous transforms, draw coverage, GPU
+capture and FG quality remain unverified by this test. Pipeline-view size changed;
+rebuild modules before loading them into the new host.

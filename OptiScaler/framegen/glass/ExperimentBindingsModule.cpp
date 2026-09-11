@@ -9,6 +9,9 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <condition_variable>
+#include <thread>
+#include <sstream>
 
 namespace
 {
@@ -16,6 +19,7 @@ HMODULE moduleIdentity;
 struct Pipeline
 {
     uint64_t identity = 0;
+    const void* original = nullptr;
     GlassExperimentPipelineAccess access {};
     void* token = nullptr;
     GlassExperimentPipelineView view {};
@@ -36,12 +40,35 @@ class Recorder
     std::mutex mutex;
     std::atomic<uint64_t> dropped = 0;
     std::filesystem::path output;
+    uint64_t prepareIdentity = 0, preparedIdentity = 0;
+    unsigned prepareIndex = UINT_MAX;
+    bool stopping = false, prepareQueued = false;
+    int32_t prepareResult = 0;
+    std::condition_variable changed;
+    std::thread worker;
+    void prepare()
+    {
+        std::unique_lock lock(mutex);
+        changed.wait(lock, [&] { return stopping || prepareQueued; });
+        if (stopping) return;
+        auto& p = pipelines[prepareIndex];
+        lock.unlock();
+        const auto result = p.view.requestVertexCapture ? p.view.requestVertexCapture(p.token) : 0;
+        lock.lock(); prepareResult = result;
+    }
   public:
-    explicit Recorder(std::filesystem::path path) : output(std::move(path))
+    explicit Recorder(std::filesystem::path path, uint64_t preparePipeline) : output(std::move(path)), prepareIdentity(preparePipeline)
     {
         if (!output.is_absolute() || !std::filesystem::create_directory(output))
             throw std::runtime_error("Fresh absolute output directory required");
+        if (prepareIdentity) worker = std::thread([this] { prepare(); });
     }
+    void stop()
+    {
+        { std::lock_guard lock(mutex); stopping = true; }
+        changed.notify_one(); if (worker.joinable()) worker.join();
+    }
+    ~Recorder() { stop(); }
     int32_t observe(const GlassExperimentEvent& event)
     {
         if (event.kind != GlassExperimentCensus || event.payloadVersion != GLASS_EXPERIMENT_CENSUS_VERSION ||
@@ -67,11 +94,16 @@ class Recorder
                 view.rootParameterBytes != sizeof(D3D12_ROOT_PARAMETER1) || view.rootParameterCount > 64 ||
                 (view.rootParameterCount && !view.rootParameters))
             { d.pipelineAccess.release(token); return 0; }
-            p.identity = d.pipelineIdentity; p.access = d.pipelineAccess; p.access.source = nullptr;
+            p.identity = d.pipelineIdentity; p.original = d.originalPipeline;
+            p.access = d.pipelineAccess; p.access.source = nullptr;
             p.token = token; p.view = view; ++pipelineCount;
+            if (prepareIdentity == p.identity && !prepareQueued && view.requestVertexCapture)
+            { prepareIndex = index; prepareQueued = true; changed.notify_one(); }
         }
         const auto& p = pipelines[index];
         if (p.view.originalRoot != d.originalRoot) return 0;
+        if (prepareQueued && p.view.vertexOnlyCapture && p.view.extendedRoot &&
+            p.original == pipelines[prepareIndex].original) preparedIdentity = p.identity;
         auto& row = rows[count++];
         row.sequence = input.sequence; row.frame = event.frame; row.recording = d.recording;
         row.pipeline = p.identity; row.mesh = d.mesh; row.chunk = d.chunk;
@@ -145,6 +177,8 @@ class Recorder
         std::ofstream done(output / "bindings.done");
         done << "format=1\nrows=" << count << "\npipelines=" << pipelineCount << "\ndropped=" << dropped.load()
              << "\nrow_storage_bytes=" << Capacity * sizeof(Row)
+             << "\nprepare_selected=" << prepareIdentity << "\nprepare_queued=" << prepareQueued
+             << "\nprepare_request_result=" << prepareResult << "\nprepared_pipeline_observed=" << preparedIdentity
              << "\norder=cpu_observation\nframe_zero=unknown\ngpu_buffer_copies=0\nprevious_transform_verified=0\n";
         done.close(); if (!done) throw std::runtime_error("Completion write failed");
     }
@@ -163,8 +197,18 @@ int32_t create(const GlassExperimentHost* host, void** context)
         std::ifstream input(config); std::string output;
         if (!std::getline(input, output)) return -1;
         if (!output.empty() && output.back() == '\r') output.pop_back();
-        if (input.peek() != std::char_traits<char>::eof()) return -1;
-        *context = new Recorder(std::filesystem::path(std::u8string(output.begin(), output.end())));
+        uint64_t prepareIdentity = 0;
+        if (input.peek() != std::char_traits<char>::eof())
+        {
+            std::string line, format; uint32_t process = 0;
+            if (!std::getline(input, line)) return -1;
+            std::istringstream selection(line);
+            if (!(selection >> format >> process >> prepareIdentity) || format != "prepare-vertex-v1" ||
+                process != GetCurrentProcessId() || !prepareIdentity) return -1;
+            selection >> std::ws;
+            if (!selection.eof() || input.peek() != std::char_traits<char>::eof()) return -1;
+        }
+        *context = new Recorder(std::filesystem::path(std::u8string(output.begin(), output.end())), prepareIdentity);
         return 0;
     }
     catch (...) { return -1; }
@@ -177,7 +221,7 @@ int32_t event(void* context, const GlassExperimentEvent* value)
 void destroy(void* context)
 {
     std::unique_ptr<Recorder> recorder(static_cast<Recorder*>(context));
-    try { if (recorder) recorder->save(); } catch (...) { /* No completion marker on failure. */ }
+    try { if (recorder) { recorder->stop(); recorder->save(); } } catch (...) { /* No completion marker on failure. */ }
 }
 const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI, GlassExperimentCensus, create, event, destroy };
 }

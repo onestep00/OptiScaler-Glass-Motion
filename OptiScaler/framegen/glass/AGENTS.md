@@ -12,6 +12,10 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Native clip-pair recorder preserves full current/previous W in 64-byte records; independent GPU/old regression pass. Built replaceable DLL is not deployed; no dense game boundary MV.
+
+- [tests/GeometryObservation.md](tests/GeometryObservation.md): Replaceable DLL requests selected native vertex preparation on its worker; prepared entry reaches indexed capture owner in an independent test. No game deployment or native MV capture.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Vertex-only capture preserves depth-writing original PS/state in five independent GPU frames. Native cache/host admission and game previous inputs remain incomplete.
 
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Exact original root serialization survives source mutation and DLL file roundtrip. Native auxiliary capture admission remains absent; no new game MV.

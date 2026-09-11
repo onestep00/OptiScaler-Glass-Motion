@@ -9,6 +9,50 @@
 
 ## Implemented source
 
+`VertexClipPair` optionally captures two explicitly audited native VS float4
+outputs, preserving their full clip W. Output IDs come from the selected original
+shader, not a material or driver whitelist. Unpacked float4 signatures and unique
+scalar stores are required; absent, duplicate or incompatible selections reject
+rewriting. This does not identify the semantic meaning of either output.
+
+The diagnostic uses 64-byte records: original SV_Position at 0, frame/generation
+at 16/20, native current clip at 32 and native previous clip at 48. Both previous
+and current buffers use that stride. It is mutually exclusive with CB-word
+capture. It adds two raw float4 stores and no matrix/skinning recomputation or
+perspective divide. Default history remains 32 bytes. Full previous clip W is
+necessary for subsequent perspective-correct rasterization; vertex NDC XY alone
+is not a sufficient substitute. No boundary raster is implemented by recording.
+
+`GLASS_CAPTURE_NATIVE_PAIR` builds the replaceable recorder with this layout.
+After compiler/output/selection config lines it requires `clip-pair-v1 4 5`,
+where the numbers are the audited output IDs for the selected shader. The example
+is specific to the two locally inspected native MeshStatic VS variants, not a
+generic detector. The `.draw` file declares format 3 and both selected IDs/offsets.
+Allocation accounting, history capacity, retirement and saved byte lengths use
+64-byte records; the existing 256 MiB diagnostic budget is unchanged. Original
+PS/depth/color state remains intact. It produces no dense MV or FG substitution.
+
+The actual recorder DLL compiled with /W4 /WX. Both recorded native VS variants
+assembled and passed DXIL validation with the selected pair; absent output 99
+was rejected. `NativePairGpu.cpp` independently executes the production compiler
+on `NativePairVertex.hlsl` / `NativePairPixel.hlsl` and verifies all original,
+current and previous clip values, including distinct raster jitter and varying W,
+tags, and untouched guard records. It passed with `NATIVE_PAIR_GPU_OK`. The
+existing five-frame geometry GPU regression also passed unchanged (122,880 color
+samples, 6,017 motion samples). These are independent tests, not game execution.
+The resident game host still lacks the new native preparation ABI, so this DLL
+has not been loaded into it. Actual native previous-input validity, dense object
+boundary capture, and game/FG linkage remain incomplete.
+The complete Release x64 solution subsequently compiled and linked with exit 0.
+Existing XeSS/linker warnings and post-build missing-path messages remain; only
+the identified DLL and required sidecars are candidates for scoped deployment.
+
+Compile the two NativePair HLSL fixtures with the existing GeometryShaderTool
+`compile` mode as `native-pair-vs.dxil` (vs_6_0) and `native-pair-ps.dxil` (ps_6_0).
+Build NativePairGpu.cpp with GeometryPipeline.cpp and DxilVertexHistory.cpp using
+the same includes/libraries as GeometryShaderGpu. Run with the fixture directory
+and absolute dxcompiler.dll path. The fixture does not attach to a game.
+
 `GeometryCompiler::createVertexCapture` now permits depth-writing and arbitrary
 original blend states because it retains the original PS/state and replaces the
 draw once. Material/coverage rewriting still rejects writable depth and unsupported

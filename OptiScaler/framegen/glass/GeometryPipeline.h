@@ -12,6 +12,7 @@ namespace GlassFg
 {
 enum class MaterialMotionTarget;
 struct VertexConstantPair;
+struct VertexClipPair;
 // Captured serialized bytes must belong to originalIdentity after any upstream
 // sampler overrides. Creation does not bind or replace the application's root.
 struct GeometryRoot
@@ -58,7 +59,8 @@ class GeometryCompiler
     HRESULT createVertexCapture(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
-                                const VertexConstantPair* capture = nullptr);
+                                const VertexConstantPair* capture = nullptr,
+                                const VertexClipPair* clipPair = nullptr);
 
   private:
     struct Impl;
@@ -67,6 +69,7 @@ class GeometryCompiler
                          const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                          Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
                          MaterialMotionTarget target, bool vertexOnly = false,
-                         const VertexConstantPair* capture = nullptr);
+                         const VertexConstantPair* capture = nullptr,
+                         const VertexClipPair* clipPair = nullptr);
 };
 } // namespace GlassFg

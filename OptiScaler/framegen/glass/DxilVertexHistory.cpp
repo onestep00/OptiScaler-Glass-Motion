@@ -133,13 +133,15 @@ std::string single(const std::string& source, const std::regex& pattern, size_t 
 } // namespace
 
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryLayout layout,
-                                         const VertexConstantPair* capture)
+                                         const VertexConstantPair* capture, const VertexClipPair* clipPair)
 {
     VertexHistoryShader result;
     try
     {
         need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
         const bool mapped = layout == GeometryLayout::PerInstance;
+        need(!capture || !clipPair, "Diagnostic record payload collision");
+        result.recordBytes = clipPair ? 64 : 32;
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
         while (!source.empty() && source.back() == '\0')
@@ -265,6 +267,35 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
                                std::regex("call void @dx.op.storeOutput.f32\\(i32 5, i32 " + std::to_string(position) +
                                           ", i32 0, i8 " + std::to_string(c) + ", float ([^\\)]+)\\)"),
                                1, "Position must have one scalar store per component");
+        auto recorded = values;
+        std::array<std::string, 4> nativePrevious;
+        if (clipPair)
+        {
+            need(clipPair->currentOutput != clipPair->previousOutput, "Identical native clip outputs");
+            auto readOutput = [&](unsigned id)
+            {
+                unsigned matches = 0;
+                for (const auto& node : outputs)
+                {
+                    const Signature s(metadata.get(node));
+                    if (s.id != id)
+                        continue;
+                    need(s.fields[2] == "i8 9" && s.rows == 1 && s.columns == 4 && s.fields[9] == "i8 0",
+                         "Native clip output must be an unpacked float4");
+                    ++matches;
+                }
+                need(matches == 1, "Native clip output absent or ambiguous");
+                std::array<std::string, 4> resultValues;
+                for (unsigned c = 0; c < 4; ++c)
+                    resultValues[c] = single(source,
+                        std::regex("call void @dx.op.storeOutput.f32\\(i32 5, i32 " + std::to_string(id) +
+                                   ", i32 0, i8 " + std::to_string(c) + ", float ([^\\)]+)\\)"),
+                        1, "Native clip output must have one store per component");
+                return resultValues;
+            };
+            recorded = readOutput(clipPair->currentOutput);
+            nativePrevious = readOutput(clipPair->previousOutput);
+        }
         const auto row = extent(metadata, outputs), output = nextId(metadata, outputs);
         need(row + (mapped ? 3 : 2) <= 32, "No history varying registers available");
         outputs.push_back(metadata.add("i32 " + std::to_string(output) + ", !\"GLASS_PREVIOUS\", i8 9, i8 0, " + zero +
@@ -393,8 +424,8 @@ glass.read:
   %glass.index0 = add i32 %glass.offset, %glass.lv
   %glass.index = add i32 %glass.index0, %glass.base
 )";
+        code << "\n  %glass.address = shl i32 %glass.index, " << (clipPair ? 6 : 5) << "\n";
         code << R"(
-  %glass.address = shl i32 %glass.index, 5
   %glass.tagaddress = or i32 %glass.address, 16
   %glass.p = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.srv, i32 %glass.address, i32 undef)
   %glass.tag = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.srv, i32 %glass.tagaddress, i32 undef)
@@ -418,6 +449,19 @@ glass.read:
                  << capture->row << ")\n"
                  << "  %glass.extra0 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 0\n"
                  << "  %glass.extra1 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 1\n";
+        if (clipPair)
+            for (unsigned p = 0; p < 2; ++p)
+            {
+                const auto& native = p ? nativePrevious : recorded;
+                code << "  %glass.pairAddress" << p << " = or i32 %glass.address, " << (32 + p * 16) << "\n";
+                for (unsigned c = 0; c < 4; ++c)
+                    code << "  %glass.pair" << p << c << " = bitcast float " << native[c] << " to i32\n";
+                code << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.pairAddress"
+                     << p << ", i32 undef";
+                for (unsigned c = 0; c < 4; ++c)
+                    code << ", i32 %glass.pair" << p << c;
+                code << ", i8 15)\n";
+            }
         code << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.address, i32 undef, i32 %glass.c0i, i32 %glass.c1i, i32 %glass.c2i, i32 %glass.c3i, i8 15)\n"
              << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, "
              << (capture ? "i32 %glass.extra0, i32 %glass.extra1, i8 15)\n"

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GeometryCreation.h"
 #include "GeometryObservationCache.h"
+#include "ExperimentPipelineService.h"
 #include "DetourThreads.h"
 #include <hooks/Hook_Utils.h>
 #include <atomic>
@@ -146,6 +147,7 @@ bool StartGeometryCreation(ID3D12Device* device, const std::filesystem::path& co
         if (!install(r, *capture))
             return false;
         r.active.store(std::move(capture), std::memory_order_release);
+        experimentVertexCaptureRequest.store(RequestGeometryVertexCapture, std::memory_order_release);
         return true;
     }
     catch (...)
@@ -205,6 +207,20 @@ std::shared_ptr<const GeometryPipelineEntry> FindObservedGeometryPipeline(ID3D12
         return prepared ? prepared : capture->observations.find(original);
     }
     catch (...) { return {}; }
+}
+bool RequestGeometryVertexCapture(ID3D12PipelineState* original) noexcept
+{
+    try
+    {
+        auto* state = publishedControl.load(std::memory_order_acquire);
+        if (!state || !original) return false;
+        auto capture = state->active.load(std::memory_order_acquire);
+        if (!capture) return false;
+        if (capture->cache.find(original)) return true;
+        const auto observed = capture->observations.find(original);
+        return observed && capture->cache.pipelineCreated(original, observed->description, true);
+    }
+    catch (...) { return false; }
 }
 GeometryCreationStats GetGeometryCreationStats()
 {
