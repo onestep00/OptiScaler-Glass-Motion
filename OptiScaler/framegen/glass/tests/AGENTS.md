@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [SourceBootstrap.md](SourceBootstrap.md): Worker-owned PSO reuse verified live (one build, 63 reuses); buffers still per-capture and continuous history/FG absent.
+
 - [SourceBootstrap.md](SourceBootstrap.md): Two slots per diagnostic shape produced two exact N-1 pairs (310 original vertices); gaps excluded. Continuous history/view identity and dense MV/FG remain incomplete.
 
 - [GeometryObservation.md](GeometryObservation.md): Depth-independent observation and one-time failed-material to vertex-only recovery pass independent D3D12 checks; retained payload is reused. Live missing-chunk descriptor and FG remain incomplete.

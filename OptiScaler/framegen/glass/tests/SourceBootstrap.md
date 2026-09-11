@@ -263,3 +263,16 @@ substituting older frames. Actual view identity, continuous GPU history and dens
 boundary MV remain unverified. Two samples do not establish sustained recording.
 All jobs retired and the module unloaded. Evidence:
 `work/glass-multichunk-p72636-v3/motion-analysis.json`. FG input is unchanged.
+
+### Diagnostic pipeline reuse
+
+The module now retains at most MaxCaptures prepared PSOs on its single worker,
+keyed by the resident host's non-reused pipeline identity. Capture mode and native
+clip selection are fixed for that module lifetime. Slots share the compiled PSO;
+their GPU buffers and lifetime tracking remain separate. This adds no render-thread
+lookup or compiler work. In PID 72636, v4 captured 64 jobs with one pipeline build
+and 63 reuses. All retired and the module unloaded. This removes repeated
+compilation, not buffer initialization/readback cost or all diagnostic overhead.
+The run yielded no exact N-1 samples; sustained GPU history still needs a different
+resource lifecycle. Evidence: `work/glass-multichunk-p72636-v4/capture/selection.status`
+and `motion-analysis.json`. No performance bound or FG quality claim follows.

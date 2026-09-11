@@ -109,6 +109,11 @@ class Coverage
     uint64_t nativePipeline = 0;
     uint64_t selectionAccepted = 0, selectionRejected = 0;
     std::array<Slot, SlotCount> slots;
+    struct PreparedPipeline { uint64_t identity = 0; ComPtr<ID3D12PipelineState> pipeline; };
+    // Worker-only, module-lifetime cache. Compilation mode and clip selection
+    // are immutable for this module; host pipeline identities are not reused.
+    std::array<PreparedPipeline, MaxCaptures> preparedPipelines;
+    unsigned preparedCount = 0, pipelineReuses = 0;
     struct Selection { uint64_t pipeline; unsigned width, height, instances; uint64_t mesh; unsigned chunk; };
     std::array<Selection, MaxCaptures> selected {};
     unsigned selections = 0;
@@ -136,23 +141,31 @@ class Coverage
         root.original = static_cast<ID3D12RootSignature*>(view.originalRoot);
         root.extended = static_cast<ID3D12RootSignature*>(view.extendedRoot);
         root.layout = GeometryLayout::PerInstance; root.dwords = view.dwords;
-        GeometryCompiler dxc(compiler);
-        std::string error;
-        const auto& original = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(view.descriptor);
-        // Recorded Cyberpunk layout. Capturing these words is not view/history admission.
-        const VertexConstantPair cameraWords { 0, 1, 848, 51 };
-        const NativeClipInputs nativeInputs {clipPair.currentOutput,clipPair.previousOutput,true};
-        const auto compiled = NativePixelDiagnostic
-            ? dxc.createNativeMotionCapture(device.Get(), root, original, slot.pipeline, error, nativeInputs)
-            : VertexCoverageDiagnostic
-            ? dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error, &cameraWords)
-            : NativePairDiagnostic
-            ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, nullptr, &clipPair)
-            : VertexOutputDiagnostic
-            ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, &cameraWords)
-            : dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error);
-        if (FAILED(compiled))
-            throw std::runtime_error(error);
+        for (unsigned i = 0; i < preparedCount; ++i)
+            if (preparedPipelines[i].identity == view.identity)
+            { slot.pipeline = preparedPipelines[i].pipeline; ++pipelineReuses; break; }
+        if (!slot.pipeline)
+        {
+            GeometryCompiler dxc(compiler);
+            std::string error;
+            const auto& original = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(view.descriptor);
+            // Recorded Cyberpunk layout. Capturing these words is not view/history admission.
+            const VertexConstantPair cameraWords { 0, 1, 848, 51 };
+            const NativeClipInputs nativeInputs {clipPair.currentOutput,clipPair.previousOutput,true};
+            const auto compiled = NativePixelDiagnostic
+                ? dxc.createNativeMotionCapture(device.Get(), root, original, slot.pipeline, error, nativeInputs)
+                : VertexCoverageDiagnostic
+                ? dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error, &cameraWords)
+                : NativePairDiagnostic
+                ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, nullptr, &clipPair)
+                : VertexOutputDiagnostic
+                ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, &cameraWords)
+                : dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error);
+            if (FAILED(compiled))
+                throw std::runtime_error(error);
+            if (preparedCount == preparedPipelines.size()) throw std::runtime_error("Pipeline cache full");
+            preparedPipelines[preparedCount++] = { view.identity, slot.pipeline };
+        }
         slot.bits = buffer(slot.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true);
         slot.readback = buffer(slot.bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         slot.zeros = buffer(slot.bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -398,7 +411,8 @@ class Coverage
         try { census.save(output); }
         catch (const std::exception& error) { std::ofstream(output / "errors.txt", std::ios::app) << error.what() << '\n'; }
         std::ofstream(output / "selection.status") << "enabled=" << selection.enabled << "\nmatched=" << selectionAccepted
-            << "\nrejected=" << selectionRejected << "\nobject_motion_produced=0\n";
+            << "\nrejected=" << selectionRejected << "\npipeline_builds=" << preparedCount
+            << "\npipeline_reuses=" << pipelineReuses << "\nobject_motion_produced=0\n";
     }
     int32_t event(const GlassExperimentEvent& event)
     {
