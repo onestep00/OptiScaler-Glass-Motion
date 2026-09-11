@@ -60,6 +60,7 @@ struct Slot
     GlassExperimentDrawInput draw {};
     GlassExperimentMesh mesh {};
     std::array<GlassExperimentObject, MaxInstances> objects {};
+    std::array<GlassExperimentTarget, 9> targets {};
 };
 class Coverage
 {
@@ -150,6 +151,31 @@ class Coverage
         const auto& pso = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(slot.view.descriptor);
         write(".vs.dxil", pso.VS.pShaderBytecode, pso.VS.BytecodeLength);
         write(".ps.dxil", pso.PS.pShaderBytecode, pso.PS.BytecodeLength);
+        write(".targets.bin", slot.targets.data(), sizeof(slot.targets));
+        std::ofstream targets(withSuffix(".targets.csv"));
+        targets << "binding,kind,handle,heap,revision,resource,address,default_descriptor,null_resource,width,height,"
+                   "array_or_depth,mips,resource_format,samples,descriptor_bytes";
+        for (unsigned word = 0; word < 8; ++word) targets << ",descriptor_word_" << word;
+        targets << '\n';
+        unsigned observedTargets = 0;
+        for (unsigned i = 0; i < slot.targets.size(); ++i)
+        {
+            const auto& target = slot.targets[i];
+            if (target.size != sizeof(target)) continue;
+            ++observedTargets;
+            D3D12_RESOURCE_DESC allocation {};
+            if (target.allocationBytes == sizeof(allocation)) memcpy(&allocation, target.allocation, sizeof(allocation));
+            targets << i << ',' << target.kind << ',' << target.handle << ',' << target.heap << ',' << target.revision << ','
+                    << target.resource << ',' << target.address << ',' << target.defaultDescriptor << ',' << target.nullResource << ','
+                    << allocation.Width << ',' << allocation.Height << ',' << allocation.DepthOrArraySize << ',' << allocation.MipLevels << ','
+                    << allocation.Format << ',' << allocation.SampleDesc.Count << ',' << target.descriptorBytes;
+            for (unsigned word = 0; word < 8; ++word)
+            {
+                uint32_t value; memcpy(&value, target.descriptor + 4 * word, 4); targets << ',' << value;
+            }
+            targets << '\n';
+        }
+        targets.close(); if (!targets) throw std::runtime_error("Capture target metadata failed");
         std::ofstream csv(withSuffix(".csv"));
         csv << "frame,chunk,width,height,left,top,instance,proxy,mesh,slot,generation,status_word,first_bit,motion_produced\n";
         for (unsigned i = 0; i < slot.instances; ++i)
@@ -162,7 +188,8 @@ class Coverage
         }
         csv.close(); if (!csv) throw std::runtime_error("Capture object metadata failed");
         std::ofstream meta(withSuffix(".draw"));
-        meta << "coverage_format=2\nmodule_owned=1\nrecording_epoch=" << slot.recording
+        meta << "coverage_format=2\nmodule_owned=1\ntarget_binding_observations=" << observedTargets
+             << "\ntarget_observation_point=OMSetRenderTargets\nrecording_epoch=" << slot.recording
              << "\npipeline_identity=" << slot.view.identity << "\nengine_mesh_shape=" << bool(slot.mesh.chunkAddress)
              << "\nvertices=" << slot.mesh.vertices << "\nindices=" << slot.mesh.indices
              << "\nchunk_address=" << slot.mesh.chunkAddress << "\nvertex_buffer=" << slot.mesh.vertexBuffer
@@ -248,7 +275,7 @@ class Coverage
     }
     int32_t event(const GlassExperimentEvent& event)
     {
-        if (event.kind != GlassExperimentCapture || event.payloadVersion != 1 ||
+        if (event.kind != GlassExperimentCapture || event.payloadVersion != GLASS_EXPERIMENT_CAPTURE_VERSION ||
             event.payloadBytes != sizeof(GlassExperimentCaptureInput) || !event.payload) return -1;
         const auto& request = *static_cast<const GlassExperimentCaptureInput*>(event.payload);
         if (request.size != sizeof(request)) return -1;
@@ -315,7 +342,15 @@ class Coverage
                 }
                 slot.frame = event.frame; slot.job = request.job; slot.recording = request.recording; slot.draw = *d;
                 d->meshShape(d->source, &slot.mesh);
+                slot.targets = {};
+                if (d->targetAt)
+                    for (unsigned i = 0; i < slot.targets.size(); ++i)
+                    {
+                        slot.targets[i].size = sizeof(GlassExperimentTarget);
+                        if (d->targetAt(d->targetSource, i, &slot.targets[i]) != 1) slot.targets[i] = {};
+                    }
                 slot.draw.source = nullptr; slot.draw.objectAt = nullptr; slot.draw.meshShape = nullptr;
+                slot.draw.targetSource = nullptr; slot.draw.targetAt = nullptr;
                 slot.draw.pipelineAccess = {}; slot.draw.descriptor = nullptr;
                 const unsigned reference = (d->instances * slot.words + 1) * 32;
                 const MaterialCaptureConstants constants { float(left), float(top), 1.f / width, 1.f / height,

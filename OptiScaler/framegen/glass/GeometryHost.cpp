@@ -6,6 +6,7 @@
 #include "CyberpunkObjects.h"
 #include "CyberpunkDraws.h"
 #include "GeometryCommands.h"
+#include "GeometryViews.h"
 #include "GeometryHealth.h"
 #include <Util.h>
 #include <mutex>
@@ -66,6 +67,8 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 const bool objects = ready && InitializeCyberpunkObjects(GetModuleHandleW(nullptr));
                 const bool draws = objects && InitializeCyberpunkDraws(GetModuleHandleW(nullptr));
                 const bool commands = ready && StartGeometryCommands(device);
+                const bool views = commands && std::filesystem::is_regular_file(directory / L"Glass" / L"experiment-host.enable") &&
+                                   StartGeometryViews(device);
                 if (draws && commands && !StartExperimentHost(device, directory / L"Glass"))
                     StartGeometryCoverageRecorder(device, compiler, directory / L"Glass" / L"capture-objects.request");
                 GeometryHealth health;
@@ -81,9 +84,9 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 {
                     fprintf(
                         log,
-                        "GEOMETRY_CREATION active=%u compiler_files=%u mesh_registry=%u draw_packets=%u commands=%u "
+                        "GEOMETRY_CREATION active=%u compiler_files=%u mesh_registry=%u draw_packets=%u commands=%u target_views=%u "
                         "engine_layout=relocatable_profiles actual_draw_replacement=0 fg_substitution=0\n",
-                        ready, files, objects, draws, commands);
+                        ready, files, objects, draws, commands, views);
                     fclose(log);
                 }
             });
@@ -122,6 +125,9 @@ void ReportGeometryHost(FILE* log) noexcept
         health = ReadGeometryHealth();
         if (!log)
             return;
+        const auto views = GetGeometryViewStats();
+        fprintf(log, "GEOMETRY_VIEWS active=%u healthy=%u heaps=%llu writes=%llu copies=%llu lookups=%llu misses=%llu\n",
+                views.active, views.healthy, views.heaps, views.writes, views.copies, views.lookups, views.misses);
         fprintf(log, "GEOMETRY_HEALTH capabilities=%u frame=%u object_capture=%llu fg_replacements=%llu reason=%s\n",
                 health.capabilities, health.frame, health.counts[GeometryCaptureDraws],
                 health.counts[GeometryFgReplacements], health.reason(health.sampledMs));

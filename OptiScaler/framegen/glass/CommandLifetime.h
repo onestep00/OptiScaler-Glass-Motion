@@ -33,7 +33,9 @@ class CommandLifetime
     CommandLifetime(const CommandLifetime&) = delete;
     CommandLifetime& operator=(const CommandLifetime&) = delete;
 
-    bool attach(ID3D12GraphicsCommandList* command)
+    // The same official destruction token also supports descriptor heaps.
+    // Identity remains the exact interface pointer supplied by the caller.
+    template <class Object> bool attach(Object* command)
     {
         if (!command || state)
             return false;

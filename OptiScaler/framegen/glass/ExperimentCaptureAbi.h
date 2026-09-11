@@ -1,5 +1,6 @@
 #pragma once
 #include "ExperimentDrawAbi.h"
+inline constexpr uint32_t GLASS_EXPERIMENT_CAPTURE_VERSION = 2; // Nested draw input version 3.
 
 enum GlassExperimentCaptureStage
 {

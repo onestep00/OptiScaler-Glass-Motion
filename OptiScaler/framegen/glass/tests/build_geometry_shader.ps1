@@ -22,9 +22,17 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
     (Join-Path $PSScriptRoot '../GeometryCoverageRecorder.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
     (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryViews.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
     (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
+& cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryTargetViews.cpp') `
+    "$build/GeometryViews.obj" "$build/GeometryCommands.obj" "$build/GeometryCommandFixture.obj" `
+    "$build/GeometryPipelineCache.obj" "$build/GeometryCreation.obj" "$build/GeometryPipeline.obj" "$build/DxilVertexHistory.obj" `
+    "/Fe$build/GeometryTargetViews.exe" /link d3d12.lib dxgi.lib (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
+if ($LASTEXITCODE -ne 0) { throw 'Target view observer test build failed' }
+& "$build/GeometryTargetViews.exe"
+if ($LASTEXITCODE -ne 0) { throw 'Target view observation/lifetime test failed' }
 & cl.exe @common /LD "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'ExperimentDrawFixture.cpp') `
     (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') `
     "/Fe$build/experiment-draw.dll" /link d3d12.lib dxgi.lib "/IMPLIB:$build/experiment-draw.lib"
@@ -37,6 +45,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Independent coverage module build failed' }
     (Join-Path $PSScriptRoot 'GeometryIndirect.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
     (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryViews.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$build/GeometryIndirect.exe" /link d3d12.lib dxgi.lib `
     d3dcompiler.lib (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Indirect binding GPU test build failed' }

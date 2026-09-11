@@ -5,6 +5,7 @@
 #include "GeometryRasterState.h"
 #include "CyberpunkDraws.h"
 #include <atomic>
+#include <cstring>
 
 namespace GlassFg
 {
@@ -41,6 +42,28 @@ inline int32_t ExperimentMeshShape(const void* source, GlassExperimentMesh* out)
     for (unsigned i = 0; i < 5; ++i) out->streamOffsets[i] = shape.streamOffsets[i];
     return 1;
 }
+inline int32_t ExperimentTargetAt(const void* source, uint32_t index, GlassExperimentTarget* out)
+{
+    if (!source || !out || out->size != sizeof(*out) || index > 8) return 0;
+    const auto& raster = *static_cast<const GeometryRasterState*>(source);
+    if (!raster.targetsKnown || (index < 8 && index >= raster.targetCount)) return 0;
+    const auto& view = index == 8 ? raster.depthView : raster.targetViews[index];
+    if (!view) return 0;
+    *out = {}; out->size = sizeof(*out); out->kind = view->kind;
+    out->defaultDescriptor = view->defaultDescriptor; out->nullResource = view->nullResource;
+    out->handle = view->handle; out->heap = view->heap; out->revision = view->revision;
+    out->resource = view->resource; out->address = view->address;
+    static_assert(sizeof(view->allocation) <= sizeof(out->allocation));
+    static_assert(sizeof(view->rtv) <= sizeof(out->descriptor) && sizeof(view->dsv) <= sizeof(out->descriptor));
+    if (!view->nullResource)
+    { out->allocationBytes = sizeof(view->allocation); memcpy(out->allocation, &view->allocation, sizeof(view->allocation)); }
+    if (!view->defaultDescriptor)
+    {
+        out->descriptorBytes = view->kind == 1 ? sizeof(view->rtv) : sizeof(view->dsv);
+        memcpy(out->descriptor, view->kind == 1 ? static_cast<const void*>(&view->rtv) : &view->dsv, out->descriptorBytes);
+    }
+    return 1;
+}
 inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandList* command, uint64_t recording,
                                   const GeometryDrawView& draw, const GeometryIndexedArguments& args,
                                   const GeometryRasterState& raster, const GraphicsRootBindings& bindings,
@@ -71,6 +94,7 @@ inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandLis
         for (unsigned i = 0; i < raster.targetCount; ++i) input.renderTargets[i] = raster.targets[i].ptr;
     }
     input.source = &draw; input.objectAt = ExperimentObjectAt; input.meshShape = ExperimentMeshShape;
+    input.targetSource = &raster; input.targetAt = ExperimentTargetAt;
     return input;
 }
 inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t recording,
@@ -81,7 +105,7 @@ inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t r
     const auto observer = experimentDrawObserver.load(std::memory_order_acquire);
     if (!observer) return;
     const auto input = MakeExperimentDrawInput(command, recording, draw, args, raster, bindings, pipeline);
-    const GlassExperimentEvent event { sizeof(event), GlassExperimentDraw, draw.frame, 0, 0, 2,
+    const GlassExperimentEvent event { sizeof(event), GlassExperimentDraw, draw.frame, 0, 0, GLASS_EXPERIMENT_DRAW_VERSION,
                                        sizeof(input), &input };
     observer(event);
 }

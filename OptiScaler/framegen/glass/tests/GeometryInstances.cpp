@@ -228,7 +228,10 @@ int wmain(int argc, wchar_t** argv)
             GlassFg::StartGeometryCoverageRecorder(g.d.Get(), std::filesystem::absolute(argv[2]), request);
         }
         if (commands)
+        {
+            require(GlassFg::StartGeometryViews(g.d.Get()), "Install render-target descriptor observer");
             require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
+        }
         struct Stop
         {
             ~Stop() { GlassFg::StopGeometryCreation(); }
@@ -823,6 +826,22 @@ int wmain(int argc, wchar_t** argv)
             std::getline(metadata, line);
             const auto frame = std::stoul(line);
             require(frame >= 1 && frame <= 8, "Recorder frame not from fixture");
+            if (moduleRecorder)
+            {
+                const auto bytes = read(captureDirectory / "objects-0.targets.bin");
+                std::array<GlassExperimentTarget, 9> observedTargets {};
+                require(bytes.size() == sizeof(observedTargets), "Target metadata size mismatch");
+                memcpy(observedTargets.data(), bytes.data(), bytes.size());
+                const auto& colorTarget = observedTargets[0];
+                const auto& depthTarget = observedTargets[8];
+                require(colorTarget.size == sizeof(colorTarget) && depthTarget.size == sizeof(depthTarget) &&
+                            colorTarget.address == reinterpret_cast<uint64_t>(colors[1].Get()) &&
+                            depthTarget.address == reinterpret_cast<uint64_t>(depth.Get()) &&
+                            colorTarget.resource && depthTarget.resource && colorTarget.resource != depthTarget.resource &&
+                            colorTarget.handle == rtvs[1].ptr && depthTarget.handle == dsv.ptr &&
+                            colorTarget.defaultDescriptor && depthTarget.defaultDescriptor,
+                        "Captured target bindings differ from actual draw resources");
+            }
             require(captureDirectory == recorderOutput ? frame <= 4 : frame >= 5,
                     "Capture request reused an earlier session's recording");
             const auto data = read(captureDirectory / "objects-0.bin");

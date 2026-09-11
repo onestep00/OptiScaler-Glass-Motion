@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryTargets.md](tests/GeometryTargets.md): Public RTV/DSV creation/copy and OM-time snapshots preserve resource/subresource metadata without retaining textures. Independent hooks/ABI/module outputs pass; not deployed. Full draw census and live contours/MV/FG remain incomplete.
+
 - [tests/Experiments.md](tests/Experiments.md): Event control, two independently prepared DLL generations, original color, admission rejection and unload pass GPU checks. Opt-in game startup compiles, not deployed. Live contour/MV/FG and in-flight owner replacement remain incomplete.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Actual mesh chunk range decoder added. Diagnostic draw metadata records counts/bindings, without claiming topology or view identity. New metadata is not deployed.

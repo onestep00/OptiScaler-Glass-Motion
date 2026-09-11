@@ -14,6 +14,11 @@ the boundary. Draw observation and capture preparation/lifecycle payloads are
 defined. Game control/startup source is present; actual game validation and FG
 payload/integration remain incomplete.
 
+Latest draw payload version is 3 and capture payload version is 2. The nested
+draw now supplies borrowed OM-time RTV/DSV metadata through `targetAt`; see
+[GeometryTargets.md](GeometryTargets.md) for exact bytes, output and verification.
+The version-2 pipeline service described below remains unchanged.
+
 `ExperimentDrawAbi.h` and `ExperimentDrawBridge.h` pass borrowed original draw,
 pipeline/root, shader descriptor, viewport/scissor and target handles to a
 resident observer. Object entries and the mesh range decoder are accessed on
@@ -24,7 +29,7 @@ resource lifetime, view identity or FG correlation. The observer is invoked only
 for direct indexed draws with an engine packet and tracked command recording;
 it does not yet census missing packets or all rendering families.
 
-Draw payload version 2 adds `ExperimentPipelineAbi.h` / `ExperimentPipelineService.h`.
+Draw payload version 2 introduced `ExperimentPipelineAbi.h` / `ExperimentPipelineService.h`.
 An explicit opaque token retains the existing immutable pipeline-cache entry.
 Only its host-provided release function destroys it; no shared_ptr or allocator
 ownership crosses the DLL ABI. The versioned view supplies original descriptor,

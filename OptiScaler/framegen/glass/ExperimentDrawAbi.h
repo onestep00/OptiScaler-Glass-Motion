@@ -1,6 +1,16 @@
 #pragma once
 #include "ExperimentAbi.h"
 #include "ExperimentPipelineAbi.h"
+inline constexpr uint32_t GLASS_EXPERIMENT_DRAW_VERSION = 3;
+
+struct GlassExperimentTarget
+{
+    uint32_t size, kind, defaultDescriptor, nullResource;
+    uint64_t handle, heap, revision, resource, address;
+    uint32_t allocationBytes, descriptorBytes;
+    uint8_t allocation[64]; // Exact D3D12_RESOURCE_DESC bytes, not a retained resource.
+    uint8_t descriptor[32]; // Exact explicit RTV/DSV descriptor; zero bytes for default.
+};
 
 struct GlassExperimentObject
 {
@@ -35,4 +45,7 @@ struct GlassExperimentDrawInput
     int32_t (*objectAt)(const void*, uint32_t, GlassExperimentObject*);
     int32_t (*meshShape)(const void*, GlassExperimentMesh*);
     GlassExperimentPipelineAccess pipelineAccess;
+    const void* targetSource;
+    // Callback-scoped OM binding snapshots: 0..7 RTV, 8 DSV. Unknown returns 0.
+    int32_t (*targetAt)(const void*, uint32_t, GlassExperimentTarget*);
 };

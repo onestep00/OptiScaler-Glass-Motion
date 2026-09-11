@@ -53,7 +53,7 @@ class ExperimentCaptureOwner final : public GeometryDrawCaptureOwner
     {
         auto& frame = frames[job.frame];
         const GlassExperimentEvent event { sizeof(event), GlassExperimentCapture, frame.id, 0, 0,
-                                           1, sizeof(input), &input };
+                                           GLASS_EXPERIMENT_CAPTURE_VERSION, sizeof(input), &input };
         return frame.module.dispatch(event);
     }
   public:

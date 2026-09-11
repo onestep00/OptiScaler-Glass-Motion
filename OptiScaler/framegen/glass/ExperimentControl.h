@@ -42,6 +42,7 @@ class ExperimentControl
     {
         const auto module = runtime.status();
         const auto capture = owner.status();
+        const auto views = GetGeometryViewStats();
         std::ofstream file(directory / "experiment.control.response", std::ios::binary);
         file << "request=" << id << "\nok=" << error.empty() << "\nerror=" << error
              << "\nprocess=" << GetCurrentProcessId() << "\nactive_generation=" << module.active
@@ -49,6 +50,8 @@ class ExperimentControl
              << "\ncapture_pending=" << capture.pending << "\ncapture_recorded=" << capture.recorded
              << "\ncapture_retired=" << capture.retired << "\naccepting=" << capture.accepting
              << "\nsubmission_observer_ready=" << (!submissionReady || submissionReady())
+             << "\ntarget_view_hooks=" << views.active << "\ntarget_view_healthy=" << views.healthy
+             << "\ntarget_view_lookups=" << views.lookups << "\ntarget_view_misses=" << views.misses
              << "\ncommands=" << commands << "\nfg_connected=0\n";
         file.close();
         if (!file) throw std::runtime_error("Experiment response write failed");

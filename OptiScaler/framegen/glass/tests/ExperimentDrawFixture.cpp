@@ -30,7 +30,7 @@ int32_t event(void* context, const GlassExperimentEvent* value)
 {
     if (value && value->kind == GlassExperimentCapture)
     {
-        if (value->payloadVersion != 1 || value->payloadBytes != sizeof(GlassExperimentCaptureInput) || !value->payload)
+        if (value->payloadVersion != GLASS_EXPERIMENT_CAPTURE_VERSION || value->payloadBytes != sizeof(GlassExperimentCaptureInput) || !value->payload)
             return -30;
         const auto& input = *static_cast<const GlassExperimentCaptureInput*>(value->payload);
         auto& owned = *static_cast<Context*>(context);
@@ -56,7 +56,7 @@ int32_t event(void* context, const GlassExperimentEvent* value)
         }
         return -36;
     }
-    if (!value || value->kind != GlassExperimentDraw || value->payloadVersion != 2 ||
+    if (!value || value->kind != GlassExperimentDraw || value->payloadVersion != GLASS_EXPERIMENT_DRAW_VERSION ||
         value->payloadBytes != sizeof(GlassExperimentDrawInput) || !value->payload ||
         value->frame != 42 || value->phase || value->phaseCount) return -10;
     const auto& d = *static_cast<const GlassExperimentDrawInput*>(value->payload);
