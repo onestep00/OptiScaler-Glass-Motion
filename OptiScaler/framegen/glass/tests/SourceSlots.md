@@ -55,3 +55,20 @@ The CPU fixture verifies header capture and missing-header handling. This source
 change has not been loaded into the game: the older observer is pinned and cannot
 be replaced through the coverage-module unload mechanism. No view identity or
 runtime cache admission follows from these raw fields yet.
+
+## Array update boundary
+
+Static direct-call tracing located the array setter's caller in an engine update
+worker. The worker passes an owner, bounds and a span of 48-byte transforms from
+an update record, then consumes the setter's AL result. This establishes a
+three-argument, byte-result observation seam for this audited call path; it does
+not establish the meaning of every indirect invocation.
+
+The setter converts entries in source order and may reuse the same allocation
+when the count is unchanged. The update span provides transforms, not an observed
+per-element persistent ID. Thus unchanged pointer/count and source-order copying
+do not prove unchanged element identity between updates. The upstream enqueue
+path still needs inspection before moving array instances can retain history
+across updates. Invalidating every update would avoid false association but would
+also lose motion history for continuously updated arrays; that is not accepted as
+the complete moving-object solution. No array mutation hook was installed.

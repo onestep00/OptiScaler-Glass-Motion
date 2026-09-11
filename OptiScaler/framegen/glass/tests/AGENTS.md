@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [SourceSlots.md](SourceSlots.md): Direct slot handoff passes CPU checks. Packet stack-copy rules out address identity; producer context diagnostic added but not deployed. View/lifetime and MV/FG integration remain absent.
+- [SourceSlots.md](SourceSlots.md): Direct slot handoff passes CPU checks. Producer context diagnostic is uninstalled; array-update caller found but element identity across updates remains unresolved. View/lifetime and MV/FG integration remain absent.
 
 - [Experiments.md](Experiments.md): Actual array setter identified; same pointer/count does not prove unchanged content. Secondary +0x158 array absent in 1,214 live owner snapshots and not admitted as previous history.
 
