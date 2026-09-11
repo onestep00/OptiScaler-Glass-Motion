@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Array VS/source correspondence observed. Live PSO metadata identifies depth/stencil writes and disabled blending as coverage rejection causes; coverage adaptation and production history/FG remain absent.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Unblended depth-writing coverage preserves original color/D32 and matches three masks on GPU. Stencil/MRT tests and live deployment remain; array history/FG incomplete.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 

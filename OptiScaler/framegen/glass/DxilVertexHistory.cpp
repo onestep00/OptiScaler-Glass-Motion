@@ -609,9 +609,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
     {
         need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture ||
                  target == MaterialMotionTarget::OriginalColorAndCoverage ||
-                 target == MaterialMotionTarget::OriginalColorAndCoverageAudit,
+                 target == MaterialMotionTarget::OriginalColorAndCoverageAudit ||
+                 target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit,
              "Unsupported material target");
-        const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit;
+        const bool depthCoverage = target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
+        const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit || depthCoverage;
         const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage || auditCoverage;
         const bool retainColor = target != MaterialMotionTarget::SeparateTarget;
         need(!nativeInputs || (retainColor && !coverageOnly), "Native motion requires retained-color capture");
@@ -652,10 +654,13 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         auto signatures = split(metadata.get(entry[2]));
         need(signatures.size() == 3 && signatures[2] == "null", "Unsupported pixel signature");
         auto inputs = split(metadata.get(signatures[0])), outputs = split(metadata.get(signatures[1]));
-        if (nativeInputs)
+        if (nativeInputs || depthCoverage)
         {
             need(source.find("@dx.op.discard") == std::string::npos,
                  "Native depth-writing capture rejects discard");
+        }
+        if (nativeInputs)
+        {
             need(nativeInputs->currentInput != nativeInputs->previousInput, "Identical native pixel inputs");
             for (unsigned id : {nativeInputs->currentInput, nativeInputs->previousInput})
             {

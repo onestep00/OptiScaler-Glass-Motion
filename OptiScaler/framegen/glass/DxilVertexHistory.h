@@ -97,7 +97,10 @@ enum class MaterialMotionTarget
     OriginalColorAndCoverage,
     // Diagnostic: also record same-draw surviving/contributing pixels before
     // object mapping. The two reference bit regions use capture CB base/reserved.
-    OriginalColorAndCoverageAudit
+    OriginalColorAndCoverageAudit,
+    // Unblended native attachments; no discard or shader side effects permitted.
+    // Coverage only, with original depth/stencil/color writes preserved.
+    OriginalColorAndDepthCoverageAudit
 };
 
 struct MaterialCaptureConstants

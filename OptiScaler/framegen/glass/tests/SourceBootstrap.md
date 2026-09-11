@@ -154,3 +154,26 @@ No guard was relaxed in this checkpoint. Local evidence:
 `work/glass-array-states-v1/capture/pipeline-states.csv` and the captured PS in
 `work/glass-array-native-bindings-v1/ps.ll`. The recording module unloaded and
 the game remained responding.
+
+## Depth-writing coverage implementation (not deployed)
+
+`createCoverageAudit` now distinguishes unblended attachments from a blended
+material equation. The unblended path uses a separate
+`OriginalColorAndDepthCoverageAudit` rewrite mode, preserving original exports
+and the complete original depth/stencil/blend PSO. It retains the existing
+early-depth capture flags and refuses discard and original shader UAV/other
+side effects. Its coverage contribution is one; it does not report material
+opacity/transmittance. Blended material capture retains its prior restrictions.
+
+`NativePairGpu.cpp`, built with GLASS_TEST_DEPTH_COVERAGE, compares original
+versus instrumented color and D32 depth over 256 pixels. An occluder removes
+12 of 32 rasterized pixels. All 20 visible pixels match the per-instance,
+surviving-reference and contributing-reference masks exactly; status is zero.
+The default native-motion GPU regression also passes with the changed compiler.
+Both were built with `/O2 /W4 /WX`. Artifacts are under
+`work/glass-depth-coverage-test-v1/`.
+
+This test does not yet exercise stencil writes, which the current game pipeline
+uses, or independently verify multi-target preservation for this new mode.
+Those checks remain before live deployment. No running game module was replaced
+by this implementation and no FG input changed.

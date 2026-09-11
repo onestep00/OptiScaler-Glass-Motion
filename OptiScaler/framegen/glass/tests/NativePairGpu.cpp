@@ -146,6 +146,15 @@ int wmain(int argc, wchar_t** argv)
         const GlassFg::NativeClipInputs auditedInputs {1,2,true};
         if(FAILED(compiler.createNativeMotionCapture(g.d.Get(),mappedRoot,pd,depthCaptured,error,auditedInputs)))
             throw std::runtime_error(error);
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+        if(FAILED(compiler.createCoverageAudit(g.d.Get(),mappedRoot,pd,depthCaptured,error)))
+            throw std::runtime_error(error);
+        const GlassFg::GeometryInstance coverageInstance {0,0,0,1,0,0,16,16,32,16,1024,0};
+        upload(instanceMap.Get(),&coverageInstance,sizeof(coverageInstance));
+        const GlassFg::MaterialCaptureConstants coverageConstants {0,0,1.f/16,1.f/16,0,0,11,0,
+            0,0,16,16,288,16,1024,544};
+        upload(pixelConstants.Get(),&coverageConstants,sizeof(coverageConstants));
+#endif
         auto depthDesc=td; depthDesc.Format=DXGI_FORMAT_D32_FLOAT;
         depthDesc.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         ComPtr<ID3D12Resource> depth;
@@ -204,7 +213,9 @@ int wmain(int argc, wchar_t** argv)
         check(comparison->Map(0,&comparisonRange,&mapped));
         const auto* compared=static_cast<const unsigned char*>(mapped);
         void* pixelData=nullptr; check(pixelBack->Map(0,&pixelRange,&pixelData));
+#ifndef GLASS_TEST_DEPTH_COVERAGE
         const auto* depthSamples=static_cast<const CaptureRecord*>(pixelData);
+#endif
         unsigned visible=0;
         for(unsigned y=0;y<16;++y) {
             for(unsigned r=0;r<2;++r) {
@@ -214,13 +225,26 @@ int wmain(int argc, wchar_t** argv)
             const auto* rgba=reinterpret_cast<const float*>(compared+y*footprints[0].Footprint.RowPitch);
             for(unsigned x=0;x<16;++x) {
                 const bool drawn=rgba[x*4+3]!=0;
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+                const auto* bits=static_cast<const uint32_t*>(pixelData);
+                for (unsigned base : {32u,288u,544u}) {
+                    const unsigned bit=base+y*16+x;
+                    require(bool((bits[bit/32]>>(bit%32))&1)==drawn,"Depth coverage differs from original visible color");
+                }
+#else
                 require((depthSamples[1+y*16+x].frame==11)==drawn,"Native UAV coverage differs from depth-tested color");
+#endif
                 if(drawn) ++visible;
             }
         }
         require(visible>0 && visible<count,"Occlusion test did not remove pixels");
         const auto* auditWords=static_cast<const uint32_t*>(pixelData);
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+        require(auditWords[0]==0,"Depth coverage status mismatch");
+        puts("DEPTH_COVERAGE_GPU_OK original_color_depth_and_three_masks");
+#else
         require(auditWords[0]==0 && auditWords[4]==visible,"Native invocation counter/status mismatch");
+#endif
         pixelBack->Unmap(0,&noWrite); comparison->Unmap(0,&noWrite);
         printf("NATIVE_DEPTH_GPU_OK exact_color_depth=256 occluded_pixels=%u visible_pixels=%u\n",count-visible,visible);
         puts("NATIVE_PAIR_GPU_OK three_vertices full_clip_w tags guards raster_jitter_distinct");
