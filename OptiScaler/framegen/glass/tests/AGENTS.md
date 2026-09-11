@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryObservation.md](GeometryObservation.md): Original-only cache admits read-only/depth-disabled PSOs under unchanged budgets; independent ownership/replay-isolation checks pass. Live missing-chunk descriptor and FG remain incomplete.
+
 - [SourceBootstrap.md](SourceBootstrap.md): CaptureSelection checks mesh-scoped and exact selectors. Live mesh capture retains changing instance counts; multi-chunk collection is not yet demonstrated. MRT/stencil coverage checks remain passing.
 
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.

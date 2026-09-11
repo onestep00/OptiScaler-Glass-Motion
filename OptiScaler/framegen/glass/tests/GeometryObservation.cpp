@@ -141,6 +141,29 @@ int main()
         ComPtr<ID3D12PipelineState> original, second;
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&original)));
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&second)));
+        {
+            GlassFg::GeometryObservationCache cache;
+            auto readOnly = d;
+            readOnly.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            ComPtr<ID3D12PipelineState> readOnlyPso, noDepthPso;
+            check(device.d->CreateGraphicsPipelineState(&readOnly, IID_PPV_ARGS(&readOnlyPso)));
+            require(cache.observe(readOnlyPso.Get(), readOnly), "Read-only depth observation missing");
+            auto noDepth = readOnly;
+            noDepth.DepthStencilState.DepthEnable = FALSE;
+            noDepth.DSVFormat = DXGI_FORMAT_UNKNOWN;
+            check(device.d->CreateGraphicsPipelineState(&noDepth, IID_PPV_ARGS(&noDepthPso)));
+            require(cache.observe(noDepthPso.Get(), noDepth), "Depth-disabled observation missing");
+            for (auto* pso : { readOnlyPso.Get(), noDepthPso.Get() })
+            {
+                auto entry = cache.find(pso);
+                require(entry && !entry->instrumented && !entry->root->extended,
+                        "Additional observation became replayable");
+                require(entry->description.DepthStencilState.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ZERO,
+                        "Observation changed depth writes");
+            }
+            require(!cache.find(noDepthPso.Get())->description.DepthStencilState.DepthEnable,
+                    "Observation changed depth enable");
+        }
 #ifdef GLASS_OBSERVATION_HOST
         observedOriginal = original.Get();
 #ifdef GLASS_OBSERVATION_NATIVE
@@ -260,8 +283,6 @@ int main()
                     "Shader bytes were borrowed");
             GlassFg::GeometryObservationCache tiny(1, 1);
             require(!tiny.observe(second.Get(), d), "Byte budget exceeded");
-            d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-            require(!cache.observe(original.Get(), d), "Read-only pass admitted into depth-writing observation");
         }
         void* token = GlassFg::RetainExperimentPipeline(&retained);
         GlassExperimentPipelineView view {}; view.size = sizeof(view);

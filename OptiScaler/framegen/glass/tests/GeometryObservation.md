@@ -1,11 +1,11 @@
-# Original-only depth-writing pipeline observation
+# Original-only graphics pipeline observation
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: explicit native vertex preparation and replaceable-DLL request passed independent host checks; live capture incomplete
+- Status: depth-independent observation passes independent descriptor ownership tests; live missing-pipeline recovery remains incomplete
 - Deployment: not installed in the running game
 - Deprecated: no
-- Scope: bounded diagnostic census of VS/PS triangle graphics pipelines that write depth
+- Scope: bounded diagnostic census of VS/PS triangle graphics pipelines, independent of depth-write state
 
 `GeometryObservationCache` retains original PSO/root references and owns the VS,
 PS and input-layout bytes from successful public PSO creation. It makes no GPU
@@ -36,7 +36,7 @@ Capture modules must continue to require their actual extended layout.
 
 `GeometryObservation.cpp` creates real independent D3D12 roots/PSOs and verifies
 owned shader bytes after source mutation, duplicate admission, entry/byte bounds,
-rejection of read-only depth passes, absence of replay objects and descriptor
+admission of read-only and depth-disabled passes, absence of replay objects and descriptor
 lease survival after cache destruction. It does not execute a velocity shader,
 observe game bindings, validate N-1 history or replace an FG input.
 
@@ -175,3 +175,28 @@ DXIL-VS/legacy-PS fixture failed PSO creation; using DXIL for both stages resolv
 the fixture failure. Actual Cyberpunk previous transforms, draw coverage, GPU
 capture and FG quality remain unverified by this test. Pipeline-view size changed;
 rebuild modules before loading them into the new host.
+
+## Missing mesh-chunk investigation
+
+The recorded source/draw join contains 180 multi-chunk source/frame groups on
+target 970 across six meshes. Sixteen belong to the previously selected 40-source
+mesh: chunk zero has 468 indices and an observed pipeline, while chunk one has
+72 indices and pipeline identity zero. Matching source metadata is not complete
+view or lifetime proof. A fresh same-process binding capture saved 148 rows but
+only chunk zero / pipeline 1376, with no GPU copies. The module unloaded cleanly.
+Evidence: `work/glass-multichunk-inventory-v1/analysis.json` and
+`work/glass-missing-chunk-bindings-v1/capture-live/`.
+
+The observation cache previously required enabled depth with ALL writes. This
+excluded read-only pipelines even when the separate material compiler could not
+prepare them. That diagnostic restriction is removed; all existing stage, size,
+entry and byte limits remain. Original-only entries still cannot authorize replay
+or FG substitution. Real independent read-only and depth-disabled PSOs now retain
+their exact depth flags and have no instrumented PSO or extended root. The test
+built with `/O2 /W4 /WX` and passed in `work/glass-observation-general-v1/`.
+
+The missing live chunk's descriptor is still unknown, so its rejection is not
+proven to be the depth predicate. Cache exhaustion, unsupported descriptors and
+creation coverage remain possible. This source change is not installed in the
+resident host and cannot recover a descriptor discarded earlier by that host.
+No new object MV, complete silhouette or FG input was produced.

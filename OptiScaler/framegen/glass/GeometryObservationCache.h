@@ -71,10 +71,9 @@ class GeometryObservationCache
 
     bool observe(ID3D12PipelineState* identity, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) noexcept
     {
-        // Depth-writing geometry was excluded by the material capture cache.
-        // Eligibility here identifies no material or velocity semantic.
-        if (!identity || !d.pRootSignature || !d.DepthStencilState.DepthEnable ||
-            d.DepthStencilState.DepthWriteMask != D3D12_DEPTH_WRITE_MASK_ALL ||
+        // Observation must also retain passes rejected by material compilation.
+        // Depth/blend state identifies neither transparency nor replay permission.
+        if (!identity || !d.pRootSignature ||
             !d.VS.pShaderBytecode || !d.PS.pShaderBytecode || !d.VS.BytecodeLength || !d.PS.BytecodeLength ||
             d.VS.BytecodeLength > 2 * 1024 * 1024 || d.PS.BytecodeLength > 2 * 1024 * 1024 ||
             !d.NumRenderTargets || d.NumRenderTargets > 8 || d.GS.BytecodeLength || d.HS.BytecodeLength ||
