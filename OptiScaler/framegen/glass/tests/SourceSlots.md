@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: live original node/range/proxy creation correspondence verified; temporal lifetime/view adapter incomplete
+- Status: creation/destruction cache adapter passes independent checks; live lifetime/view adapter incomplete
 - Deployment: none; no motion or FG input changes
 - Deprecated: no
 - Scope: bounded CPU correspondence within one proven producer/consumer domain
@@ -72,6 +72,38 @@ No new destructor hook has been installed. Local function disassemblies are unde
 `work/glass-engine-identity-probe-v2/`.
 
 ## Producer/consumer investigation
+
+### Connected lifetime diagnostic (not deployed)
+
+`GLASS_NODE_LIFETIME` connects the actual node-creation adapter to the bounded
+source-owner cache and invalidates its entry before forwarding renderer-handle
+destruction. Typed CMesh+0x1F0 and proxy+0xD8 must agree before publication.
+CSV q15 records the render mesh and q17 the creation serial. This is scalar
+ownership metadata, not position history. No transform array or GPU buffer is
+copied. Recording exhaustion or Save stops the CSV only; lifecycle tracking
+continues, so stopping diagnostics cannot silently retain obsolete ownership.
+
+The separate profile magic is 0x49555035. Its original creation-body record is
+followed by destructor RVA/byte count and the complete expected destructor body.
+Both targets are verified before a single detour transaction. Old profiles cannot
+enable this mode. No profile or new hook was deployed in PID 70152, which already
+has the preceding creation observer installed. Do not stack this on that hook.
+
+`NodeLifetimes.cpp` checks publication, invalidation before original release,
+same-address recreation with a new serial, continued tracking after CSV stop,
+and mismatched render-resource rejection. The transform allocation is deliberately
+unmapped. The new fixture, four existing ABI fixtures and standalone DLL built
+with `/O2 /W4 /WX`; all five fixtures passed. These fixtures call adapters on
+owned memory; they do not exercise the two-hook installation or certify engine
+concurrency, complete mutation coverage, view/frame identity or FG integration.
+
+Static direct-call analysis found one instruction-validated call to destructor
+body 0x296688, in deleting destructor 0x29665C. That caller retains the handle and
+delete flag in nonvolatile RDI/RBX and returns the handle; the shown normal return
+does not use the quarantined leaf's R10 convention. This does not prove all
+indirect callers. Local evidence is `work/glass-node-lifetime-audit-v1/`.
+Source-array replacement, actual draw-source publication and N-1 GPU positions
+remain unconnected. The diagnostic serial is not permission to reuse old motion.
 
 ### Node-owned renderer handles and skipped source groups
 

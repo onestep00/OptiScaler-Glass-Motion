@@ -2,6 +2,10 @@
 // forwarding hook pinned until process exit. No transform arrays/GPU copies.
 #include "DetourThreads.h"
 #include "GeometrySourceSlots.h"
+#ifdef GLASS_NODE_LIFETIME
+#define GLASS_NODE_GROUP
+#include "GeometrySourceOwners.h"
+#endif
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -18,7 +22,16 @@ namespace
 #ifdef GLASS_NODE_GROUP
 using EnqueueResult = void;
 using Enqueue = void (*)(void*, float, void*, void*);
+#ifdef GLASS_NODE_LIFETIME
+constexpr unsigned profileMagic = 0x49555035;
+using Destroy = void (*)(void*);
+Destroy originalDestroy = nullptr;
+GlassFg::GeometrySourceOwners<131072> sourceOwners;
+std::mutex sourceMutex;
+std::atomic<std::uint64_t> sourceCreated = 0, sourceDestroyed = 0, sourceRejected = 0;
+#else
 constexpr unsigned profileMagic = 0x49555034;
+#endif
 #elif defined(GLASS_TRANSFORM_RANGE)
 using EnqueueResult = void*;
 using Enqueue = EnqueueResult (*)(void*, void*);
@@ -58,12 +71,35 @@ bool read(std::uint64_t address, void* data, unsigned bytes) noexcept
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 #ifdef GLASS_NODE_GROUP
+#ifdef GLASS_NODE_LIFETIME
+// Invalidate before the original destructor releases its retained proxy.
+// Never hold the cache lock while executing engine code (which may reenter).
+void destroy(void* handle)
+{
+    std::uint64_t proxy = 0;
+    const auto address = reinterpret_cast<std::uint64_t>(handle);
+    if (address >= 0x10000 && address <= 0x7fffffffffffULL - 24 && read(address + 16, &proxy, 8))
+    {
+        std::lock_guard lock(sourceMutex);
+        sourceOwners.destroyed(address, proxy);
+        ++sourceDestroyed;
+    }
+    else ++sourceRejected;
+    originalDestroy(handle);
+}
+#endif
 // Audited outer creation ABI: RCX=node instance, XMM1=distance parameter,
 // R8=source span, R9=bounds. This is not the quarantined leaf accessor.
 EnqueueResult enqueue(void* a, float distance, void* b, void* bounds)
 {
     active.fetch_add(1, std::memory_order_acq_rel);
-    const bool observe = recording.load(std::memory_order_acquire);
+    const bool capture = recording.load(std::memory_order_acquire);
+#ifdef GLASS_NODE_LIFETIME
+    // Lifetimes must keep tracking when the bounded CSV recording stops.
+    const bool observe = true;
+#else
+    const bool observe = capture;
+#endif
     Row row;
     std::array<std::uint64_t, 2> before {}, after {};
     const auto instance = reinterpret_cast<std::uint64_t>(a);
@@ -104,11 +140,29 @@ EnqueueResult enqueue(void* a, float distance, void* b, void* bounds)
                     read(row.header[9] + 16, &row.header[10], 8) && row.header[10];
         if (row.valid)
         {
+#ifdef GLASS_NODE_LIFETIME
+            std::uint64_t renderMesh = 0, proxyMesh = 0;
+            const auto mesh = row.header[7], proxy = row.header[10];
+            const bool typed = mesh >= 0x10000 && mesh <= 0x7fffffffffffULL - 0x1f8 &&
+                proxy >= 0x10000 && proxy <= 0x7fffffffffffULL - 0xe0 &&
+                read(mesh + 0x1f0, &renderMesh, 8) && read(proxy + 0xd8, &proxyMesh, 8) &&
+                renderMesh && renderMesh == proxyMesh;
+            {
+                std::lock_guard lock(sourceMutex);
+                row.header[15] = typed ? renderMesh : 0;
+                row.header[17] = sourceOwners.created(row.header[9], proxy,
+                    {instance, row.header[2], row.header[15], range.first, range.count});
+            }
+            if (row.header[17]) ++sourceCreated; else ++sourceRejected;
+#endif
+            if (capture)
+            {
             const auto index = used.fetch_add(1, std::memory_order_relaxed);
             if (index < rows.size()) { row.thread = GetCurrentThreadId(); rows[index] = row; }
             else recording.store(false, std::memory_order_release);
+            }
         }
-        else malformed.fetch_add(1, std::memory_order_relaxed);
+        else if (capture) malformed.fetch_add(1, std::memory_order_relaxed);
     }
     active.fetch_sub(1, std::memory_order_release);
 }
@@ -206,8 +260,19 @@ bool install()
     const auto size = nt->OptionalHeader.SizeOfImage;
     if (header[1] >= size || header[2] > size - header[1]) return false;
     std::vector<char> expected(header[2]), actual(header[2]);
-    if (!file.read(expected.data(), header[2]) || file.peek() != std::char_traits<char>::eof() ||
+    if (!file.read(expected.data(), header[2]) ||
         !read(base + header[1], actual.data(), header[2]) || expected != actual) return false;
+#ifdef GLASS_NODE_LIFETIME
+    std::array<unsigned, 2> destruction {};
+    if (!file.read(reinterpret_cast<char*>(destruction.data()), sizeof(destruction)) ||
+        !destruction[1] || destruction[1] > 16384 || destruction[0] >= size ||
+        destruction[1] > size - destruction[0]) return false;
+    std::vector<char> expectedDestroy(destruction[1]), actualDestroy(destruction[1]);
+    if (!file.read(expectedDestroy.data(), destruction[1]) ||
+        !read(base + destruction[0], actualDestroy.data(), destruction[1]) ||
+        expectedDestroy != actualDestroy) return false;
+#endif
+    if (file.peek() != std::char_traits<char>::eof()) return false;
     HMODULE pinned = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                            reinterpret_cast<LPCWSTR>(&install), &pinned)) return false;
@@ -215,7 +280,12 @@ bool install()
     if (!threads.gather() || DetourTransactionBegin() != NO_ERROR) return false;
     auto target = reinterpret_cast<Enqueue>(base + header[1]);
     original = target;
-    if (DetourAttach(reinterpret_cast<PVOID*>(&original), enqueue) != NO_ERROR || !threads.enlist())
+    bool attached = DetourAttach(reinterpret_cast<PVOID*>(&original), enqueue) == NO_ERROR;
+#ifdef GLASS_NODE_LIFETIME
+    originalDestroy = reinterpret_cast<Destroy>(base + destruction[0]);
+    attached = DetourAttach(reinterpret_cast<PVOID*>(&originalDestroy), destroy) == NO_ERROR && attached;
+#endif
+    if (!attached || !threads.enlist())
     { DetourTransactionAbort(); original = nullptr; return false; }
     if (DetourTransactionCommit() != NO_ERROR) { original = nullptr; return false; }
     return true;
@@ -266,6 +336,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
             << "arrays48_only=" << arraysOnly.load() << "\nfiltered_empty=" << filtered.load()
             << "\nmalformed=" << malformed.load() << '\n'
             << "profile_magic=" << profileMagic << '\n';
+#ifdef GLASS_NODE_LIFETIME
+        {
+            std::lock_guard sourceLock(sourceMutex);
+            std::ofstream(output / "owners.txt") << "created=" << sourceCreated.load()
+                << "\ndestroy_callbacks=" << sourceDestroyed.load() << "\nrejected=" << sourceRejected.load()
+                << "\nlive=" << sourceOwners.size() << "\ntracking_continues=1\nobject_motion_produced=0\n";
+        }
+#endif
         output.clear(); return 0;
     }
     catch (...) { return 3; }
