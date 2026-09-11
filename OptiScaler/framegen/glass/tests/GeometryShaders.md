@@ -9,6 +9,33 @@
 
 ## Implemented source
 
+The `GLASS_CAPTURE_VERTEX_COVERAGE` diagnostic records original VS positions and
+original-material coverage in the same inserted draw. It uses the existing VS
+history and audited coverage PS, with no second material draw. Vertex records and
+coverage bits occupy disjoint regions of one bounded owned UAV allocation. A
+single retired readback is split into `.vertices.bin` and `.coverage.bin` on the
+worker. The common 256 MiB allocation budget remains; this is diagnostic memory,
+not the intended production allocation strategy. Both shader stages receive the
+same frame-local instance map. No temporal identity is inferred from that map.
+
+Generation 8 ran in the existing PID 56340 and captured 64 same-draw pairs. All
+128 vertices per snapshot had the expected frame/write tags. In every snapshot,
+the per-instance coverage equaled the independent same-draw contributing
+reference, and status was zero. The inspected frame 95944 contains 90 material
+pixels; projected vertices align with the material region, including vertices
+outside its surviving/occlusion-clipped pixels. Its arrows use the actual frame
+95943/95944 vertex displacement, with jitter still included. This is not a dense
+boundary MV and does not identify intrinsic silhouettes separately from material
+discard and opaque occlusion. No image segmentation was used. The shader compiler
+and diagnostic DLL built with `/W4 /WX`.
+
+Local evidence: `outputs/glass-vertex-coverage-live-v8/combined-analysis.json` and
+`same-draw-coverage-vertices.png`. Host totals reached 312 recorded/retired jobs,
+zero pending, then generation 8 unloaded. No FG substitution occurred. The live
+v8 `.done` files retain the old `vertex_only=1` label; their `.draw` files correctly
+declare `coverage_same_draw=1` and exact byte ranges. Source fixes that label for
+subsequent builds. These observations do not validate every transparent route.
+
 The optional `VertexConstantPair` records two raw words from an existing draw CB
 at bytes 24/28 of each 32-byte vertex record. Resource metadata resolves the CB
 ID from space/register; exact size, singleton binding and row bounds are checked.

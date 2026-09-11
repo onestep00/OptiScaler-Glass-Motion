@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Generation 8 captured actual vertices and original-material coverage in the same draw (64 captures), visualized and unloaded. Dense boundary MV and FG integration remain incomplete.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Generation 7 captured actual VS positions plus draw-bound camera CB words in 64 snapshots and unloaded. Jitter semantics/view/topology and final MV/FG admission remain incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Original-PS vertex recorder captured 64 live frames and unloaded. Exact current VS outputs are available; jitter/view/history admission and object MV/FG remain incomplete.
