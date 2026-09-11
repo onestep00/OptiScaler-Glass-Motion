@@ -338,7 +338,6 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
   %glass.iok = icmp ult i32 %glass.li, %glass.instances
   %glass.miok = icmp ult i32 %glass.mi, %glass.mapcapacity
   %glass.mapok = and i1 %glass.iok, %glass.miok
-  %glass.mapindex = select i1 %glass.mapok, i32 %glass.mi, i32 -1
   br i1 %glass.mapok, label %glass.mapread, label %glass.reject
 glass.mapread:
   %glass.ma = shl i32 %glass.mi, 6
@@ -352,6 +351,7 @@ glass.mapread:
   %glass.vok = icmp ult i32 %glass.lv, %glass.count
   %glass.indexok = icmp ult i32 %glass.index, %glass.historycapacity
   %glass.livegeneration = icmp ne i32 %glass.gen, 0
+  %glass.activemap = select i1 %glass.livegeneration, i32 %glass.mi, i32 -1
   %glass.allocationok = and i1 %glass.indexok, %glass.livegeneration
   %glass.ok = and i1 %glass.vok, %glass.allocationok
   br i1 %glass.ok, label %glass.read, label %glass.reject
@@ -394,9 +394,14 @@ glass.read:
   call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, i32 undef, i32 undef, i8 3)
   br label %glass.end
 glass.reject:
-  br label %glass.end
+)";
+        if (mapped)
+            code << "  %glass.rejectedmap = phi i32 [ -1, %glass.entry ], [ %glass.activemap, %glass.mapread ]\n";
+        code << R"(  br label %glass.end
 glass.end:
 )";
+        if (mapped)
+            code << "  %glass.mapindex = phi i32 [ %glass.mi, %glass.read ], [ %glass.rejectedmap, %glass.reject ]\n";
         for (unsigned c = 0; c < 4; ++c)
             code << "  %glass.o" << c << " = phi float [ %glass.p" << c << ", %glass.read ], [ " << values[c]
                  << ", %glass.reject ]\n";

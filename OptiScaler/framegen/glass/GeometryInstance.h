@@ -20,6 +20,14 @@ struct GeometryInstance
     std::uint32_t pixelBase, stride, pixelCapacity, statusIndex;
     std::uint32_t reserved[4] {};
 
+    // An exact zero record preserves an unknown instance's place in the draw
+    // without authorizing any history/capture/status address.
+    bool inactive() const
+    {
+        return !(historyBase | vertices | vertexOrigin | generation | left | top | width | height | pixelBase | stride |
+                 pixelCapacity | statusIndex | reserved[0] | reserved[1] | reserved[2] | reserved[3]);
+    }
+
     bool valid(std::uint64_t historyCapacity, std::uint64_t captureCapacity) const
     {
         return generation && vertices && historyCapacity <= UINT32_MAX / 32 &&
@@ -45,10 +53,17 @@ struct InstanceHistoryConstants
             std::uint64_t(mappingBase) + instances > mappingCapacity ||
             std::uint64_t(instanceOrigin) + instances > (std::uint64_t(1) << 32))
             return false;
+        bool active = false;
         for (std::uint32_t i = 0; i < instances; ++i)
-            if (!mapping[mappingBase + i].valid(historyCapacity, capturePixels))
+        {
+            const auto& entry = mapping[mappingBase + i];
+            if (entry.inactive())
+                continue;
+            if (!entry.valid(historyCapacity, capturePixels))
                 return false;
-        return true;
+            active = true;
+        }
+        return active;
     }
 };
 static_assert(sizeof(InstanceHistoryConstants) == 32);

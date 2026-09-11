@@ -1,5 +1,6 @@
 #pragma once
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace GlassFg::Detail
@@ -16,6 +17,17 @@ inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped
             instrumentation.erase(at, discard.size());
     }
     instrumentation.erase(instrumentation.find("  call void @dx.op.storeOutput.f32"));
+    if (mapped)
+    {
+        const auto mapInput = instrumentation.find("  %glass.mapindex =");
+        if (mapInput == std::string::npos)
+            throw std::runtime_error("Missing mapped material input");
+        const auto afterInput = instrumentation.find('\n', mapInput);
+        instrumentation.insert(afterInput + 1,
+                               "  %glass.mappedactive = icmp ne i32 %glass.mapindex, -1\n"
+                               "  br i1 %glass.mappedactive, label %glass.capturebegin, label %glass.captureend\n"
+                               "glass.capturebegin:\n");
+    }
     std::ostringstream code;
     if (mapped)
         code << R"(  %glass.mapok = icmp ne i32 %glass.mapindex, -1

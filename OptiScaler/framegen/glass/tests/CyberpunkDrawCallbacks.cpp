@@ -132,7 +132,7 @@ void fixtureRun(void*, void*, void*)
     flush();
     require(observed.size() == 2 && observed[0].identity.slot == 1 && observed[1].identity.slot == 2,
             "Coincident proxies collapsed");
-    require(observedHeader.stride == 48 && observedHeader.instanceOrigin == origin && observedHeader.chunk == 7,
+    require(observedHeader.stride == 48 && observedHeader.startInstanceLocation == origin && observedHeader.chunk == 7,
             "Rigid mesh/chunk/stride provenance");
     const auto generation = observed[0].identity.generation;
     storeInstance(1, 12, false);
@@ -155,7 +155,7 @@ void fixtureRun(void*, void*, void*)
     storeInstance(0, 21, false, 1, true);
     storeInstance(1, 22, false, 1, true);
     flush(false, 21);
-    require(observed.size() == 2 && observedHeader.instanceOrigin == 21, "Global transform range");
+    require(observed.size() == 2 && observedHeader.startInstanceLocation == 21, "Global transform range");
     storeInstance(0, 24, false, 1, true);
     storeInstance(1, 26, false, 1, true);
     flush(false, 24);

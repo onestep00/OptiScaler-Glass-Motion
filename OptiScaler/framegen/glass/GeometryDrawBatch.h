@@ -70,6 +70,7 @@ struct GeometryDrawView
 {
     std::span<const GeometryBatchSpan> objects;
     std::uint64_t mesh = 0;
-    std::uint32_t frame = 0, chunk = 0, stride = 0, instanceOrigin = 0, instances = 0;
+    // IA buffer offset. This is not the shader's SV_InstanceID origin.
+    std::uint32_t frame = 0, chunk = 0, stride = 0, startInstanceLocation = 0, instances = 0;
 };
 } // namespace GlassFg

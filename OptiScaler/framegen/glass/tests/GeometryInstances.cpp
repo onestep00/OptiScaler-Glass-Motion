@@ -269,9 +269,11 @@ int wmain(int argc, wchar_t** argv)
         g.c->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, .3f, 0, 1, &blocked);
         g.finish();
         std::array<Clip, 18> last {};
-        UINT64 checked = 0, overlaps = 0, exact = 0;
+        std::array<std::vector<char>, 2> priorHistory;
+        std::vector<char> priorCapture;
+        UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0;
         double maximum = 0;
-        for (UINT frame = 1; frame <= 5; ++frame)
+        for (UINT frame = 1; frame <= 8; ++frame)
         {
             UINT order[10] {};
             std::array<GlassFg::GeometryInstance, 10> mapping {};
@@ -292,6 +294,8 @@ int wmain(int argc, wchar_t** argv)
                                    RoiStride,
                                    CapturePixels,
                                    status };
+                if (frame == 6 && object == 1)
+                    mapping[5 + i] = {}; // Unknown object stays in the original draw.
             }
             GlassFg::InstanceHistoryConstants hc { 5, 10, Slots, 0, 3, 0, frame, frame - 1 };
             require(hc.valid(mapping, Slots, CapturePixels), "Instance allocation validation");
@@ -301,6 +305,12 @@ int wmain(int argc, wchar_t** argv)
             auto badMap = mapping;
             badMap[5].statusIndex = badMap[5].pixelBase;
             require(!hc.valid(badMap, Slots, CapturePixels), "Status/pixel overlap admitted");
+            badMap = mapping;
+            const auto activeIndex = mapping[5].inactive() ? 6u : 5u;
+            badMap[activeIndex].generation = 0;
+            require(!hc.valid(badMap, Slots, CapturePixels), "Malformed inactive mapping admitted");
+            badMap = {};
+            require(!hc.valid(badMap, Slots, CapturePixels), "Entirely inactive draw admitted");
             upload(objects.Get(), order, sizeof(order));
             upload(mappingBuffer.Get(), mapping.data(), sizeof(mapping));
             GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame,         0,
@@ -408,6 +418,21 @@ int wmain(int argc, wchar_t** argv)
             {
                 const UINT object = order[7 + i];
                 const auto& entry = mapping[5 + i];
+                if (entry.inactive())
+                {
+                    const auto offset = historyBase[object] * 32;
+                    require(!priorHistory[current].empty() && !memcmp(reinterpret_cast<const char*>(hist) + offset,
+                                                                      priorHistory[current].data() + offset, 4 * 32),
+                            "Inactive object wrote vertex history");
+                    const auto status = 8 + object * Segment;
+                    require(!priorCapture.empty() &&
+                                !memcmp(reinterpret_cast<const char*>(pixels + status + 1),
+                                        priorCapture.data() + (status + 1) * 32, (Segment - 1) * 32),
+                            "Inactive object wrote captured pixels");
+                    require(!memcmp(pixels, zero.data(), 8 * 32) && !memcmp(pixels + status, zero.data(), 32),
+                            "Inactive object wrote a foreign or own status record");
+                    continue;
+                }
                 for (UINT v = 0; v < 6; ++v)
                 {
                     const auto& vertex = hist[entry.historyBase + indices[v]];
@@ -418,6 +443,8 @@ int wmain(int argc, wchar_t** argv)
                 UINT expectedFlags = frame == 1 || (frame == 3 && object != 1) ? GlassFg::GeometryMissingHistory : 0;
                 if (frame == 4 && object == 1)
                     expectedFlags = GlassFg::GeometryEscapedBounds;
+                if (frame == 7 && object == 1)
+                    expectedFlags = GlassFg::GeometryMissingHistory;
                 const UINT actualFlags = *reinterpret_cast<const UINT*>(&pixels[entry.statusIndex]);
                 if (actualFlags != expectedFlags)
                     printf("FLAG frame=%u object=%u expected=%u actual=%u\n", frame, object, expectedFlags,
@@ -459,15 +486,23 @@ int wmain(int argc, wchar_t** argv)
                             overlaps += p[3] > 0;
                         }
                         ++checked;
+                        if (frame == 8 && object == 1)
+                            ++recovered;
                     }
             }
             last = now;
+            priorHistory[current].assign(reinterpret_cast<const char*>(hist),
+                                         reinterpret_cast<const char*>(hist) + HistoryBytes);
+            priorCapture.assign(reinterpret_cast<const char*>(pixels),
+                                reinterpret_cast<const char*>(pixels) + CaptureBytes);
             D3D12_RANGE noWrite { 0, 0 };
             readback->Unmap(0, &noWrite);
         }
         require(checked > 1000 && overlaps > 100, "Insufficient per-object overlap coverage");
+        require(recovered > 100, "Inactive object did not recover after fresh history");
         printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u instance_rebatch=1 "
-               "isolated_contours=1 opaque_depth_rejection=1 partial_history_flag=1 "
+               "isolated_contours=1 inactive_instances=1 inactive_recovery=1 opaque_depth_rejection=1 "
+               "partial_history_flag=1 "
                "generation_flag=1 escaped_bounds_flag=1 original_pixels=%llu motion_pixels=%llu "
                "overlapping_samples=%llu max_motion_error_px=%.9f\n",
                observed, exact, checked, overlaps, maximum);

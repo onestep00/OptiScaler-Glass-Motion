@@ -22,3 +22,5 @@ The source startup adapter now installs the audited engine observation paths aft
 The callback pool has 16 independent render scopes and 2,048 packet spans per rigid/skinned batch. It allocates once at startup, clears counters between batches and bypasses overflow without dropping unknown intervals. It introduces no GPU readback, wait, command or shader compilation. These arithmetic/storage limits are not a measured performance guarantee.
 
 Microsoft's [DrawIndexedInstanced contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-drawindexedinstanced) defines the start-instance offset into instance vertex data. The adapter preserves all original arguments and results.
+
+`startInstanceLocation` in the borrowed draw view is the IA buffer offset. It must not be copied into the shader-history constant's raw `SV_InstanceID` origin. The GPU fixture deliberately uses nonzero IA offsets and tests the raw system values independently.
