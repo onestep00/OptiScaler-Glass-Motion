@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [../Compatibility.md](../Compatibility.md): MRT preservation, public indirect resets, relocation/rejection and health tests. GeometryCompatibility reads an explicitly supplied PE into owned CPU memory; it never executes game code or attaches to a process.
+
 - [GeometryDraws.md](GeometryDraws.md): Acquisition build 32054cc staged in MO2; live validation and FG substitution pending. Public draw/root and written-slot invalidation checks pass. Internal multi-instance arrays and non-mesh routes remain unverified.
 
 - [GeometryObjects.md](GeometryObjects.md): Mesh lifetime generations, bounded pose candidates and callback layout/return tests. Synthetic owned memory only; no game hooks. Read the direct-provenance and unobserved-mutation limitations before using a candidate for a draw.

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GlassControls.h"
+#include "GeometryHealth.h"
 #include <Util.h>
 #include <SimpleIni.h>
 #include <imgui/imgui.h>
@@ -85,7 +86,14 @@ void PublishRuntimeStatus(RuntimeStatus status) { runtimeStatus.store(status, st
 
 void RenderSettings()
 {
-    if (!ImGui::CollapsingHeader("Transparent surface correction (experimental)##GlassFG"))
+    const bool open = ImGui::CollapsingHeader("Transparent surface correction (experimental)##GlassFG");
+    const auto now = GetTickCount64();
+    RefreshGeometryHealthIfNeeded(now);
+    const auto health = ReadGeometryHealth();
+    const bool applied = health.recentlyApplied(now);
+    ImGui::TextColored(applied ? ImVec4(.4f, .85f, .4f, 1) : ImVec4(1, .7f, .3f, 1), "%s",
+                       applied ? "Object MV -> FG: recently applied" : "Object MV -> FG: NOT applied");
+    if (!open)
         return;
     ImGui::PushID("GlassFG");
     auto value = ReadControls();
@@ -131,13 +139,60 @@ void RenderSettings()
     {
         switch (runtimeStatus.load(std::memory_order_relaxed))
         {
-        case RuntimeStatus::Correcting: ImGui::TextWrapped("Correction active (experimental)."); break;
-        case RuntimeStatus::Unavailable: ImGui::TextWrapped("Correction unavailable for this session. See OptiScaler.Glass.log."); break;
-        case RuntimeStatus::Retiring: ImGui::TextWrapped("Waiting for previous correction work to finish."); break;
-        case RuntimeStatus::Stopped: ImGui::TextWrapped("Correction stopped after graphics shutdown. Waiting for native DLSS-G recreation."); break;
-        default: ImGui::TextWrapped("Waiting for compatible native DLSS-G inputs."); break;
+        case RuntimeStatus::Correcting:
+            ImGui::TextWrapped("Static-surface correction active (experimental).");
+            break;
+        case RuntimeStatus::Unavailable:
+            ImGui::TextWrapped("Correction unavailable for this session. See OptiScaler.Glass.log.");
+            break;
+        case RuntimeStatus::Retiring:
+            ImGui::TextWrapped("Waiting for previous correction work to finish.");
+            break;
+        case RuntimeStatus::Stopped:
+            ImGui::TextWrapped("Correction stopped after graphics shutdown. Waiting for native DLSS-G recreation.");
+            break;
+        default:
+            ImGui::TextWrapped("Waiting for compatible native DLSS-G inputs.");
+            break;
         }
     }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Object motion / compatibility diagnostics");
+    ImGui::TextWrapped("%s", health.reason(now));
+    const auto hook = [&](const char* label, GeometryCapability capability, GeometryEvidence evidence)
+    {
+        const auto count = static_cast<unsigned long long>(health.counts[evidence]);
+        ImGui::Text("%s: %s; calls %llu", label,
+                    !health.has(capability) ? "unavailable"
+                    : count                 ? "observed"
+                                            : "installed, waiting",
+                    count);
+    };
+    ImGui::Text("Engine layout: %s", health.has(GeometryEngineLayout) ? "structure validated" : "not validated");
+    hook("D3D12 creation hooks", GeometryCreationHooks, GeometryPipelines);
+    hook("Object identity hooks", GeometryObjectHooks, GeometryIdentities);
+    hook("Engine draw hooks", GeometryDrawHooks, GeometryEngineDraws);
+    hook("D3D12 draw hooks", GeometryCommandHooks, GeometryPublicDraws);
+    ImGui::Text("Shaders: %llu compiled / %llu pending / %llu rejected",
+                static_cast<unsigned long long>(health.counts[GeometryCompiled]),
+                static_cast<unsigned long long>(health.counts[GeometryPending]),
+                static_cast<unsigned long long>(health.counts[GeometryCompileRejected]));
+    ImGui::Text("World draw joins: %llu; pipeline %llu; valid bindings %llu",
+                static_cast<unsigned long long>(health.counts[GeometryPackets]),
+                static_cast<unsigned long long>(health.counts[GeometryPipelineMatches]),
+                static_cast<unsigned long long>(health.counts[GeometryBindingMatches]));
+    ImGui::Text("Indirect commands: %llu known / %llu unknown",
+                static_cast<unsigned long long>(health.counts[GeometryIndirectKnown]),
+                static_cast<unsigned long long>(health.counts[GeometryIndirectUnknown]));
+    ImGui::Text("Object MV captures: %llu; FG input replacements: %llu",
+                static_cast<unsigned long long>(health.counts[GeometryCaptureDraws]),
+                static_cast<unsigned long long>(health.counts[GeometryFgReplacements]));
+    if (health.sampledMs && now >= health.sampledMs)
+        ImGui::TextDisabled("Report %.1f s ago; engine frame %u", (now - health.sampledMs) / 1000.0, health.frame);
+    ImGui::TextDisabled("UI samples once per second without waiting. Paused/menu scenes can stop progress.");
+    ImGui::TextWrapped(
+        "A working hook does not prove object MV is applied. This build still lacks the object capture/FG producer.");
+    ImGui::TextDisabled("Details: OptiScaler.Glass.log / OptiScaler.Glass.Geometry.log");
     ImGui::BeginDisabled();
     bool preview = false;
     ImGui::Checkbox("Show selected regions (pending runtime preview)", &preview);

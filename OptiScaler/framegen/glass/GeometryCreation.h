@@ -22,6 +22,7 @@ bool StartGeometryCreation(ID3D12Device* device, const std::filesystem::path& co
 // DllMain, a draw callback, or while holding application/driver locks.
 void StopGeometryCreation();
 GeometryCreationStats GetGeometryCreationStats();
+bool TryGeometryCreationCounters(GeometryCreationStats& result);
 std::shared_ptr<const GeometryPipelineEntry> FindGeometryPipeline(ID3D12PipelineState* original) noexcept;
 void ObserveGeometryRoot(ID3D12Device* device, UINT node, const void* bytes, SIZE_T size, IUnknown* created) noexcept;
 

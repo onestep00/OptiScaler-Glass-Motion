@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CyberpunkDraws.h"
 #include "CyberpunkObjects.h"
-#include "CyberpunkSurfacePass.h"
+#include "CyberpunkLayout.h"
 #include "DetourThreads.h"
 #include <bit>
 #include <mutex>
@@ -285,13 +285,6 @@ std::uint32_t upload(void* target, void* source, std::uint32_t count, void* allo
     }
     return result;
 }
-bool matchesCode(const unsigned char* code, unsigned bytes, std::uint64_t expected)
-{
-    std::uint64_t value = 14695981039346656037ull;
-    for (unsigned i = 0; i < bytes; ++i)
-        value = (value ^ code[i]) * 1099511628211ull;
-    return value == expected;
-}
 } // namespace
 
 GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
@@ -332,22 +325,15 @@ bool InitializeCyberpunkDraws(HMODULE executable) noexcept
         if (activeDrawState.load(std::memory_order_acquire))
             return true;
         auto registry = GetCyberpunkObjects();
-        CyberpunkSurfacePass admitted;
-        if (!registry || !admitted.initialize(executable, nullptr))
+        const auto* layout = GetCyberpunkLayout(executable);
+        if (!registry || !layout)
             return false;
         auto* base = reinterpret_cast<unsigned char*>(executable);
-        if (!matchesCode(base + 0x1f1208, 1812, 0x945f222f10bba789ull) ||
-            !matchesCode(base + 0x1f1a88, 953, 0x85e35e0963682f91ull) ||
-            !matchesCode(base + 0x1f1fa8, 237, 0x2c394f6b77326845ull) ||
-            !matchesCode(base + 0x1f020c, 214, 0x557f85e81a081b90ull) ||
-            !matchesCode(base + 0x1f3e40, 219, 0x308c3423d7684bcdull) ||
-            !matchesCode(base + 0x1f2098, 585, 0x4d25972c8945d3e0ull))
-            return false;
         auto state = std::make_unique<EngineDrawState>();
         state->registry = std::move(registry);
-        state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + 0x3438a30);
-        state->rendererGlobal = base + 0x3427c00;
-        state->drawReturn = base + 0x1f22c2;
+        state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + layout->tick);
+        state->rendererGlobal = base + layout->rendererGlobal;
+        state->drawReturn = base + layout->drawReturn;
         HMODULE resident = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                                 reinterpret_cast<LPCWSTR>(&InitializeCyberpunkDraws), &resident))
@@ -355,11 +341,11 @@ bool InitializeCyberpunkDraws(HMODULE executable) noexcept
         DetourThreads threads;
         if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
             return false;
-        originalRun = reinterpret_cast<Run>(base + 0x1f1208);
-        originalAppend = reinterpret_cast<Append>(base + 0x1f1a88);
-        originalRigid = reinterpret_cast<Rigid>(base + 0x1f1fa8);
-        originalSkinned = reinterpret_cast<Skinned>(base + 0x1f020c);
-        originalUpload = reinterpret_cast<Upload>(base + 0x1f3e40);
+        originalRun = reinterpret_cast<Run>(base + layout->functions[CyberpunkLayout::Run]);
+        originalAppend = reinterpret_cast<Append>(base + layout->functions[CyberpunkLayout::Append]);
+        originalRigid = reinterpret_cast<Rigid>(base + layout->functions[CyberpunkLayout::Rigid]);
+        originalSkinned = reinterpret_cast<Skinned>(base + layout->functions[CyberpunkLayout::Skinned]);
+        originalUpload = reinterpret_cast<Upload>(base + layout->functions[CyberpunkLayout::Upload]);
         bool okay = true;
         const auto attach = [&](auto& original, auto hook)
         {

@@ -2,8 +2,8 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: production engine callbacks and public D3D12 consumer pass independent tests; live provenance unverified
-- Deployment: acquisition build 32054cc staged in MO2 Root; fresh-process verification pending
+- Status: live packet/public draw observation verified; active MRT/root joins failed; source fixes independently verified
+- Deployment: installed 32054cc predates compatibility/admission/status fixes; object capture and FG replacement remain absent
 - Deprecated: no
 - Scope: direct indexed mesh batches in the audited Cyberpunk executable; broader routes remain incomplete
 
@@ -26,6 +26,8 @@ Microsoft's [DrawIndexedInstanced contract](https://learn.microsoft.com/en-us/wi
 `startInstanceLocation` in the borrowed draw view is the IA buffer offset. It must not be copied into the shader-history constant's raw `SV_InstanceID` origin. The GPU fixture deliberately uses nonzero IA offsets and tests the raw system values independently.
 
 ## Public graphics observation and bounded reuse
+
+The latest live checkpoint and source changes are in [Compatibility.md](../Compatibility.md). The game observed real engine packets and public draws, but actual three-target glass PSOs were filtered out and indirect commands invalidated root history. The source now preserves MRT layouts, observes public indirect signatures and discovers relocated engine functions. Startup, actual calls, joins and new FG application are separate UI/log stages. The new fixes are independently tested; no new object capture or FG input has been observed in the game.
 
 The observer installs from the selected actual device implementation. Successful creation/Reset starts a fresh recording; Close ends readable state. It tracks all graphics root setters, partial constants, PSO and descriptor-heap changes. Bundle/indirect execution and extended state-object/program setters invalidate replay. Official destruction notifications prevent a reused command address from inheriting bindings. This is CPU observation, not GPU resource retirement proof. Render targets, predication, viewport, render-pass state and submission ownership still require the capture owner.
 

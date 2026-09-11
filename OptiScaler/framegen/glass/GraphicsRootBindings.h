@@ -8,7 +8,8 @@
 namespace GlassFg
 {
 // Observe from command creation/successful Reset, including every graphics root
-// setter and ClearState. Bundles/indirect root changes make the record unknown.
+// setter and ClearState. Unknown bundle/indirect changes reject the record;
+// observed indirect signatures apply the API's precise post-call root resets.
 // This stores no COM ownership. The command/PSO/root owner must outlive replay.
 class GraphicsRootBindings
 {

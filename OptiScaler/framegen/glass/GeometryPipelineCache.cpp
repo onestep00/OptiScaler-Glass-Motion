@@ -25,8 +25,9 @@ bool candidate(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d)
     };
     return d.pRootSignature && d.VS.pShaderBytecode && d.PS.pShaderBytecode && d.VS.BytecodeLength &&
            d.PS.BytecodeLength && d.VS.BytecodeLength <= 2 * 1024 * 1024 && d.PS.BytecodeLength <= 2 * 1024 * 1024 &&
-           d.NumRenderTargets == 1 && d.SampleDesc.Count == 1 && !d.GS.BytecodeLength && !d.HS.BytecodeLength &&
-           !d.DS.BytecodeLength && !d.StreamOutput.NumEntries && !d.StreamOutput.NumStrides &&
+           d.NumRenderTargets && d.NumRenderTargets <= D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT &&
+           d.SampleDesc.Count == 1 && !d.GS.BytecodeLength && !d.HS.BytecodeLength && !d.DS.BytecodeLength &&
+           !d.StreamOutput.NumEntries && !d.StreamOutput.NumStrides &&
            d.PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE && d.InputLayout.NumElements <= 32 &&
            (!d.InputLayout.NumElements || d.InputLayout.pInputElementDescs) &&
            (!d.DepthStencilState.DepthEnable || d.DepthStencilState.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ZERO) &&
@@ -291,5 +292,19 @@ GeometryCacheStats GeometryPipelineCache::stats() const
     const auto& r = *implementation;
     std::lock_guard lock(r.mutex);
     return r.counters;
+}
+bool GeometryPipelineCache::tryCounters(GeometryCacheStats& result) const
+{
+    const auto& r = *implementation;
+    std::unique_lock lock(r.mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return false;
+    result.roots = r.counters.roots;
+    result.pipelines = r.counters.pipelines;
+    result.ready = r.counters.ready;
+    result.rejected = r.counters.rejected;
+    result.pending = r.counters.pending;
+    result.retainedBytes = r.counters.retainedBytes;
+    return true; // No allocation or diagnostic-string copy on the UI path.
 }
 } // namespace GlassFg

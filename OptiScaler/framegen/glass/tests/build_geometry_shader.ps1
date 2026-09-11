@@ -24,6 +24,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
     (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
+& cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
+    (Join-Path $PSScriptRoot 'GeometryIndirect.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
+    (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
+    (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$build/GeometryIndirect.exe" /link d3d12.lib dxgi.lib `
+    d3dcompiler.lib (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
+if ($LASTEXITCODE -ne 0) { throw 'Indirect binding GPU test build failed' }
+& "$build/GeometryIndirect.exe"
+if ($LASTEXITCODE -ne 0) { throw 'Indirect binding GPU test failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryVertex.hlsl') (Join-Path $build 'fixture.dxil') vs_6_0
 if ($LASTEXITCODE -ne 0) { throw 'Vertex fixture compilation failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterial.hlsl') (Join-Path $build 'fixture-pixel.dxil') ps_6_0
@@ -48,3 +57,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Instance geometry capture test failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Actual creation observer GPU test failed' }
 & $instances $build $dxc --commands
 if ($LASTEXITCODE -ne 0) { throw 'Actual graphics command observer GPU test failed' }
+& $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialMrt.hlsl') (Join-Path $build 'fixture-mrt.dxil') ps_6_0
+if ($LASTEXITCODE -ne 0) { throw 'MRT material compilation failed' }
+& $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialDual.hlsl') (Join-Path $build 'fixture-dual.dxil') ps_6_0
+if ($LASTEXITCODE -ne 0) { throw 'Dual-source material compilation failed' }
+& $instances $build $dxc --mrt
+if ($LASTEXITCODE -ne 0) { throw 'Original auxiliary MRT preservation failed' }
+& $instances $build $dxc --dual-mrt
+if ($LASTEXITCODE -ne 0) { throw 'Dual-source MRT preservation failed' }

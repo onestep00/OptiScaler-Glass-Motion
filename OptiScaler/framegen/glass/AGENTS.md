@@ -12,7 +12,9 @@
 
 ## Document index
 
-- [tests/GeometryDraws.md](tests/GeometryDraws.md): Acquisition build 32054cc staged in MO2; live validation/FG application pending. Public draw/root GPU checks pass. Bounded caches reuse interface checks and root payloads; newer written-slot optimization is source-only.
+- [Compatibility.md](Compatibility.md): Relocatable engine discovery, indirect signatures, MRT admission and UI/log evidence pass independent checks. Fresh-process validation pending; production object capture/FG substitution remain absent.
+
+- [tests/GeometryDraws.md](tests/GeometryDraws.md): 32054cc live packet/public draw observation verified; active MRT/root joins failed and new FG input remains absent. Source fixes and relocatable discovery pass independent checks; fresh-process validation pending.
 - [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
 - [EngineGeometry.md](EngineGeometry.md): All-world 32-route inventory and engine evidence. CPU lifetime/index and startup observer now implemented, but unique pose candidates do not prove draw ownership. Live frame/instance linkage, missing mutation routes and procedural/particle coverage remain incomplete.
 - [tests/GeometryObjects.md](tests/GeometryObjects.md): Generation/lifetime index and production callbacks pass independent tests; source startup hook compiles. No game deployment, verified draw ownership or new FG input replacement.

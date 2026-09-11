@@ -3,11 +3,13 @@
 - Created: 2026-09-11
 - Updated: 2026-09-11
 - Status: shader/creation and CPU lifetime components implemented; live geometry producer incomplete
-- Deployment: acquisition build 32054cc staged in MO2 Root; fresh-process validation pending. Its FG correction still uses static-world depth projection
+- Deployment: 32054cc was observed live; packet/public draw acquisition works but active MRT/root admission failed. New source fixes are pending deployment. FG still uses static-world depth projection
 - Deprecated: no
 - Scope: all in-world transparent rendering in Cyberpunk 2077; HUD excluded by verified rendering provenance
 
 ## Coverage requirement
+
+Latest checkpoint: [Compatibility.md](Compatibility.md) documents the live admission failures, relocation-tolerant engine discovery, bounded public indirect metadata and UI/log diagnostics. Independent tests pass; production object history/capture and new FG substitution remain absent. Earlier pending-deployment statements below describe preceding checkpoints.
 
 Cups and railings are test scenes, not an object whitelist. Vehicle windows, eyewear, attachments, moving world icons, holograms, animated meshes, particles and effects belong to the target scope. Material names, object names and a static/dynamic label cannot decide whether correction applies. A world-space display can use a texture produced by a screen-space/UI pass. The final world surface must not be excluded merely because a shader name contains `ui`.
 

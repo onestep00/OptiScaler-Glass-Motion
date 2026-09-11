@@ -3,6 +3,7 @@
 #include "GeometryCreation.h"
 #include "CyberpunkDraws.h"
 #include "CommandLifetime.h"
+#include "IndirectBindings.h"
 #include "DetourThreads.h"
 #include <hooks/Hook_Utils.h>
 #include <array>
@@ -46,11 +47,13 @@ struct Observation
     ComPtr<ID3D12Device> device;
     std::mutex registrations;
     std::array<Record, 512> records;
+    IndirectBindingCache indirect;
     std::array<void*, 85> targets {};
     bool has4 = false, has10 = false;
     std::atomic<bool> active = false;
     std::atomic<std::uint64_t> recordings = 0, capacityRejected = 0, indexed = 0, packets = 0;
     std::atomic<std::uint64_t> instances = 0, identities = 0, pipelinesReady = 0, bindingsReady = 0;
+    std::atomic<std::uint64_t> signatures = 0, indirectKnown = 0, indirectUnknown = 0;
     std::atomic<std::uint32_t> lastFrame = 0;
 };
 std::atomic<Observation*> published = nullptr;
@@ -174,6 +177,29 @@ HRESULT WINAPI create(ID3D12Device* device, UINT node, D3D12_COMMAND_LIST_TYPE t
     }
     return result;
 }
+MethodType<&ID3D12Device::CreateCommandSignature> originalSignature = nullptr;
+HRESULT WINAPI createSignature(ID3D12Device* device, const D3D12_COMMAND_SIGNATURE_DESC* desc,
+                               ID3D12RootSignature* root, REFIID iid, void** output)
+{
+    Scope scope;
+    const auto result = originalSignature(device, desc, root, iid, output);
+    if (scope.outer && SUCCEEDED(result) && desc && output && *output)
+        if (auto* state = published.load(std::memory_order_acquire);
+            state && state->active.load(std::memory_order_relaxed) && state->device.Get() == device)
+        {
+            try
+            {
+                ComPtr<ID3D12CommandSignature> signature;
+                if (SUCCEEDED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&signature))) &&
+                    state->indirect.created(signature.Get(), root, *desc))
+                    ++state->signatures;
+            }
+            catch (...)
+            {
+            } // Missing metadata leaves this signature unknown.
+        }
+    return result;
+}
 MethodType<&Command::Reset> originalReset = nullptr;
 HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12PipelineState* initial)
 {
@@ -239,7 +265,9 @@ GLASS_GRAPHICS(ExecuteBundle, Command, (Command * command, Command* bundle), (co
 GLASS_GRAPHICS(ExecuteIndirect, Command,
                (Command * command, ID3D12CommandSignature* signature, UINT count, ID3D12Resource* args, UINT64 offset,
                 ID3D12Resource* counter, UINT64 counterOffset),
-               (command, signature, count, args, offset, counter, counterOffset), r->bindings.invalidate())
+               (command, signature, count, args, offset, counter, counterOffset),
+               auto* state = published.load(std::memory_order_acquire);
+               if (state->indirect.apply(signature, r->bindings))++ state->indirectKnown; else ++state->indirectUnknown)
 GLASS_GRAPHICS(SetPipelineState1, ID3D12GraphicsCommandList4,
                (ID3D12GraphicsCommandList4 * command, ID3D12StateObject* object), (command, object),
                r->bindings.invalidate())
@@ -383,6 +411,7 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
         if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
             return false;
         bool okay = attach(originalCreate, (*reinterpret_cast<void***>(device))[12], create) &&
+                    attach(originalSignature, (*reinterpret_cast<void***>(device))[41], createSignature) &&
                     attach(originalReset, table[10], reset) && attach(originalClose, table[9], close) &&
                     attach(originalIndexed, table[13], indexed) && attach(originalHeaps, table[28], heaps);
 #define GLASS_ATTACH(Name, Slot) okay = attach(original##Name, state->targets[Slot], hook##Name) && okay
@@ -443,6 +472,9 @@ GeometryCommandStats GetGeometryCommandStats() noexcept
         GLASS_STAT(identities);
         GLASS_STAT(pipelinesReady);
         GLASS_STAT(bindingsReady);
+        GLASS_STAT(signatures);
+        GLASS_STAT(indirectKnown);
+        GLASS_STAT(indirectUnknown);
         GLASS_STAT(lastFrame);
 #undef GLASS_STAT
     }

@@ -1,6 +1,6 @@
 #include "pch.h"
 #include "CyberpunkObjects.h"
-#include "CyberpunkSurfacePass.h"
+#include "CyberpunkLayout.h"
 #include "DetourThreads.h"
 
 namespace GlassFg
@@ -155,13 +155,6 @@ bool updated(void* proxy, void* bounds, void* transform)
     }
     return result;
 }
-bool fingerprint(const unsigned char* code, unsigned bytes, std::uint64_t expected)
-{
-    std::uint64_t value = 14695981039346656037ull;
-    for (unsigned i = 0; i < bytes; ++i)
-        value = (value ^ code[i]) * 1099511628211ull;
-    return value == expected;
-}
 } // namespace
 
 bool InitializeCyberpunkObjects(HMODULE executable) noexcept
@@ -172,19 +165,13 @@ bool InitializeCyberpunkObjects(HMODULE executable) noexcept
         std::lock_guard lock(startup);
         if (activeState.load(std::memory_order_acquire))
             return true;
-        CyberpunkSurfacePass admitted;
-        if (!admitted.initialize(executable, nullptr))
+        const auto* layout = GetCyberpunkLayout(executable);
+        if (!layout)
             return false;
-        const auto* base = reinterpret_cast<const unsigned char*>(executable);
-        // Full small-function fingerprints of the inspected game build. No
-        // absolute heap addresses, names, or driver-code signatures are used.
-        if (!fingerprint(base + 0x3a1ca4, 161, 0xd5773b1945057908ull) ||
-            !fingerprint(base + 0x294724, 59, 0x41f8f549e402f483ull) ||
-            !fingerprint(base + 0x1da094, 521, 0x3fb3d88b769d5d1full))
-            return false;
+        auto* base = reinterpret_cast<unsigned char*>(executable);
         auto state = std::make_unique<State>();
         state->registry = std::make_shared<GeometryObjectRegistry>();
-        state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + 0x3438a30);
+        state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + layout->tick);
         HMODULE resident = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                                 reinterpret_cast<LPCWSTR>(&InitializeCyberpunkObjects), &resident))
@@ -192,9 +179,9 @@ bool InitializeCyberpunkObjects(HMODULE executable) noexcept
         DetourThreads threads;
         if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
             return false;
-        originalRegister = reinterpret_cast<Register>(const_cast<unsigned char*>(base + 0x3a1ca4));
-        originalRemove = reinterpret_cast<Remove>(const_cast<unsigned char*>(base + 0x294724));
-        originalUpdate = reinterpret_cast<Update>(const_cast<unsigned char*>(base + 0x1da094));
+        originalRegister = reinterpret_cast<Register>(base + layout->functions[CyberpunkLayout::Register]);
+        originalRemove = reinterpret_cast<Remove>(base + layout->functions[CyberpunkLayout::Remove]);
+        originalUpdate = reinterpret_cast<Update>(base + layout->functions[CyberpunkLayout::Update]);
         bool okay =
             DetourAttach(reinterpret_cast<PVOID*>(&originalRegister), reinterpret_cast<PVOID>(&registered)) == NO_ERROR;
         okay = DetourAttach(reinterpret_cast<PVOID*>(&originalRemove), reinterpret_cast<PVOID>(&removed)) == NO_ERROR &&

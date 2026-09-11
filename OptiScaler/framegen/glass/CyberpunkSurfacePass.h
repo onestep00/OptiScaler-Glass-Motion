@@ -5,13 +5,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "CyberpunkLayout.h"
 
 namespace GlassFg
 {
-// Version-specific identification of the observed surface-depth consumer pass.
-// Both code fingerprints must be unique in the loaded executable and present
-// in the transition's call stack. No heap address or pipeline pointer is saved.
-// A different executable layout or modified fingerprint leaves FG unmodified.
+// Both instruction patterns must be unique and present in the transition's
+// ordered call stack. Only relative call destinations may relocate; target code
+// sections, remaining bytes and the resource contract must still agree.
 class CyberpunkSurfacePass
 {
     const void* rayDispatchCaller = nullptr;
@@ -30,67 +30,44 @@ class CyberpunkSurfacePass
         0x4f, 0x08, 0x48, 0x8d, 0x55, 0xd0, 0x4d, 0x8b, 0xc4, 0xe8, 0x90, 0x50, 0x58, 0xff, 0x49, 0x8b
     };
 
-    static const void* findUnique(const unsigned char* base, const IMAGE_NT_HEADERS64* nt,
-                                  const unsigned char (&signature)[64])
-    {
-        const void* found = nullptr;
-        const auto* sections = IMAGE_FIRST_SECTION(nt);
-        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
-        {
-            const auto& section = sections[i];
-            if (!(section.Characteristics & IMAGE_SCN_MEM_EXECUTE))
-                continue;
-            const uint64_t endOffset = uint64_t(section.VirtualAddress) + section.Misc.VirtualSize;
-            if (endOffset > nt->OptionalHeader.SizeOfImage || section.Misc.VirtualSize < sizeof(signature))
-                return nullptr;
-            auto begin = base + section.VirtualAddress;
-            const auto end = base + endOffset;
-            while (begin != end)
-            {
-                const auto at = std::search(begin, end, signature, signature + sizeof(signature));
-                if (at == end)
-                    break;
-                if (found)
-                    return nullptr;
-                found = at + 32; // Captured return address within this fingerprint.
-                begin = at + 1;
-            }
-        }
-        return found;
-    }
-
   public:
+    bool resolve(const RelocatableCode& image, const unsigned char* base)
+    {
+        using Target = RelocatableCode::Target;
+        constexpr RelocatableCode::Reference rayRefs[] {
+            { 17, 21, Target::Code }, { 28, 32, Target::Code }, { 40, 44, Target::Code }, { 53, 57, Target::Code }
+        };
+        constexpr RelocatableCode::Reference surfaceRefs[] { { 28, 32, Target::Code },
+                                                             { 38, 42, Target::Code },
+                                                             { 58, 62, Target::Code } };
+        const auto ray = image.uniqueWindow(raySignature, rayRefs);
+        const auto surface = image.uniqueWindow(surfaceSignature, surfaceRefs);
+        rayDispatchCaller = ray && base ? base + ray + 32 : nullptr;
+        surfaceConsumerCaller = surface && base ? base + surface + 32 : nullptr;
+        return ready();
+    }
     bool initialize(HMODULE executable, FILE* log)
     {
         rayDispatchCaller = surfaceConsumerCaller = nullptr;
-        if (!executable)
-            return false;
-        wchar_t path[32768] {};
-        if (!GetModuleFileNameW(executable, path, 32768))
-            return false;
-        const auto* filename = wcsrchr(path, L'\\');
-        if (_wcsicmp(filename ? filename + 1 : path, L"Cyberpunk2077.exe") != 0)
+        MODULEINFO info {};
+        if (!IsCyberpunkExecutable(executable) ||
+            !K32GetModuleInformation(GetCurrentProcess(), executable, &info, sizeof(info)) ||
+            info.lpBaseOfDll != executable)
             return false;
         const auto* base = reinterpret_cast<const unsigned char*>(executable);
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 || dos->e_lfanew > 4096)
+        RelocatableCode image;
+        if (!image.initialize({ base, info.SizeOfImage }))
             return false;
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        // These identify the currently inspected build, not a general version promise.
-        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || nt->FileHeader.TimeDateStamp != 0x68af45ea ||
-            nt->OptionalHeader.SizeOfImage != 0x4efc000 || nt->FileHeader.NumberOfSections == 0 ||
-            nt->FileHeader.NumberOfSections > 96)
-            return false;
-        rayDispatchCaller = findUnique(base, nt, raySignature);
-        surfaceConsumerCaller = findUnique(base, nt, surfaceSignature);
+        resolve(image, base);
         if (log)
-            fprintf(log, "SURFACE_PASS ready=%u ray_caller=%p surface_caller=%p resource_addresses=0\n", ready(),
-                    rayDispatchCaller, surfaceConsumerCaller);
+            fprintf(log,
+                    "SURFACE_PASS ready=%u ray_caller=%p surface_caller=%p relocatable_calls=1 resource_addresses=0\n",
+                    ready(), rayDispatchCaller, surfaceConsumerCaller);
         return ready();
     }
 
     bool ready() const { return rayDispatchCaller && surfaceConsumerCaller; }
+    std::array<const void*, 2> callers() const { return { rayDispatchCaller, surfaceConsumerCaller }; }
 
     bool matchesStack(void* const* stack, unsigned count) const
     {

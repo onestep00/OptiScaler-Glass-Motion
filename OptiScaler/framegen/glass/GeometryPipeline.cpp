@@ -244,9 +244,10 @@ HRESULT GeometryCompiler::create(ID3D12Device* device, const GeometryRoot& root,
         return reject(error, "DXC is unavailable", implementation->status);
     D3D12_BLEND_DESC validatedBlend {};
     if (!device || !root.extended || !root.original || root.original.Get() != original.pRootSignature ||
-        original.NumRenderTargets != 1 || original.SampleDesc.Count != 1 || original.GS.BytecodeLength ||
-        original.HS.BytecodeLength || original.DS.BytecodeLength || original.StreamOutput.NumEntries ||
-        original.StreamOutput.NumStrides || !readOnly(original.DepthStencilState) ||
+        !original.NumRenderTargets || original.NumRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
+        original.SampleDesc.Count != 1 || original.GS.BytecodeLength || original.HS.BytecodeLength ||
+        original.DS.BytecodeLength || original.StreamOutput.NumEntries || original.StreamOutput.NumStrides ||
+        !readOnly(original.DepthStencilState) ||
         original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
         !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend))
         return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
@@ -270,6 +271,8 @@ HRESULT GeometryCompiler::create(ID3D12Device* device, const GeometryRoot& root,
         FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
                                             root.layout)))
         return hr;
+    // Same-draw capture retains every original export/attachment. Extra MRT
+    // slots do not turn the RT0 material equation into a single-target PSO.
     auto modified = original;
     modified.pRootSignature = root.extended.Get();
     modified.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };

@@ -201,4 +201,19 @@ GeometryCreationStats GetGeometryCreationStats()
     }
     return result;
 }
+bool TryGeometryCreationCounters(GeometryCreationStats& result)
+{
+    auto* state = publishedControl.load(std::memory_order_acquire);
+    if (!state)
+        return true;
+    if (auto capture = state->active.load(std::memory_order_acquire))
+    {
+        result.active = true;
+        result.roots = capture->roots.load();
+        result.graphics = capture->graphics.load();
+        result.streams = capture->streams.load();
+        return capture->cache.tryCounters(result.cache);
+    }
+    return true;
+}
 } // namespace GlassFg

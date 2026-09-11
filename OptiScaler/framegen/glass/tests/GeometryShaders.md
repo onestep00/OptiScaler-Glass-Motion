@@ -9,6 +9,8 @@
 
 ## Implemented source
 
+The latest [compatibility checkpoint](../Compatibility.md) adds preservation of actual MRT/dual-source layouts and precise indirect-command root resets. Both MRT GPU fixtures and the public indirect fixture pass. These source fixes do not create a production capture caller or new FG replacement.
+
 `DxilVertexHistory.cpp` rewrites DXC disassembly, which the caller must assemble and validate before creating a pipeline. It preserves the original vertex outputs and records the actual computed clip position in a caller-owned history buffer. A generation and expected-frame tag reject stale or unrelated entries. New varyings expose the previous position and a missing-history flag. This includes transformations and deformations already computed by the original vertex shader; it does not infer motion from scene pixels or duplicate a skinning algorithm.
 
 `RewriteMaterialMotion` preserves the original material computation/discard and emits normalized previous-minus-current motion, mean RGB attenuation, and current device depth into a separate target. Material opacity is derived from the verified destination blend factor; colored transmission becomes `1 - mean(saturate(T.rgb))`. A scalar coefficient cannot fully represent colored/refraction layers. Pixels contributing neither source color nor attenuation are excluded. Invalid history and nonfinite motion are rejected. Original color-output stores are replaced only in this separate diagnostic/capture PSO; this shader must never replace the game's color pixel shader as-is.

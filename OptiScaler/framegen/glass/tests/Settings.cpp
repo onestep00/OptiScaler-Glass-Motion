@@ -13,11 +13,51 @@ void require(bool ok, const char* what)
     if (!ok)
         throw std::runtime_error(what);
 }
+static void healthChecks()
+{
+    GlassFg::GeometryHealth value;
+    value.capabilities = 127;
+    value.sampledMs = 1000;
+    value.counts[GlassFg::GeometryPackets] = 100;
+    value.counts[GlassFg::GeometryCompiled] = 5;
+    value.counts[GlassFg::GeometryPipelineMatches] = 20;
+    value.counts[GlassFg::GeometryBindingMatches] = 10;
+    GlassFg::PublishGeometryHealth(value);
+    auto observed = GlassFg::ReadGeometryHealth();
+    require(!observed.recentlyApplied(1000), "Installed hooks falsely reported FG application");
+    require(std::string(observed.reason(1000)).find("not connected") != std::string::npos,
+            "Capture producer gap hidden");
+    value.sampledMs = 1100;
+    value.counts[GlassFg::GeometryCaptureDraws] = 10;
+    GlassFg::PublishGeometryHealth(value);
+    require(!GlassFg::ReadGeometryHealth().recentlyApplied(1100), "Capture alone reported FG application");
+    value.sampledMs = 1200;
+    value.counts[GlassFg::GeometryFgReplacements] = 3;
+    GlassFg::PublishGeometryHealth(value);
+    observed = GlassFg::ReadGeometryHealth();
+    require(observed.recentlyApplied(1200) && !observed.recentlyApplied(16201), "FG freshness gate");
+    value.sampledMs = 17000;
+    value.counts[GlassFg::GeometryPackets] = 200;
+    GlassFg::PublishGeometryHealth(value);
+    require(std::string(GlassFg::ReadGeometryHealth().reason(17000)).find("matches have stopped") != std::string::npos,
+            "Historical binding matches hid stopped progress");
+    value.counts[GlassFg::GeometryPackets] = 50;
+    GlassFg::PublishGeometryHealth(value);
+    require(GlassFg::ReadGeometryHealth().counts[GlassFg::GeometryPackets] == 200, "Older report regressed counters");
+    static unsigned refreshed = 0;
+    GlassFg::GeometryTelemetry::refresh.store(+[] { ++refreshed; });
+    GlassFg::RefreshGeometryHealthIfNeeded(1000);
+    GlassFg::RefreshGeometryHealthIfNeeded(1500);
+    GlassFg::RefreshGeometryHealthIfNeeded(2000);
+    GlassFg::GeometryTelemetry::refresh.store(nullptr);
+    require(refreshed == 2, "UI refresh is not throttled");
+}
 int wmain(int argc, wchar_t** argv)
 {
     try
     {
         require(argc == 2, "directory required");
+        healthChecks();
         auditDirectory = std::filesystem::absolute(argv[1]);
         require(std::filesystem::create_directory(auditDirectory), "fresh audit directory required");
         auto initial = GlassFg::ReadControls();
@@ -77,7 +117,8 @@ int wmain(int argc, wchar_t** argv)
         auto draw = ImGui::GetDrawData();
         require(draw && draw->TotalVtxCount > 0, "UI empty");
         printf("SETTINGS_OK defaults=1 clamp=1 round_trip=1 unrelated_preserved=1 failed_save_preserves_original=1 "
-               "malformed_fallback=1 imgui_vertices=%d game_files_changed=0\n",
+               "malformed_fallback=1 hook_only_not_applied=1 capture_only_not_applied=1 stale_evidence=1 "
+               "health_refresh_throttled=1 imgui_vertices=%d game_files_changed=0\n",
                draw->TotalVtxCount);
         ImGui::DestroyContext();
         return 0;

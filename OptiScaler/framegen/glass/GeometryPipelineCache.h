@@ -44,6 +44,7 @@ class GeometryPipelineCache
     bool pipelineCreated(ID3D12PipelineState* pipeline, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) noexcept;
     std::shared_ptr<const GeometryPipelineEntry> find(ID3D12PipelineState* original) const;
     GeometryCacheStats stats() const;
+    bool tryCounters(GeometryCacheStats& result) const;
     // May join the compiler thread. Do not call from a render/API callback.
     void stop();
     static bool compilerThread();

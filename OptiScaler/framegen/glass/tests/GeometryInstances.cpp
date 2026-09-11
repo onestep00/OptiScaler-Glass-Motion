@@ -156,12 +156,16 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0)),
-                "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands]");
+        require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0 ||
+                                            wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0)),
+                "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool observed = argc == 4;
-        const bool commands = observed && wcscmp(argv[3], L"--commands") == 0;
+        const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
+        const bool mrt = dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
+        const bool commands = mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
         const std::filesystem::path dir(argv[1]);
-        auto vs = read(dir / "instances.dxil"), ps = read(dir / "fixture-pixel.dxil");
+        auto vs = read(dir / "instances.dxil");
+        auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
         Device g;
         if (commands)
             require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
@@ -192,7 +196,7 @@ int wmain(int argc, wchar_t** argv)
         constexpr UINT Segment = RoiStride * RoiHeight + 32, CapturePixels = 3 * Segment + 32,
                        CaptureBytes = CapturePixels * 32;
         constexpr UINT historyBase[] = { 9, 31, 49 };
-        D3D12_DESCRIPTOR_HEAP_DESC hd { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 5, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
+        D3D12_DESCRIPTOR_HEAP_DESC hd { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 8, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
         ComPtr<ID3D12DescriptorHeap> heap, depthHeap;
         check(g.d->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)));
         hd = { D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
@@ -218,6 +222,24 @@ int wmain(int argc, wchar_t** argv)
             rtvs[i] = { heap->GetCPUDescriptorHandleForHeapStart().ptr + i * increment };
             g.d->CreateRenderTargetView(colors[i].Get(), nullptr, rtvs[i]);
         }
+        std::array<ComPtr<ID3D12Resource>, 2> auxiliary;
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> auxiliaryRtvs;
+        D3D12_CPU_DESCRIPTOR_HANDLE nullRtv { heap->GetCPUDescriptorHandleForHeapStart().ptr + 7 * increment };
+        if (mrt)
+        {
+            for (UINT i = 0; i < auxiliary.size(); ++i)
+            {
+                check(g.d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &texture,
+                                                   D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                                   IID_PPV_ARGS(&auxiliary[i])));
+                auxiliaryRtvs[i] = { heap->GetCPUDescriptorHandleForHeapStart().ptr + (5 + i) * increment };
+                g.d->CreateRenderTargetView(auxiliary[i].Get(), nullptr, auxiliaryRtvs[i]);
+            }
+            D3D12_RENDER_TARGET_VIEW_DESC nullView {};
+            nullView.Format = texture.Format;
+            nullView.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            g.d->CreateRenderTargetView(nullptr, &nullView, nullRtv);
+        }
         auto depthDesc = texture;
         depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
         depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
@@ -237,7 +259,7 @@ int wmain(int argc, wchar_t** argv)
         auto& blend = pd.BlendState.RenderTarget[0];
         blend.BlendEnable = TRUE;
         blend.SrcBlend = D3D12_BLEND_ONE;
-        blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.DestBlend = dual ? D3D12_BLEND_SRC1_COLOR : D3D12_BLEND_INV_SRC_ALPHA;
         blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlendAlpha = D3D12_BLEND_ZERO;
@@ -251,8 +273,10 @@ int wmain(int argc, wchar_t** argv)
         pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
         pd.InputLayout = { layout, 3 };
         pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        pd.NumRenderTargets = 1;
+        pd.NumRenderTargets = mrt ? 3 : 1;
         pd.RTVFormats[0] = texture.Format;
+        if (mrt)
+            pd.RTVFormats[2] = texture.Format;
         pd.DSVFormat = depthDesc.Format;
         pd.SampleDesc.Count = 1;
         ComPtr<ID3D12PipelineState> original, capturePso, streamPso;
@@ -296,7 +320,8 @@ int wmain(int argc, wchar_t** argv)
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
         UINT64 imageBytes;
         g.d->GetCopyableFootprints(&texture, 0, 1, 0, &footprint, nullptr, nullptr, &imageBytes);
-        const UINT64 readBytes = imageBytes * 5 + SOBytes + HistoryBytes + CaptureBytes;
+        const UINT64 auxiliaryOffset = imageBytes * 5 + SOBytes + HistoryBytes + CaptureBytes;
+        const UINT64 readBytes = auxiliaryOffset + (mrt ? 2 * imageBytes : 0);
         auto readback = g.buffer(readBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         g.begin();
         for (auto& h : history)
@@ -313,7 +338,7 @@ int wmain(int argc, wchar_t** argv)
         std::array<Clip, 18> last {};
         std::array<std::vector<char>, 2> priorHistory;
         std::vector<char> priorCapture;
-        UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0;
+        UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0, auxiliaryWritten = 0;
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
@@ -415,6 +440,14 @@ int wmain(int argc, wchar_t** argv)
                                    stream->GetGPUVirtualAddress() };
                 g.c->SOSetTargets(0, 1, &streamView);
                 g.c->OMSetRenderTargets(1, &rtvs[pass], FALSE, &dsv);
+                if (mrt)
+                {
+                    const UINT auxiliaryIndex = pass == 1 ? 1 : 0;
+                    D3D12_CPU_DESCRIPTOR_HANDLE targets[] { rtvs[pass], nullRtv, auxiliaryRtvs[auxiliaryIndex] };
+                    g.c->OMSetRenderTargets(3, targets, FALSE, &dsv);
+                    const float auxiliaryClear[] { .125f, .25f, .375f, .5f };
+                    g.c->ClearRenderTargetView(auxiliaryRtvs[auxiliaryIndex], auxiliaryClear, 0, nullptr);
+                }
                 const float clear[4] {};
                 g.c->ClearRenderTargetView(rtvs[pass], clear, 0, nullptr);
                 if (pass < 2)
@@ -449,6 +482,16 @@ int wmain(int argc, wchar_t** argv)
                 dst.PlacedFootprint.Offset = pass * imageBytes;
                 g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                 g.barrier(colors[pass].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                if (mrt && pass < 2)
+                {
+                    g.barrier(auxiliary[pass].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    src.pResource = auxiliary[pass].Get();
+                    dst.PlacedFootprint.Offset = auxiliaryOffset + pass * imageBytes;
+                    g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                    g.barrier(auxiliary[pass].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                              D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
             }
             g.barrier(stream.Get(), D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
             g.c->CopyBufferRegion(readback.Get(), 5 * imageBytes, stream.Get(), 0, SOBytes);
@@ -470,6 +513,17 @@ int wmain(int argc, wchar_t** argv)
             const auto* bytes = static_cast<const char*>(data);
             require(!memcmp(bytes, bytes + imageBytes, size_t(imageBytes)),
                     "Per-instance capture changed original color/depth/discard");
+            if (mrt)
+            {
+                require(!memcmp(bytes + auxiliaryOffset, bytes + auxiliaryOffset + imageBytes, size_t(imageBytes)),
+                        "Capture changed the original auxiliary MRT");
+                const float clear[] { .125f, .25f, .375f, .5f };
+                for (UINT y = 0; y < H; ++y)
+                    for (UINT x = 0; x < W; ++x)
+                        auxiliaryWritten +=
+                            memcmp(bytes + auxiliaryOffset + y * footprint.Footprint.RowPitch + x * sizeof(clear),
+                                   clear, sizeof(clear)) != 0;
+            }
             exact += W * H;
             require(*reinterpret_cast<const UINT64*>(bytes + 5 * imageBytes) == 18 * sizeof(Clip),
                     "Original SO byte count");
@@ -566,6 +620,13 @@ int wmain(int argc, wchar_t** argv)
         }
         require(checked > 1000 && overlaps > 100, "Insufficient per-object overlap coverage");
         require(recovered > 100, "Inactive object did not recover after fresh history");
+        if (mrt)
+        {
+            require(dual ? auxiliaryWritten == 0 : auxiliaryWritten > 1000,
+                    "Auxiliary MRT coverage or dual-source untouched target changed");
+            printf("PASS mrt_slots=3 dual_source=%u auxiliary_equal_pixels=%llu auxiliary_written=%llu\n", dual, exact,
+                   auxiliaryWritten);
+        }
         if (commands)
         {
             const auto stats = GlassFg::GetGeometryCommandStats();
