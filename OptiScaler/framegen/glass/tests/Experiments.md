@@ -395,3 +395,37 @@ All 98 cumulative jobs retired and all four DLL generations unloaded; pending=0.
 No new object MV or FG correction was applied. Preserve overlap ownership before
 union-based boundary optimization; actual original source indices/history remain
 unresolved. Different captures must not be combined as if frame-correlated.
+
+## Direct group/source-index producer preparation
+
+The audited producer calls its group selector with currentGroup + 0x10 at the
+call returning to RVA 0x1e9cb4. Its later packet-preparation call returns to
+0x1e9dc1 and carries the selected transform descriptor. ExperimentInstanceProducer
+uses an outer callback scope to connect these actual arguments. It does not walk
+the group hash table or select object names/meshes. The prior uncommitted scanning
+draft was replaced by CyberpunkInstanceSelection: three scalar reads (16 bytes)
+per group and one uint16 read per requested original index. These counts exclude
+other diagnostic metadata and are not total runtime latency or MV cost.
+
+InstanceSelection passes reordered 40 entries, one surviving source instance,
+range/global-offset/malformed-range rejection with /W4 /WX. InstanceProducer
+includes the actual callbacks with owned memory and passes nested disabled scope,
+wrong caller, one-use group, frame mismatch and original return checks. Neither
+fixture installs a hook. The new standalone DLL compiles but is NOT deployed.
+
+Its explicit GlassInstanceStart/GlassInstanceSave exports execute outside DllMain.
+The separate diagnostic remains pinned until process exit; stopping recording is
+not DLL unloading and it must not be loaded through the replaceable coverage
+module ABI. A local profile supplies the three complete reviewed code bodies;
+unknown live bytes reject installation. This exact-body diagnostic profile is not
+the final relocation-tolerant production adapter. The profiler makes no GPU copies
+and limits records to 4096 rows with at most 64 source indices each. It observes
+only the grouped producer route at present. Ungrouped arrays, lifecycle/array
+mutation, particle/procedural routes, draw/FG correlation and actual MV remain
+unresolved. A borrowed source index alone never authorizes temporal history.
+
+The user's selected overlap policy is nearest transparent surface first. Current
+priority is real per-object boundary MV across common rendering routes; per-object
+manual discovery and complex overlapping-layer mixing are not implementation
+strategies. Reference: Microsoft's Detours calling convention/transaction contract
+at https://github.com/microsoft/Detours/wiki/Using-Detours .

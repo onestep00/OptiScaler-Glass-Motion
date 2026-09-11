@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [Experiments.md](Experiments.md): Direct current-group/source-index callback preparation; bounded scalar reads and nested-scope fixture pass. Standalone observer not deployed; no object MV.
+
 - [Experiments.md](Experiments.md): Close-angle 40-instance cups captured after raising diagnostic capacity to 64; actual overlap up to five slots. Union/reference exact; no new MV or FG correction.
 
 - [Experiments.md](Experiments.md): Single visible instances of CPU/global clusters reject proxy-only history in production callback fixture. 19 appends/12 flushes remain forwarded; source guard not deployed.
