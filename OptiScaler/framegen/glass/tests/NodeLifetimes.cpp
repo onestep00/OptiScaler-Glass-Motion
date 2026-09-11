@@ -64,6 +64,24 @@ int main()
     require(sourceOwners.size() == 0 && forwarded == 3 && released == 2 && active == 0);
     mesh[0x1f0 / 8] = 0x123456; create();
     require(query(address(fixtureProxy), 0x123456, 13, &result) == 1);
+    fixtureProxy[0x108 / 8] = 0x60000; fixtureProxy[0x110 / 8] = 13;
+    GlassFg::CyberpunkSourceCandidate candidate {address(instance), address(node), 0, address(shared), 0,
+        address(fixtureHandle), address(fixtureProxy), address(mesh), 107, 13, 0, 0};
+    sourceOwners.destroyed(address(fixtureHandle), address(fixtureProxy));
+    { LifecycleScope inFlight; require(!seedSource(candidate)); }
+    bool interrupted = false;
+    require(!seedSource(candidate, [&](std::uint64_t where, void* destination, unsigned bytes) {
+        if (!interrupted) { interrupted = true; LifecycleScope event; }
+        return read(where, destination, bytes);
+    }));
+    require(seedSource(candidate) && sourceSeeded == 1);
+    const auto seededGeneration = sourceOwners.find(address(fixtureProxy), 0x123456).generation;
+    require(seedSource(candidate) && sourceSeeded == 1 &&
+            sourceOwners.find(address(fixtureProxy), 0x123456).generation == seededGeneration);
+    fixtureProxy[0x108 / 8] = 0;
+    require(seedSource(candidate) && sourceSeeded == 1 &&
+            sourceOwners.find(address(fixtureProxy), 0x123456).generation == seededGeneration);
+    ++candidate.nodeControl; require(!seedSource(candidate)); --candidate.nodeControl;
     originalDestroy = [](void*) {};
     destroy(reinterpret_cast<void*>(1));
     require(!sourceHealthy && query(address(fixtureProxy), 0x123456, 13, &result) == 0 && !result.generation);
@@ -71,5 +89,6 @@ int main()
     std::cout << "PASS source_publication=1 cancellation_before_release=1 same_address_reuse=1 "
                  "stopped_csv_tracking=1 typed_mesh_rejection=1 transform_copies=0 "
                  "query_abi=1 query_after_destruction_rejected=1 missed_lifecycle_disables_query=1 "
+                 "bootstrap_current_chain=1 bootstrap_inflight_rejected=1 bootstrap_epoch_rejected=1 null_transient_pointer=1 "
                  "live_engine=0 object_motion_produced=0\n";
 }

@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Existing-source bootstrap and producer/draw correspondence observed without restart. Null transient pointer no longer rejects owner metadata; MV/FG remain incomplete.
+
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.

@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [SourceBootstrap.md](SourceBootstrap.md): Same-process registration admits 3,930 sources; simultaneous census joins 2,144 ranges. No new MV/FG input or complete lifecycle/view proof.
+
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.

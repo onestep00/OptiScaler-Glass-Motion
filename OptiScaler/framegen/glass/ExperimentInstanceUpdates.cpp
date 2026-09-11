@@ -6,6 +6,7 @@
 #define GLASS_NODE_GROUP
 #include "GeometrySourceOwners.h"
 #include "ExperimentSourceAbi.h"
+#include "CyberpunkSourceBootstrap.h"
 #endif
 #include <atomic>
 #include <cstdint>
@@ -31,6 +32,17 @@ GlassFg::GeometrySourceOwners<131072> sourceOwners;
 std::mutex sourceMutex;
 std::atomic<std::uint64_t> sourceCreated = 0, sourceDestroyed = 0, sourceRejected = 0;
 std::atomic<bool> sourceReady = false, sourceHealthy = true;
+std::atomic<std::uint64_t> lifecycleEpoch = 0, sourceSeeded = 0;
+std::atomic<unsigned> lifecycleActive = 0;
+struct LifecycleScope
+{
+    LifecycleScope()
+    {
+        ++lifecycleActive;
+        if (lifecycleEpoch.fetch_add(1) == UINT64_MAX) sourceHealthy = false;
+    }
+    ~LifecycleScope() { --lifecycleActive; }
+};
 #else
 constexpr unsigned profileMagic = 0x49555034;
 #endif
@@ -78,6 +90,7 @@ bool read(std::uint64_t address, void* data, unsigned bytes) noexcept
 // Never hold the cache lock while executing engine code (which may reenter).
 void destroy(void* handle)
 {
+    LifecycleScope lifecycle;
     std::uint64_t proxy = 0;
     const auto address = reinterpret_cast<std::uint64_t>(handle);
     if (address >= 0x10000 && address <= 0x7fffffffffffULL - 24 && read(address + 16, &proxy, 8))
@@ -101,6 +114,7 @@ EnqueueResult enqueue(void* a, float distance, void* b, void* bounds)
     active.fetch_add(1, std::memory_order_acq_rel);
     const bool capture = recording.load(std::memory_order_acquire);
 #ifdef GLASS_NODE_LIFETIME
+    LifecycleScope lifecycle;
     // Lifetimes must keep tracking when the bounded CSV recording stops.
     const bool observe = true;
 #else
@@ -300,8 +314,54 @@ bool install()
     return true;
 #endif
 }
+#ifdef GLASS_NODE_LIFETIME
+template <typename Read = decltype(&read)>
+bool seedSource(const GlassFg::CyberpunkSourceCandidate& candidate, Read readSource = read)
+{
+    if (!sourceReady || !sourceHealthy) return false;
+    const auto epoch = lifecycleEpoch.load();
+    if (lifecycleActive.load()) return false;
+    GlassFg::CyberpunkSourceSnapshot first, second;
+    if (!GlassFg::ReadCyberpunkSourceCandidate(candidate, first, readSource) ||
+        !GlassFg::ReadCyberpunkSourceCandidate(candidate, second, readSource) || first != second) return false;
+    std::lock_guard lock(sourceMutex);
+    if (!sourceHealthy || lifecycleActive.load() || lifecycleEpoch.load() != epoch) return false;
+    const auto existing = sourceOwners.find(first.proxy, first.source.mesh);
+    const auto& s = first.source;
+    if (existing && existing.source.node == s.node && existing.source.buffer == s.buffer &&
+        existing.source.first == s.first && existing.source.count == s.count) return true;
+    if (!sourceOwners.created(first.handle, first.proxy, {s.node, s.buffer, s.mesh, s.first, s.count})) return false;
+    ++sourceSeeded;
+    return true;
+}
+#endif
 }
 #ifdef GLASS_NODE_LIFETIME
+extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSeed(void* filePath)
+{
+    try
+    {
+        std::lock_guard lock(control);
+        if (!filePath || !sourceReady || !sourceHealthy) return 1;
+        const std::filesystem::path path(static_cast<const wchar_t*>(filePath));
+        if (!path.is_absolute()) return 2;
+        std::ifstream file(path, std::ios::binary);
+        std::array<unsigned, 2> header {};
+        if (!file.read(reinterpret_cast<char*>(header.data()), sizeof(header)) ||
+            header[0] != 0x53454531 || !header[1] || header[1] > 4096) return 3;
+        std::vector<GlassFg::CyberpunkSourceCandidate> candidates(header[1]);
+        if (!file.read(reinterpret_cast<char*>(candidates.data()), candidates.size() * sizeof(candidates[0])) ||
+            file.peek() != std::char_traits<char>::eof()) return 4;
+        unsigned accepted = 0;
+        for (const auto& candidate : candidates) accepted += seedSource(candidate);
+        auto report = path; report += L".result";
+        std::ofstream result(report);
+        result << "candidates=" << candidates.size() << "\naccepted=" << accepted
+               << "\nseeded_total=" << sourceSeeded.load() << "\ntransform_copies=0\nmotion_produced=0\n";
+        result.close(); return result ? 0 : 5;
+    }
+    catch (...) { return 6; }
+}
 extern "C" __declspec(dllexport) std::int32_t GlassSourceOwnerQuery(
     std::uint64_t proxy, std::uint64_t mesh, std::uint32_t originalCount,
     GlassExperimentSourceOwner* result)

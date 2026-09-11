@@ -1,0 +1,62 @@
+# Existing source-owner bootstrap
+
+- Created: 2026-09-11
+- Updated: 2026-09-11
+- Status: diagnostic bootstrap and same-frame draw correspondence observed live
+- Deployment: standalone diagnostics in PID 70152; production MV/FG unchanged
+- Deprecated: no
+- Scope: bounded candidates from previously observed node creations, not all-world enumeration
+
+`CyberpunkSourceBootstrap.h` revalidates each recorded node/definition/shared
+handle, renderer handle, typed mesh, original source range and instance count.
+Two equal metadata reads and an unchanged lifecycle epoch are required. An
+active creation/destruction callback rejects admission; that scope includes the
+original engine callback. The cache publishes scalar metadata under its lock.
+Repeated registration of the same admitted source retains its serial. This does
+not prove unobserved source mutations, complete lifecycle coverage, view ordering,
+or consecutive-frame GPU history. No transform content is copied or returned.
+
+`GlassInstanceSeed` reads at most 4,096 candidates once on explicit diagnostic
+request. Its binary header is magic 0x53454531 and count, followed by 80-byte
+candidate records; trailing data is rejected. No file is read per frame. The
+fixture covers in-flight events, an event between snapshots, changed controls,
+same-source re-registration, and a null transient transform pointer.
+
+## Live result
+
+The first bootstrap rejected every candidate. A bounded read-only check found
+2,254 matching current chains whose proxy+0x108 pointers were all zero. Requiring
+that pointer to be nonzero incorrectly coupled source-owner registration to
+transform availability. It is now only snapshotted, never dereferenced. This
+does not authorize null/stale transform inputs for MV.
+
+The revised DLL admitted 3,930 of 4,096 candidates without restarting PID 70152.
+Save reported 189 destructor callbacks, no rejected lifecycle reads, 3,930 live
+entries, ready=1 and healthy=1. The already-loaded producer was retargeted through
+its `.source` sidecar while stopped. A new interval recorded 20,747 source rows;
+15,312 had owner metadata, spanning 2,194 proxies/nodes and six engine frames.
+
+A subsequent simultaneous producer/census capture joined exact frame, render
+mesh and global transform slots. All instances in 2,144 anonymous draw ranges
+resolved to owner/source metadata (10,982 instance occurrences). There were zero
+conflicting source keys. Another 4,043 ranges had no owned overlap. This bounded
+capture is not an all-transparency coverage count or a view/history admission.
+No new object MV or FG input was produced.
+
+The census-only module was unloaded; no GPU jobs were recorded or pending.
+Standalone owner modules remain pinned with lifecycle forwarding active and CSV
+recording stopped. Current-process chained profiles are diagnostic artifacts,
+not reusable production signatures or a design for unbounded hook stacking.
+
+Local evidence: `work/glass-source-bootstrap-live-v{1,2}/`, especially
+`candidates.bin.result`, `capture/{owners,source-query}.txt`,
+`producer-capture/analysis.json`, and
+`work/glass-node-draw-census-v6/capture/owned-source-join.json`.
+The independent `NodeLifetimes` build/test used `/O2 /W4 /WX` and passed.
+
+## Next integration constraint
+
+Consume this correspondence in the ordered rendering path, then verify actual
+current/previous geometry and material coverage. Source-array mutation, omitted
+creation routes, view/submission identity and GPU resource lifetime remain
+required checks. Never substitute an older available frame for missing N-1.
