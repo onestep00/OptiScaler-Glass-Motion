@@ -17,7 +17,7 @@ int wmain(int argc, wchar_t** argv)
         const auto dir = std::filesystem::canonical(argv[1]);
         const auto a = dir / "experiment-a.dll", b = dir / "experiment-b.dll";
         GlassFg::ExperimentRuntime runtime;
-        GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI, 3, nullptr };
+        GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI, 11, nullptr };
         const auto revisionA = runtime.replace(a, host);
         auto frameA = runtime.beginFrame(41, 3);
         GlassExperimentEvent call { sizeof(call), GlassExperimentFg, 41, 1, 3, 0, 0, nullptr };
@@ -56,8 +56,22 @@ int wmain(int argc, wchar_t** argv)
         blocked = {}; frameB = {};
         require(runtime.collect() == 2, "Stopped modules not retired");
         require(!GetModuleHandleW(a.c_str()) && !GetModuleHandleW(b.c_str()), "Module residue after completed CPU use");
+        runtime.replace(a, host);
+        require(runtime.censusEnabled(), "Active census capability missing");
+        HANDLE censusEvents[] { CreateEventW(nullptr, FALSE, FALSE, nullptr), CreateEventW(nullptr, FALSE, FALSE, nullptr) };
+        require(censusEvents[0] && censusEvents[1], "Census test events");
+        GlassExperimentEvent census { sizeof(census), GlassExperimentCensus, 0, 0, 0, 99, sizeof(censusEvents), censusEvents };
+        std::thread observer([&] { require(runtime.observe(census) == 1, "Executing census generation changed"); });
+        require(WaitForSingleObject(censusEvents[0], 10000) == WAIT_OBJECT_0, "Census did not enter");
+        runtime.replace(b, host);
+        require(runtime.collect() == 0 && GetModuleHandleW(a.c_str()), "Executing census DLL unloaded");
+        runtime.disable(); require(!runtime.censusEnabled() && runtime.observe(census) == -1, "Disabled census admitted");
+        require(runtime.collect() == 1 && GetModuleHandleW(a.c_str()), "Disabled executing census released");
+        SetEvent(censusEvents[1]); observer.join();
+        CloseHandle(censusEvents[0]); CloseHandle(censusEvents[1]);
+        require(runtime.collect() == 1 && !GetModuleHandleW(a.c_str()), "Completed census not released");
         puts("PASS dynamic_dll_a_b_a=1 phase_generation_fixed=1 failed_prepare_rollback=1 wrong_abi_rejected=1 "
-             "inflight_cpu_retained=1 unloaded_after_release=1 game_hooks=0 gpu_completion_tested=0");
+             "inflight_cpu_retained=1 unframed_census_retained=1 unloaded_after_release=1 game_hooks=0 gpu_completion_tested=0");
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "FAIL %s\n", error.what()); return 1; }

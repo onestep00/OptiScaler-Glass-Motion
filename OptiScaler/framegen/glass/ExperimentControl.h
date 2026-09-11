@@ -1,5 +1,6 @@
 #pragma once
 #include "ExperimentCaptureOwner.h"
+#include "ExperimentCensusBridge.h"
 #include <fstream>
 #include <string>
 
@@ -28,11 +29,16 @@ class ExperimentControl
     };
     std::filesystem::path directory;
     ExperimentRuntime runtime;
+    ExperimentCensusObserver census { &runtime,
+        [](void* p) noexcept { return static_cast<ExperimentRuntime*>(p)->censusEnabled(); },
+        [](void* p, const GlassExperimentEvent& e) noexcept
+        { try { static_cast<ExperimentRuntime*>(p)->observe(e); } catch (...) {} } };
     Event requested, responded, changed;
     ExperimentCaptureOwner owner;
     GlassExperimentHost host;
     uint64_t unloaded = 0, commands = 0;
     bool (*submissionReady)() = nullptr;
+    bool censusRegistered = false;
 
     void collect()
     {
@@ -50,6 +56,7 @@ class ExperimentControl
              << "\ncapture_pending=" << capture.pending << "\ncapture_recorded=" << capture.recorded
              << "\ncapture_retired=" << capture.retired << "\naccepting=" << capture.accepting
              << "\nsubmission_observer_ready=" << (!submissionReady || submissionReady())
+             << "\ncensus_observer_ready=" << censusRegistered
              << "\ntarget_view_hooks=" << views.active << "\ntarget_view_healthy=" << views.healthy
              << "\ntarget_view_lookups=" << views.lookups << "\ntarget_view_misses=" << views.misses
              << "\ncommands=" << commands << "\nfg_connected=0\n";
@@ -76,6 +83,7 @@ class ExperimentControl
             ++commands;
             if (command == "load")
             {
+                if (!censusRegistered) throw std::runtime_error("Census observer is owned by another host");
                 if (submissionReady && !submissionReady())
                     throw std::runtime_error("Native GPU submission observer is not ready; capture not started");
                 runtime.replace(std::filesystem::path(std::u8string(path.begin(), path.end())), host);
@@ -95,12 +103,16 @@ class ExperimentControl
     ExperimentControl(ID3D12Device* device, const std::filesystem::path& output, bool (*ready)() = nullptr)
         : directory(output), requested(prefix() + L".Request"), responded(prefix() + L".Response"),
           owner(runtime, device, changed.value),
-          host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentCapture, device }, submissionReady(ready)
+          host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentCapture | GlassExperimentCensus, device }, submissionReady(ready)
     {
         if (!directory.is_absolute() || !std::filesystem::is_directory(directory))
             throw std::runtime_error("Invalid experiment control directory");
         owner.stop();
         if (!RegisterGeometryDrawCapture(&owner)) throw std::runtime_error("Another capture owner is already registered");
+        // After capture registration this object must remain process-resident,
+        // even if another observer owns the census slot. Report/reject load;
+        // never throw and destroy an already-published capture owner.
+        censusRegistered = RegisterExperimentCensus(&census);
     }
     // Test shutdown leaves this registered process-resident object alive. No
     // module/owner destructor runs while the host can still forward callbacks.

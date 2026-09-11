@@ -29,6 +29,7 @@ class ExperimentRuntime
     };
     std::array<std::shared_ptr<Module>, 3> slots;
     std::atomic<std::shared_ptr<Module>> active;
+    std::atomic<uint64_t> activeCapabilities = 0;
     DWORD controlThread = GetCurrentThreadId();
     uint64_t generation = 0;
     void control() const
@@ -98,9 +99,22 @@ class ExperimentRuntime
         if (!frame || !phases || phases > 3) return {};
         return Frame(active.load(), frame, phases);
     }
+    bool censusEnabled() const noexcept
+    { return (activeCapabilities.load(std::memory_order_acquire) & GlassExperimentCensus) != 0; }
+    // CPU-only events need no invented engine/FG frame or GPU lease. The local
+    // shared reference pins code through the callback; collection is on control.
+    int32_t observe(const GlassExperimentEvent& event) const
+    {
+        if (event.size != sizeof(event) || event.kind != GlassExperimentCensus || event.phase || event.phaseCount ||
+            (event.payloadBytes && !event.payload)) return -1;
+        const auto module = active.load();
+        if (!module || !(module->api.capabilities & GlassExperimentCensus)) return -1;
+        return module->api.event(module->context, &event);
+    }
     void disable()
     {
         control();
+        activeCapabilities.store(0, std::memory_order_release);
         active.store({});
     }
     struct Status { uint64_t active = 0; unsigned loaded = 0; };
@@ -155,6 +169,7 @@ class ExperimentRuntime
         candidate->generation = ++generation;
         *available = candidate;
         active.store(std::move(candidate));
+        activeCapabilities.store(api->capabilities, std::memory_order_release);
         return generation;
     }
 };

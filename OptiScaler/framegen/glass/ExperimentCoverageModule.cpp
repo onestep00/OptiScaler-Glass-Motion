@@ -1,5 +1,7 @@
 // Build as a separate DLL, never into the resident OptiScaler binary.
 #include "ExperimentCaptureAbi.h"
+#include "ExperimentCensusLog.h"
+#include "ExperimentCaptureSelection.h"
 #include "GeometryPipeline.h"
 #include "DxilVertexHistory.h"
 #include <windows.h>
@@ -70,6 +72,9 @@ class Coverage
     std::condition_variable changed;
     bool stopping = false;
     std::thread worker;
+    ExperimentCensusLog census;
+    ExperimentCaptureSelection selection;
+    uint64_t selectionAccepted = 0, selectionRejected = 0;
     std::array<Slot, SlotCount> slots;
     struct Selection { uint64_t pipeline; unsigned width, height, instances; };
     std::array<Selection, MaxCaptures> selected {};
@@ -261,8 +266,8 @@ class Coverage
         }
     }
   public:
-    Coverage(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o)
-        : device(d), compiler(std::move(c)), output(std::move(o))
+    Coverage(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o, ExperimentCaptureSelection select)
+        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select)
     {
         if (!d || !compiler.is_absolute() || !std::filesystem::is_regular_file(compiler) || !output.is_absolute() ||
             !std::filesystem::create_directory(output)) throw std::runtime_error("Invalid capture module paths");
@@ -272,9 +277,14 @@ class Coverage
     {
         { std::lock_guard lock(mutex); stopping = true; }
         changed.notify_one(); if (worker.joinable()) worker.join();
+        try { census.save(output); }
+        catch (const std::exception& error) { std::ofstream(output / "errors.txt", std::ios::app) << error.what() << '\n'; }
+        std::ofstream(output / "selection.status") << "enabled=" << selection.enabled << "\nmatched=" << selectionAccepted
+            << "\nrejected=" << selectionRejected << "\nobject_motion_produced=0\n";
     }
     int32_t event(const GlassExperimentEvent& event)
     {
+        if (event.kind == GlassExperimentCensus) return census.observe(event);
         if (event.kind != GlassExperimentCapture || event.payloadVersion != GLASS_EXPERIMENT_CAPTURE_VERSION ||
             event.payloadBytes != sizeof(GlassExperimentCaptureInput) || !event.payload) return -1;
         const auto& request = *static_cast<const GlassExperimentCaptureInput*>(event.payload);
@@ -309,6 +319,8 @@ class Coverage
             !d->instances || d->instances > MaxInstances || !d->objectAt || !d->meshShape || d->objectCount > 4096 ||
             !d->pipelineIdentity || !d->pipelineAccess.retain || !d->pipelineAccess.view || !d->pipelineAccess.release)
             return 0;
+        if (!selection.matches(*d)) { ++selectionRejected; return 0; }
+        ++selectionAccepted;
         for (unsigned i = 0; i < 4; ++i)
             if (!std::isfinite(d->viewport[i]) || d->viewport[i] < 0 || d->viewport[i] > 32768 ||
                 float(unsigned(d->viewport[i])) != d->viewport[i]) return 0;
@@ -396,14 +408,20 @@ int32_t create(const GlassExperimentHost* host, void** context)
         if (!length || length >= 32768) return -1;
         auto config = std::filesystem::path(path); config.replace_extension(L".config");
         if (std::filesystem::file_size(config) > 262144) return -1;
-        std::ifstream file(config); std::string compiler, output;
+        std::ifstream file(config); std::string compiler, output, select;
         if (!std::getline(file, compiler) || !std::getline(file, output)) return -1;
         if (!compiler.empty() && compiler.back() == '\r') compiler.pop_back();
         if (!output.empty() && output.back() == '\r') output.pop_back();
         if (compiler.starts_with("\xef\xbb\xbf")) compiler.erase(0, 3);
+        if (std::getline(file, select))
+        {
+            if (!select.empty() && select.back() == '\r') select.pop_back();
+            if (file.peek() != std::char_traits<char>::eof()) return -1;
+        }
         *context = new Coverage(static_cast<ID3D12Device*>(host->device),
             std::filesystem::path(std::u8string(compiler.begin(), compiler.end())),
-            std::filesystem::path(std::u8string(output.begin(), output.end())));
+            std::filesystem::path(std::u8string(output.begin(), output.end())),
+            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()));
         return 0;
     }
     catch (...) { return -1; }
@@ -414,7 +432,7 @@ int32_t event(void* context, const GlassExperimentEvent* value)
     catch (...) { return -1; }
 }
 void destroy(void* context) { delete static_cast<Coverage*>(context); }
-const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI, GlassExperimentCapture, create, event, destroy };
+const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI, GlassExperimentCapture | GlassExperimentCensus, create, event, destroy };
 }
 extern "C" __declspec(dllexport) const GlassExperimentApi* GlassExperimentQuery() { return &api; }
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)

@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/Experiments.md](tests/Experiments.md): Raw indexed/nonindexed/indirect census and same-process target/mesh/proxy selection pass independent GPU tests, including missing packets. Not deployed; actual object contours/MV/FG and in-flight owner replacement remain incomplete.
+
 - [tests/GeometryTargets.md](tests/GeometryTargets.md): Public RTV/DSV creation/copy and OM-time snapshots preserve resource/subresource metadata without retaining textures. Independent hooks/ABI/module outputs pass; not deployed. Full draw census and live contours/MV/FG remain incomplete.
 
 - [tests/Experiments.md](tests/Experiments.md): Event control, two independently prepared DLL generations, original color, admission rejection and unload pass GPU checks. Opt-in game startup compiles, not deployed. Live contour/MV/FG and in-flight owner replacement remain incomplete.

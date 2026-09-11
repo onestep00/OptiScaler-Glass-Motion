@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: event-controlled worker replacement/capture passes independent GPU checks; game startup integration compiled, not deployed
+- Status: event control, raw draw census and targeted module recapture pass independent GPU checks; not deployed
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -27,7 +27,67 @@ The payload does not authorize GPU recording or arbitrary retained pointers. Mis
 or compiled pipeline data stays explicit; descriptor handles do not establish
 resource lifetime, view identity or FG correlation. The observer is invoked only
 for direct indexed draws with an engine packet and tracked command recording;
-it does not yet census missing packets or all rendering families.
+the separate census path below also observes missing packets, non-indexed and indirect calls.
+
+## Raw draw census and targeted recapture
+
+Capability 8 / `ExperimentCensusAbi.h` version 1 observes the original indexed,
+non-indexed and ExecuteIndirect call before capture insertion. An absent engine
+packet or compiled capture pipeline does not exclude the call. Untracked command
+recordings remain zero; an unknown engine frame remains zero. Viewport, scissor
+and OM target evidence survive independently when complete raster admission fails.
+The CPU sequence is not GPU execution order, and indirect arguments are not read.
+`max_commands` and the optional count-buffer identity retain the original API
+contract: without a count buffer that is the declared operation count; with one
+it is an upper bound. Neither establishes an instance count or executed geometry.
+See Microsoft's [DrawInstanced](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-drawinstanced)
+and [ExecuteIndirect](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-executeindirect) contracts.
+
+`ExperimentRuntime::observe` pins the active DLL only for this CPU callback and
+does not require an invented FG frame lease. Capture/FG recording leases remain
+separate. The inactive path checks an atomic capability flag before constructing
+the extra metadata. The runtime test verifies replacement and disable during a
+blocked census callback, with actual unload only after the callback returns.
+
+The replaceable module allocates 32,768 fixed CPU rows once at creation. Each row
+copies scalar draw metadata, nine target POD records and at most 32 original object
+entries, including zero identities. No GPU buffer or shader bytes are copied by
+the census. Contention/overflow and saved/original object-entry counts expose
+omissions. It saves `draw-census.csv`, `.targets.bin`, `.objects.csv` and `.done`
+when the retired module is destroyed. Raw COM addresses are observations only.
+The target binary has nine `GlassExperimentTarget` records per CSV row. These
+diagnostic buffers are not a production frame cache. Full render-pass/bundle,
+unmatched shader provenance and actual game submission/frame linkage remain gaps.
+
+An optional third `.config` line selects subsequent original draws from a census
+in the same process, without rebuilding/restarting the host:
+
+```text
+select-v1 PID pipelineIdentity targetBinding targetResource mesh chunk indices instances startIndex baseVertex startInstance proxy
+```
+
+Fields are decimal; targetBinding 0..7 selects an RTV, 8 selects the DSV. All fields
+match exactly, except proxy zero disables the optional object-entry membership
+filter. A nonzero proxy also requires matching mesh and a valid generation. These
+are diagnostic selection criteria, not proof of unique object ownership or stable
+view identity. Refresh from a new census after restart/resource recreation. Invalid
+syntax/PID rejects module creation, preserving the previous active module. The
+selection cannot manufacture missing engine mappings or turn an unsupported PSO
+into a capturable one. `selection.status` distinguishes matched/rejected prepares.
+Without this line the preceding first-per-pipeline/size/instance sampler remains;
+it must not be interpreted as complete object coverage.
+
+`--controlled-recorder` saves 56 raw calls across two generations: 40 indexed
+(8 without engine packets), 8 zero-vertex direct and 8 indirect fixture operations.
+Their actual target IDs and original arguments remain intact. Generation two
+uses an exact target/mesh/argument/proxy filter and rejects other draws while
+producing the same reference capture. Original 143,360 pixels and 107,520 material
+samples pass; no game objects or new MV are produced. The existing capture-module
+mode also preserves 3,563 shader-MV samples. Full Release compilation passes.
+
+The test still drains the GPU before manually forwarding submissions. Actual
+queue-observer delivery and in-flight replacement through this capture owner
+must pass before deployment. The earlier four-pixel game failure is unresolved.
 
 Draw payload version 2 introduced `ExperimentPipelineAbi.h` / `ExperimentPipelineService.h`.
 An explicit opaque token retains the existing immutable pipeline-cache entry.

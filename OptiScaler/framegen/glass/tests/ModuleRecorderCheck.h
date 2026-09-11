@@ -5,10 +5,15 @@
 #include <vector>
 #include <future>
 #include <thread>
+#include <sstream>
 
 class ModuleRecorderCheck
 {
     GlassFg::ExperimentRuntime runtime;
+    GlassFg::ExperimentCensusObserver census { &runtime,
+        [](void* p) noexcept { return static_cast<GlassFg::ExperimentRuntime*>(p)->censusEnabled(); },
+        [](void* p, const GlassExperimentEvent& e) noexcept
+        { try { static_cast<GlassFg::ExperimentRuntime*>(p)->observe(e); } catch (...) {} } };
     GlassFg::ExperimentCaptureOwner* owner = nullptr;
     std::filesystem::path loaded;
     std::vector<std::filesystem::path> loadedPaths;
@@ -16,6 +21,7 @@ class ModuleRecorderCheck
     ID3D12Device* observedDevice = nullptr;
     unsigned generations = 0, unloaded = 0;
     bool controlled = false;
+    std::string selection;
     HANDLE shutdown = nullptr;
     std::thread controller;
     std::filesystem::path controlDirectory;
@@ -23,6 +29,11 @@ class ModuleRecorderCheck
     static bool readyForCapture() { return submissionReady.load(); }
   public:
     void useControl() { controlled = true; }
+    void selectNext(uint64_t pipeline, uint64_t target)
+    {
+        selection = "select-v1 " + std::to_string(GetCurrentProcessId()) + " " + std::to_string(pipeline) +
+            " 0 " + std::to_string(target) + " 2 0 6 3 0 2 7 1";
+    }
     std::filesystem::path start(ID3D12Device* device, const std::filesystem::path& artifacts,
                                  const std::filesystem::path& compiler)
     {
@@ -40,8 +51,9 @@ class ModuleRecorderCheck
             const auto utf8 = path.u8string();
             file.write(reinterpret_cast<const char*>(utf8.data()), std::streamsize(utf8.size())); file << '\n';
         }
+        if (!selection.empty()) file << selection << '\n';
         file.close(); require(bool(file), "Module recorder config write");
-        const GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentCapture, device };
+        const GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentCapture | GlassExperimentCensus, device };
         if (controlled)
         {
             if (!controller.joinable())
@@ -80,6 +92,7 @@ class ModuleRecorderCheck
         {
             owner = new GlassFg::ExperimentCaptureOwner(runtime, device);
             require(GlassFg::RegisterGeometryDrawCapture(owner), "Module recorder owner registration");
+            require(GlassFg::RegisterExperimentCensus(&census), "Module census registration");
         }
         return output;
     }
@@ -110,6 +123,54 @@ class ModuleRecorderCheck
         }
         require(unloaded == generations, "Module recorder did not retire");
         for (const auto& path : loadedPaths) require(!GetModuleHandleW(path.c_str()), "Recorder DLL remained loaded");
+        unsigned indexed = 0, missing = 0, direct = 0, indirect = 0;
+        for (const auto& path : loadedPaths)
+        {
+            const auto output = path.parent_path() / "capture";
+            std::ifstream done(output / "draw-census.done");
+            const std::string status((std::istreambuf_iterator<char>(done)), {});
+            require(status.find("rows=28\n") != std::string::npos && status.find("contended=0\n") != std::string::npos &&
+                    status.find("overflow=0\n") != std::string::npos, "Census dropped fixture draws");
+            require(std::filesystem::file_size(output / "draw-census.targets.bin") ==
+                    28 * 9 * sizeof(GlassExperimentTarget), "Census target row size mismatch");
+            std::ifstream csv(output / "draw-census.csv"); std::string line;
+            std::getline(csv, line); uint64_t prior = 0;
+            while (std::getline(csv, line))
+            {
+                std::istringstream values(line); std::vector<std::string> fields; std::string field;
+                while (std::getline(values, field, ',')) fields.push_back(field);
+                require(fields.size() == 57, "Census columns incomplete");
+                const auto value = [&](unsigned i) { return std::stoull(fields.at(i)); };
+                require(value(0) > prior && value(3) && value(4) && value(6) && value(8), "Census order/bindings absent");
+                prior = value(0);
+                require(value(56) == value(11), "Borrowed object entry copy incomplete");
+                require(value(17) == 7 && value(18) == 1 && value(20) == 1 && value(21) && value(38) && value(54),
+                        "Census lost actual raster/target resource bindings");
+                if (value(1) == GlassCensusIndexed)
+                {
+                    ++indexed;
+                    if (!value(11)) { ++missing; require(!value(2), "Missing packet invented frame"); }
+                    else require(value(2) >= 1 && value(2) <= 8, "Mapped census frame absent");
+                }
+                else
+                {
+                    require(!value(2) && !value(11), "Non-indexed observation invented engine identity");
+                    if (value(1) == GlassCensusInstanced) { ++direct; require(!value(12) && value(13) == 1, "Raw vertex args lost"); }
+                    else
+                    {
+                        require(value(1) == GlassCensusIndirect && !value(12) && !value(13) && value(22) &&
+                                value(23) == 1 && value(24), "Indirect upper bound lost or invented draw count");
+                        ++indirect;
+                    }
+                }
+            }
+        }
+        require(indexed == 40 && missing == 8 && direct == 8 && indirect == 8, "Census operation coverage mismatch");
+        std::ifstream filter(loadedPaths.back().parent_path() / "capture" / "selection.status");
+        const std::string filterStatus((std::istreambuf_iterator<char>(filter)), {});
+        require(filterStatus.find("enabled=1\n") != std::string::npos && filterStatus.find("matched=0\n") == std::string::npos &&
+                filterStatus.find("rejected=0\n") == std::string::npos, "Targeted module did not filter original draws");
+        printf("PASS raw_census=56 indexed=40 missing_packets=8 nonindexed=8 indirect=8 gpu_copies=0 game_objects=0\n");
     }
     ~ModuleRecorderCheck()
     {

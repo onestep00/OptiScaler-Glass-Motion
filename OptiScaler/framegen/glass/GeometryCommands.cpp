@@ -3,6 +3,7 @@
 #include "GeometryCreation.h"
 #include "GeometryDrawCapture.h"
 #include "ExperimentDrawBridge.h"
+#include "ExperimentCensusBridge.h"
 #include "CyberpunkDraws.h"
 #include "CommandLifetime.h"
 #include "IndirectBindings.h"
@@ -238,6 +239,66 @@ HRESULT WINAPI close(Command* command)
             r->open = false;
     return result;
 }
+void censusDraw(const ExperimentCensusObserver& observer, Command* command, Record* record,
+                GlassExperimentCensusInput& input, const GeometryDrawView& draw,
+                const GeometryIndexedArguments& args, const ExperimentPipelineLease& pipeline) noexcept
+{
+    if (record)
+        input.draw = MakeExperimentDrawInput(command, record->epoch, draw, args, record->raster, record->bindings, pipeline);
+    else
+    {
+        // Keep known packet metadata even if command recording was not tracked.
+        // Empty raster/bindings remain borrowed until this synchronous callback.
+        const GeometryRasterState raster {};
+        const GraphicsRootBindings bindings {};
+        input.draw = MakeExperimentDrawInput(command, 0, draw, args, raster, bindings, {});
+        ObserveExperimentCensus(observer, input, draw.frame, nullptr);
+        return;
+    }
+    ObserveExperimentCensus(observer, input, draw.frame, record ? &record->raster : nullptr);
+}
+MethodType<&Command::DrawInstanced> originalInstanced = nullptr;
+void WINAPI instanced(Command* command, UINT vertices, UINT instances, UINT startVertex, UINT startInstance)
+{
+    const auto source = _ReturnAddress(); Scope scope;
+    if (scope.outer)
+        if (const auto* observer = ActiveExperimentCensus())
+        {
+            auto* r = find(command);
+            GlassExperimentCensusInput input {}; input.operation = GlassCensusInstanced;
+            input.callsite = reinterpret_cast<uint64_t>(source);
+            censusDraw(*observer, command, r, input, {}, { vertices, instances, startVertex, 0, startInstance },
+                       r ? FindGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+        }
+    originalInstanced(command, vertices, instances, startVertex, startInstance);
+}
+MethodType<&Command::ExecuteIndirect> originalExecuteIndirect = nullptr;
+void WINAPI hookExecuteIndirect(Command* command, ID3D12CommandSignature* signature, UINT count,
+                                ID3D12Resource* args, UINT64 offset, ID3D12Resource* counter, UINT64 counterOffset)
+{
+    const auto source = _ReturnAddress(); Scope scope;
+    if (scope.outer)
+    {
+        auto* r = find(command);
+        if (const auto* observer = ActiveExperimentCensus())
+        {
+            GlassExperimentCensusInput input {}; input.operation = GlassCensusIndirect;
+            input.callsite = reinterpret_cast<uint64_t>(source);
+            input.signature = reinterpret_cast<uint64_t>(signature); input.maxCommands = count;
+            input.arguments = reinterpret_cast<uint64_t>(args); input.argumentOffset = offset;
+            input.counter = reinterpret_cast<uint64_t>(counter); input.counterOffset = counterOffset;
+            censusDraw(*observer, command, r, input, {}, {},
+                       r ? FindGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+        }
+        if (r)
+        {
+            auto* state = published.load(std::memory_order_acquire);
+            if (state->indirect.apply(signature, r->bindings)) ++state->indirectKnown;
+            else ++state->indirectUnknown;
+        }
+    }
+    originalExecuteIndirect(command, signature, count, args, offset, counter, counterOffset);
+}
 #define GLASS_GRAPHICS(Name, Class, Declaration, Arguments, Update)                                                    \
     MethodType<&Class::Name> original##Name = nullptr;                                                                 \
     void WINAPI hook##Name Declaration                                                                                 \
@@ -293,12 +354,6 @@ GLASS_GRAPHICS(BeginRenderPass, ID3D12GraphicsCommandList4,
                (command, count, targets, depth, flags), r->raster.renderPass = true; r->raster.targetsKnown = false)
 GLASS_GRAPHICS(EndRenderPass, ID3D12GraphicsCommandList4, (ID3D12GraphicsCommandList4 * command), (command),
                r->raster.renderPass = false; r->raster.targetsKnown = false)
-GLASS_GRAPHICS(ExecuteIndirect, Command,
-               (Command * command, ID3D12CommandSignature* signature, UINT count, ID3D12Resource* args, UINT64 offset,
-                ID3D12Resource* counter, UINT64 counterOffset),
-               (command, signature, count, args, offset, counter, counterOffset),
-               auto* state = published.load(std::memory_order_acquire);
-               if (state->indirect.apply(signature, r->bindings))++ state->indirectKnown; else ++state->indirectUnknown)
 GLASS_GRAPHICS(SetPipelineState1, ID3D12GraphicsCommandList4,
                (ID3D12GraphicsCommandList4 * command, ID3D12StateObject* object), (command, object),
                r->bindings.invalidate())
@@ -364,6 +419,17 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
             ++state->indexed;
             const auto draw =
                 ReadCyberpunkGeometryDraw(source, indices, instances, startIndex, baseVertex, startInstance);
+            auto* r = find(command);
+            const auto* census = ActiveExperimentCensus();
+            const auto pipeline = r && (census || !draw.objects.empty()) ?
+                FindGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {};
+            const GeometryIndexedArguments arguments { indices, instances, startIndex, baseVertex, startInstance };
+            if (census)
+            {
+                GlassExperimentCensusInput input {}; input.operation = GlassCensusIndexed;
+                input.callsite = reinterpret_cast<uint64_t>(source);
+                censusDraw(*census, command, r, input, draw, arguments, pipeline);
+            }
             if (!draw.objects.empty())
             {
                 ++state->packets;
@@ -372,10 +438,8 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
                 for (const auto& object : draw.objects)
                     if (object.identity)
                         state->identities += object.count;
-                if (auto* r = find(command))
+                if (r)
                 {
-                    auto pipeline = FindGeometryPipeline(r->bindings.pipeline);
-                    const GeometryIndexedArguments arguments { indices, instances, startIndex, baseVertex, startInstance };
                     ObserveExperimentDraw(command, r->epoch, draw, arguments, r->raster, r->bindings, pipeline);
                     if (pipeline)
                     {
@@ -469,7 +533,7 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
             FAILED(command->Close()))
             return false;
         auto table = *reinterpret_cast<void***>(command.Get());
-        for (auto slot : { 9, 10, 11, 13, 21, 22, 25, 27, 28, 30, 32, 34, 36, 38, 40, 42, 46, 56, 59 })
+        for (auto slot : { 9, 10, 11, 12, 13, 21, 22, 25, 27, 28, 30, 32, 34, 36, 38, 40, 42, 46, 56, 59 })
             state->targets[slot] = table[slot];
         ComPtr<ID3D12GraphicsCommandList4> c4;
         ComPtr<ID3D12GraphicsCommandList10> c10;
@@ -505,7 +569,8 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
         bool okay = attach(originalCreate, (*reinterpret_cast<void***>(device))[12], create) &&
                     attach(originalSignature, (*reinterpret_cast<void***>(device))[41], createSignature) &&
                     attach(originalReset, table[10], reset) && attach(originalClose, table[9], close) &&
-                    attach(originalIndexed, table[13], indexed) && attach(originalHeaps, table[28], heaps);
+                    attach(originalIndexed, table[13], indexed) && attach(originalInstanced, table[12], instanced) &&
+                    attach(originalHeaps, table[28], heaps);
 #define GLASS_ATTACH(Name, Slot) okay = attach(original##Name, state->targets[Slot], hook##Name) && okay
         GLASS_ATTACH(ClearState, 11);
         GLASS_ATTACH(RSSetViewports, 21);

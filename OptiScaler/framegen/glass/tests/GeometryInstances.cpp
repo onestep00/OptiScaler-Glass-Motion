@@ -395,6 +395,17 @@ int wmain(int argc, wchar_t** argv)
         const UINT64 auxiliaryOffset = imageBytes * 5 + SOBytes + HistoryBytes + CaptureBytes;
         const UINT64 readBytes = auxiliaryOffset + (mrt ? 2 * imageBytes : 0);
         auto readback = g.buffer(readBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        ComPtr<ID3D12CommandSignature> censusSignature;
+        ComPtr<ID3D12Resource> censusArguments;
+        if (moduleRecorder)
+        {
+            D3D12_INDIRECT_ARGUMENT_DESC argument {}; argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+            D3D12_COMMAND_SIGNATURE_DESC signature { sizeof(D3D12_DRAW_ARGUMENTS), 1, &argument, 0 };
+            check(g.d->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&censusSignature)));
+            censusArguments = g.buffer(sizeof(D3D12_DRAW_ARGUMENTS), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+            const D3D12_DRAW_ARGUMENTS empty { 0, 1, 0, 0 };
+            upload(censusArguments.Get(), &empty, sizeof(empty));
+        }
         g.begin();
         for (auto& h : history)
         {
@@ -414,7 +425,11 @@ int wmain(int argc, wchar_t** argv)
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
-            if (moduleRecorder && frame == 5) secondModuleOutput = moduleRecorderCheck.replace();
+            if (moduleRecorder && frame == 5)
+            {
+                moduleRecorderCheck.selectNext(lease->identity, GlassFg::FindGeometryView(rtvs[1], 1)->resource);
+                secondModuleOutput = moduleRecorderCheck.replace();
+            }
             if (experiment && !captureModule && frame == 2) experimentCheck.prepare(argv[2]);
             if (recorder && !moduleRecorder && frame == 5)
             {
@@ -582,6 +597,11 @@ int wmain(int argc, wchar_t** argv)
                     g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
                     geometryFixturePacket = false;
                     captureOwner.enabled = false;
+                    if (moduleRecorder && pass == 0)
+                    {
+                        g.c->DrawInstanced(0, 1, 0, 0);
+                        g.c->ExecuteIndirect(censusSignature.Get(), 1, censusArguments.Get(), 0, nullptr, 0);
+                    }
                 }
                 else
                 {

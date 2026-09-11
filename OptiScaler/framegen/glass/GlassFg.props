@@ -19,6 +19,10 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentRecording.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentDrawAbi.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentDrawBridge.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCensusAbi.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCensusBridge.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCensusLog.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCaptureSelection.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentPipelineAbi.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentPipelineService.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCaptureAbi.h" />

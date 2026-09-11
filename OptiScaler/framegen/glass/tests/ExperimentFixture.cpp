@@ -23,6 +23,6 @@ int32_t event(void* context, const GlassExperimentEvent* value)
 }
 void destroy(void* context) { delete static_cast<int*>(context); }
 const GlassExperimentApi api { sizeof(api), FIXTURE_ID == 98 ? 999u : GLASS_EXPERIMENT_ABI,
-                              GlassExperimentDraw | GlassExperimentFg, create, event, destroy };
+                              GlassExperimentDraw | GlassExperimentFg | GlassExperimentCensus, create, event, destroy };
 }
 extern "C" __declspec(dllexport) const GlassExperimentApi* GlassExperimentQuery() { return &api; }

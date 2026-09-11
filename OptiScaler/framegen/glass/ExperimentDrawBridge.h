@@ -84,12 +84,19 @@ inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandLis
         input.descriptor = &pipeline->description; input.descriptorBytes = sizeof(pipeline->description);
         input.rootReplayable = bindings.canReplay(*pipeline->root, pipeline->original.Get());
     }
-    if (input.rasterKnown)
+    if (raster.viewportKnown)
     {
-        const auto& v = raster.viewport; const auto& s = raster.scissor;
+        const auto& v = raster.viewport;
         const float viewport[] { v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth };
         for (unsigned i = 0; i < 6; ++i) input.viewport[i] = viewport[i];
+    }
+    if (raster.scissorKnown)
+    {
+        const auto& s = raster.scissor;
         input.scissor[0] = s.left; input.scissor[1] = s.top; input.scissor[2] = s.right; input.scissor[3] = s.bottom;
+    }
+    if (raster.targetsKnown && raster.targetCount <= 8)
+    {
         input.renderTargetCount = raster.targetCount; input.depthTarget = raster.depth.ptr;
         for (unsigned i = 0; i < raster.targetCount; ++i) input.renderTargets[i] = raster.targets[i].ptr;
     }

@@ -83,6 +83,9 @@ int main()
                     bound->depthView->dsv.Texture2DArray.FirstArraySlice == 1,
                 "Original OM binding snapshot");
         const auto boundCopy = *bound;
+        const auto partial = GlassFg::MakeExperimentDrawInput(g.c.Get(), 1, {}, {}, *bound, {}, {});
+        require(!partial.rasterKnown && partial.renderTargetCount == 1 && partial.renderTargets[0] == handle[4].ptr &&
+                    partial.depthTarget == depthHandle.ptr, "Unknown viewport erased known target metadata");
         GlassExperimentTarget abi {}; abi.size = sizeof(abi);
         require(GlassFg::ExperimentTargetAt(bound, 0, &abi) == 1 && abi.resource == original->resource &&
                     abi.descriptorBytes == sizeof(slice) && !memcmp(abi.descriptor, &slice, sizeof(slice)),

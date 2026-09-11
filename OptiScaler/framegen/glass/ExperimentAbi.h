@@ -8,7 +8,8 @@ enum GlassExperimentEventKind
 {
     GlassExperimentDraw = 1,
     GlassExperimentFg = 2,
-    GlassExperimentCapture = 4
+    GlassExperimentCapture = 4,
+    GlassExperimentCensus = 8
 };
 struct GlassExperimentHost
 {
