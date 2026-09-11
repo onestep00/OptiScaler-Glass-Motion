@@ -23,7 +23,7 @@ struct ExperimentCaptureSelection
         if (!(input >> format >> pid >> result.pipeline >> result.binding >> result.target >> result.mesh >> result.chunk >>
               result.indices >> result.instances >> result.startIndex >> result.baseVertex >> result.startInstance >> result.proxy) ||
             format != "select-v1" || pid != process || !result.pipeline || result.binding > 8 || !result.target ||
-            !result.mesh || !result.indices || !result.instances || result.instances > 32)
+            !result.mesh || !result.indices || !result.instances || result.instances > 64)
             throw std::runtime_error("Invalid or foreign-process capture selector");
         input >> std::ws;
         if (!input.eof()) throw std::runtime_error("Unexpected capture selector fields");

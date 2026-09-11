@@ -75,6 +75,20 @@ that range with the registered owner generation, then establish source-array
 element lifetime and actual view/submission ordering. Unchanged array addresses
 or these successful offline joins alone do not authorize N-1 vertex history.
 
+An explicit 40-instance vertex capture subsequently recorded 64 snapshots with
+626 vertices per instance (1,602,560 valid tagged vertices). Frames 44910/44911
+had matching producer source-index candidates for all 40 instances and 25,040
+finite positive-W clip pairs. Their raw raster displacement median was 0.45483
+pixels, maximum 0.49241, including camera jitter. This is actual VS output, not
+image-estimated motion; it is not dense pixel MV or approved temporal ownership.
+Only two snapshots overlapped the bounded census sufficiently for that exact
+recording join. Vertex sidecars now also retain original pipeline/draw arguments,
+including start-instance, so later joins do not depend on an earlier census row
+remaining within its recording capacity. No resource data is added to the sidecar.
+Evidence: `work/glass-array-vertices-live-v1/vertex-analysis.json` and
+`consecutive-pair.json`. Generation 12 retired/unloaded all 64 jobs; the producer
+observer is stopped. The new sidecar fields require rebuilding the diagnostic.
+
 The current executable (SHA-256
 `a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`)
 has four statically validated direct callers of the observed draw-run function.

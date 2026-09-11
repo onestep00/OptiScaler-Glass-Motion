@@ -66,8 +66,11 @@ in the same process, without rebuilding/restarting the host:
 select-v1 PID pipelineIdentity targetBinding targetResource mesh chunk indices instances startIndex baseVertex startInstance proxy
 ```
 
-Fields are decimal; targetBinding 0..7 selects an RTV, 8 selects the DSV. All fields
-match exactly, except proxy zero disables the optional object-entry membership
+Fields are decimal; targetBinding 0..7 selects an RTV, 8 selects the DSV. The selector
+supports the recorder's existing maximum of 64 draw instances; the former selector
+limit of 32 incorrectly rejected explicit selection of the observed 40-instance
+draw even though unfiltered capture admitted it. Buffer budgets are unchanged.
+Fields match exactly, except proxy zero disables the optional object-entry membership
 filter. A nonzero proxy also requires matching mesh and a valid generation. These
 are diagnostic selection criteria, not proof of unique object ownership or stable
 view identity. Refresh from a new census after restart/resource recreation. Invalid

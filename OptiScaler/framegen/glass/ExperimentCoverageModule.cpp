@@ -275,6 +275,10 @@ class Coverage
                  << "\nrecording=" << slot.recording << "\nvertices=" << slot.mesh.vertices
                  << "\nretirement_observed_frame=" << slot.retiredAtFrame
                  << "\ninstances=" << slot.instances << "\nmesh=" << slot.draw.mesh
+                 << "\npipeline_identity=" << slot.view.identity
+                 << "\ndraw_indices=" << slot.draw.indices << "\ndraw_instances=" << slot.draw.instances
+                 << "\nstart_index=" << slot.draw.startIndex << "\nbase_vertex=" << slot.draw.baseVertex
+                 << "\nstart_instance=" << slot.draw.startInstance
                  << "\nchunk=" << slot.draw.chunk << "\nvertex_buffer=" << slot.mesh.vertexBuffer
                  << "\nindex_buffer=" << slot.mesh.indexBuffer << "\nindex_offset=" << slot.mesh.indexOffset
                  << "\nvertex_factory=" << slot.mesh.vertexFactory << "\nviewport=";
