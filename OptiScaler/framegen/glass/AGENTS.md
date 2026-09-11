@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/Experiments.md](tests/Experiments.md): Raw census, targeted recapture and actual public submission hooks pass independent GPU checks. A pending capture retains its DLL through replacement and Reset until completion. Deployment preparation; game contours/MV/FG remain incomplete.
+- [tests/Experiments.md](tests/Experiments.md): Raw census, selection and actual queue/in-flight replacement pass independent checks. Common host fc151fc staged in MO2 with backups; user launch/live validation pending. Game contours/MV/FG remain incomplete.
 
 - [tests/GeometryTargets.md](tests/GeometryTargets.md): Public RTV/DSV creation/copy and OM-time snapshots preserve resource/subresource metadata without retaining textures. Independent hooks/ABI/module outputs pass; not deployed. Full draw census and live contours/MV/FG remain incomplete.
 

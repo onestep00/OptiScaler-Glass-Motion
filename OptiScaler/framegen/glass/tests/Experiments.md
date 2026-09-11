@@ -2,8 +2,8 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: actual public submission hooks and GPU-in-flight capture replacement pass independent checks; deployment preparation
-- Deployment: none
+- Status: independent observer/in-flight checks pass; resident diagnostic host staged in MO2, live validation pending
+- Deployment: host source fc151fc staged as dxgi.dll; no new object MV correction applied
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
 
@@ -102,6 +102,30 @@ the gate is closed. This artificial wait exists only in the independent fixture.
 ordering. This validates the capture-owner/observer combination on the test
 device, not game frame/FG correspondence. The earlier four-pixel game failure
 and actual object contours/MV remain unresolved.
+
+`analyze_draw_census.py` checks CSV/completion/target-binary consistency and
+summarizes original API operations, missing mappings and target allocations.
+`--sequence N --pid PID [--binding 0..8] [--proxy P]` emits an exact `select-v1`
+line only when the saved observation has the required capture metadata. Nonzero
+proxy must appear in that observation's saved engine entries. This uses rendering
+metadata, not image segmentation, and does not admit unsupported rendering routes.
+On both in-flight fixture generations it validates all 56 rows and each 160x112
+target against the actual saved descriptors. In-game process/view validity must
+still be checked before loading a generated selector.
+
+## MO2 staging checkpoint
+
+The resident host from fc151fc is staged in MO2 `overwrite/Root/bin/x64/dxgi.dll`,
+SHA-256 `57E7BB11A91D393563156D3DE3CE666B948DD05A3F8868D22004EBC6CF0BC6ED`.
+`Glass/experiment-host.enable` enables the event controller and target observer;
+capture remains stopped until an explicit module load. Independent tests are at
+8155e51. Only these two installed files changed. Existing settings, ASI unlock,
+and both the game/CET version.dll files retained their measured hashes. Backup
+and prepared module/config live in the local workspace's
+`work/glass-experiment-host-deployment-v1/` with an installation manifest.
+The game was stopped during installation. A user-launched MO2 session is required
+to verify RootBuilder staging, control events, target data and actual recapture.
+No game launch, new contours, object MV or FG correction is established here.
 
 Draw payload version 2 introduced `ExperimentPipelineAbi.h` / `ExperimentPipelineService.h`.
 An explicit opaque token retains the existing immutable pipeline-cache entry.

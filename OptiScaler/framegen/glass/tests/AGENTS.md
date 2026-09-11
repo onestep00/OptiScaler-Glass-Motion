@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [Experiments.md](Experiments.md): Census v1 saves 56 fixture calls. Actual public queue hooks and in-flight captured submission/Reset/replacement preserve both DLLs and original pixels; final unload passes. No game or FG evidence.
+- [Experiments.md](Experiments.md): Census analyzer validates CSV/target provenance; actual queue/in-flight capture/Reset/replacement preserve DLLs and pixels. Common host staged, no live game or FG proof.
 
 - [GeometryTargets.md](GeometryTargets.md): GeometryTargetViews verifies public view/heap/copy hooks, OM snapshot stability and no texture retention. Controlled recorder saves exact actual test-draw targets. No game resource or FG validation.
 
