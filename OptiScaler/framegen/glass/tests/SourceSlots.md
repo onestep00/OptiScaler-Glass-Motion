@@ -282,6 +282,29 @@ event is still required. Local output: `work/glass-array-wrapper-live-v1/capture
 The older enqueue observer remains separately pinned with recording disabled.
 Neither diagnostic changes geometry, render commands or FG input resources.
 
+The user then moved in the scene while capture-2 was armed. Save returned zero
+and produced 1,053 records without exhausting capacity: 86 returns at 0x3a2559,
+807 at 0x3c8657, and 160 at 0x579d30. Spans had 1--16 entries; all headers passed,
+with no empty/malformed calls. The process base was rechecked as 0x7ff69d770000
+and the process remained responding. The previous zero-call interval therefore
+does not mean this is exclusively a loading-time path.
+
+There were 760 owner addresses and 1,039 handle addresses. Among 234 repeated
+owner addresses, 183 appeared with different counts, 93 with different upstream
+callers, and all with different handle addresses. These are address repetitions,
+not proven same-object updates: registration generations were not captured.
+Do not infer persistent identity from these repetitions or from handle addresses.
+Evidence: `work/glass-array-wrapper-live-v1/capture-2/{analysis,repeat-analysis}.json`.
+
+Further static tracing of the dominant 0x3c8508 path found direct callers
+0x25422c and 0x2277018. Both partition a source array into contiguous 48-byte
+spans using cumulative per-group counts, with separate per-group bounds. This
+locates the source group/range before the renderer handle is created. The next
+identity observation should preserve that parent source and group range rather
+than equating newly created renderer handles across frames. This does not yet
+prove parent-source lifetime or moving-element stability. The owned function
+disassemblies are under `work/glass-engine-identity-probe-v2/`.
+
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input
 address and 144-byte input header. It copies no pointed-to transform arrays or
