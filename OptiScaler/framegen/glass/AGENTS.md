@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Strict GPU N-1 guard rejects matching stale tags without copies or waits; independent original-rendering and mapped-capture checks pass. Not deployed; continuous game history and FG incomplete.
+
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Diagnostic PSO cache avoids 63 repeated compilations in a 64-job live run. Continuous GPU history and FG remain incomplete.
 
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Bounded two-slot shape sampling yielded two exact consecutive original-VS pairs. No continuous history, dense boundary MV or FG substitution.

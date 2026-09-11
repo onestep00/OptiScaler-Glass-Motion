@@ -291,11 +291,14 @@ int wmain(int argc, wchar_t** argv)
         std::vector<Clip> last(18);
         uint64_t exactColors = 0, exactHistory = 0, validSamples = 0, motionPixels = 0, capturePixels = 0;
         double maxMotionError = 0;
-        for (UINT frame = 1; frame <= 5; ++frame)
+        for (UINT step = 1; step <= 5; ++step)
         {
-            UINT current = frame & 1, previous = current ^ 1;
+            // Keep a real frame-4 record, then skip frame 5. Matching an explicitly
+            // requested old tag must not make N-2 positions valid motion history.
+            const UINT frame = step == 5 ? 6 : step;
+            UINT current = step & 1, previous = current ^ 1;
             UINT generation = frame >= 3 ? 99 : 42;
-            UINT expected = frame == 5 ? 2 : frame - 1;
+            UINT expected = step == 5 ? 4 : frame - 1;
             const bool shouldValid = frame == 2 || frame == 4;
             float fc[] = { frame * .31f, frame * .023f, frame * -.017f, 0 };
             GlassFg::VertexHistoryConstants hc { 8, 4, 0, 0, 3, generation, frame, expected };

@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Matching N-2 history is now GPU-rejected; original rendering and mapped capture regression pass. Continuous game history and FG remain incomplete.
+
 - [SourceBootstrap.md](SourceBootstrap.md): Worker-owned PSO reuse verified live (one build, 63 reuses); buffers still per-capture and continuous history/FG absent.
 
 - [SourceBootstrap.md](SourceBootstrap.md): Two slots per diagnostic shape produced two exact N-1 pairs (310 original vertices); gaps excluded. Continuous history/view identity and dense MV/FG remain incomplete.

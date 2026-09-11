@@ -9,6 +9,22 @@
 
 ## Implemented source
 
+The history shader now requires a nonzero expected previous frame equal to the
+current frame minus one, as well as matching stored frame and generation tags.
+Previously an explicitly requested N-2 tag could pass. The independent GPU test
+now retains frame 4, skips frame 5, and requests frame 4 at frame 6. It failed
+with the preceding shader and passes with this guard. Current capture remains
+available on missing history. This adds integer checks, no allocation, copy,
+CPU wait or queue synchronization.
+
+The five-sample regression preserves 122,880 original color pixels and all 90
+current vertices; 36 valid previous vertices remain exact and 6,017 motion
+samples pass (maximum error 0.001586 pixels). The independently rebuilt
+`--capture-command` instance test also passes: 143,360 original pixels, 3,563
+motion samples and 896 overlap samples. Local evidence is in
+`work/glass-history-adjacency-v1/`. This change is source-tested, not deployed;
+continuous game GPU history, view/topology admission and FG remain incomplete.
+
 Native pixel capture now ran through replaceable generations 5--7 in PID 68908.
 The first recording and several later mesh/chunk recordings contained only zeros;
 those are failed coverage samples, not boundary images. Generation 7's first

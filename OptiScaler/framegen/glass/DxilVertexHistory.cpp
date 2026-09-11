@@ -433,7 +433,12 @@ glass.read:
   %glass.oldgen = extractvalue %dx.types.ResRet.i32 %glass.tag, 1
   %glass.frameok = icmp eq i32 %glass.oldframe, %glass.prevframe
   %glass.genok = icmp eq i32 %glass.oldgen, %glass.gen
-  %glass.validbool = and i1 %glass.frameok, %glass.genok
+  %glass.predecessor = sub i32 %glass.frame, 1
+  %glass.adjacent = icmp eq i32 %glass.prevframe, %glass.predecessor
+  %glass.initialized = icmp ne i32 %glass.prevframe, 0
+  %glass.temporalok = and i1 %glass.adjacent, %glass.initialized
+  %glass.tagsok = and i1 %glass.frameok, %glass.genok
+  %glass.validbool = and i1 %glass.tagsok, %glass.temporalok
   %glass.valid = select i1 %glass.validbool, float 0.000000e+00, float 1.000000e+00
 )";
         for (unsigned c = 0; c < 4; ++c)
