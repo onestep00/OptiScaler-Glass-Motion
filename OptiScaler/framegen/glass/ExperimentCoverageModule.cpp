@@ -6,6 +6,7 @@
 #include "DxilVertexHistory.h"
 #include <windows.h>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
 #include <fstream>
@@ -72,7 +73,7 @@ struct Slot
     bool initSubmitted = false, initComplete = false;
     void* mapping = nullptr;
     void* constantData = nullptr;
-    uint64_t bytes = 0, vertexBytes = 0, charge = 0, job = 0, recording = 0, frame = 0;
+    uint64_t bytes = 0, vertexBytes = 0, charge = 0, job = 0, recording = 0, frame = 0, retiredAtFrame = 0;
     unsigned index = 0, width = 0, height = 0, left = 0, top = 0, instances = 0, words = 0;
     GlassExperimentDrawInput draw {};
     GlassExperimentMesh mesh {};
@@ -96,6 +97,7 @@ class Coverage
     unsigned selections = 0;
     uint64_t allocated = 0;
     uint64_t lastVertexFrame = 0;
+    std::atomic<uint64_t> latestObservedFrame { 0 };
     ComPtr<ID3D12Resource> buffer(uint64_t bytes, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state, bool uav = false)
     {
         D3D12_HEAP_PROPERTIES heap {}; heap.Type = type;
@@ -229,6 +231,7 @@ class Coverage
             std::ofstream meta(withSuffix(".draw"));
             meta << "vertex_format=2\nrecord_bytes=32\nextra_word_offset=24\nextra_cb_space=0\nextra_cb_binding=1\nextra_cb_bytes=848\nextra_cb_row=51\nframe=" << slot.frame
                  << "\nrecording=" << slot.recording << "\nvertices=" << slot.mesh.vertices
+                 << "\nretirement_observed_frame=" << slot.retiredAtFrame
                  << "\ninstances=" << slot.instances << "\nmesh=" << slot.draw.mesh
                  << "\nchunk=" << slot.draw.chunk << "\nvertex_buffer=" << slot.mesh.vertexBuffer
                  << "\nindex_buffer=" << slot.mesh.indexBuffer << "\nindex_offset=" << slot.mesh.indexOffset
@@ -376,12 +379,19 @@ class Coverage
             if (request.stage == GlassCaptureRetired)
             {
                 std::lock_guard lock(mutex);
-                if (found->state == Slot::Recorded) { found->state = Slot::Retired; changed.notify_one(); }
+                if (found->state == Slot::Recorded)
+                {
+                    found->retiredAtFrame = latestObservedFrame.load(std::memory_order_relaxed);
+                    found->state = Slot::Retired; changed.notify_one();
+                }
                 return 0;
             }
             return -1;
         }
         const auto* d = request.draw;
+        auto observed = latestObservedFrame.load(std::memory_order_relaxed);
+        while (event.frame > observed && !latestObservedFrame.compare_exchange_weak(
+                   observed, event.frame, std::memory_order_relaxed)) {}
         if (!d || d->size != sizeof(*d) || !request.output || !event.frame || event.frame > UINT32_MAX ||
             !d->rasterKnown || !d->rootReplayable || !d->depthTarget || d->renderTargetCount > 8 ||
             !d->instances || d->instances > MaxInstances || !d->objectAt || !d->meshShape || d->objectCount > 4096 ||

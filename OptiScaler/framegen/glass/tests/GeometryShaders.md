@@ -9,6 +9,24 @@
 
 ## Implemented source
 
+Generation 9 measured when the diagnostic Retired callback arrives, using the
+latest observed engine draw frame (not a wall-clock FPS estimate). Of 64 jobs,
+53 arrived two frames later, 3 three frames later, 7 four frames later and 1 five
+frames later. All 64 retired and the module unloaded; cumulative host counters
+were 376/376 with zero pending. Evidence: local `outputs/glass-retirement-live-v9`.
+Therefore CPU readback/Retired handoff cannot supply consecutive-frame history
+in this observed run. Do not feed N-2 or older positions as N-1 motion.
+
+The real-time path must retain GPU history and establish N-1 write -> N read
+ordering without awaiting CPU retirement. Retired remains a resource-release
+condition only. Current `D3D12Observer::submit` calls the geometry callback AFTER
+the real ExecuteCommandLists; the experiment ABI exposes no pre-submit queue
+admission. A future live history owner needs an explicit pre-submit admission
+path or independently proven queue provenance before recording, barriers for
+history access, and retained allocations through all recorded/in-flight users.
+The current diagnostic does not establish that production contract. No full
+screen object MV or FG replacement has been produced by this measurement.
+
 The `GLASS_CAPTURE_VERTEX_COVERAGE` diagnostic records original VS positions and
 original-material coverage in the same inserted draw. It uses the existing VS
 history and audited coverage PS, with no second material draw. Vertex records and

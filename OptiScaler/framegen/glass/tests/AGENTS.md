@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Generation 9 measured retirement latency (64 jobs, 2-5 frames), unloaded. This rules out retired-readback delivery for consecutive-frame runtime MV; GPU history integration remains required.
+
 - [GeometryShaders.md](GeometryShaders.md): Same-draw vertex/coverage diagnostic passed 64 live captures with exact contributing-reference masks and zero status. Visualization is vertex displacement plus material coverage, not dense boundary MV.
 
 - [GeometryShaders.md](GeometryShaders.md): Optional bound-CB pair recording passed three recorded VS validators and live generation-7 capture (64 snapshots, 38 consecutive pairs). Candidate jitter subtraction is not final MV/FG proof.

@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Live retirement arrives 2-5 frames late; CPU-retired handoff is unsuitable for N-1 history. GPU-resident ordered history requires a production admission seam beyond the current post-submit diagnostic callbacks.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Generation 8 captured actual vertices and original-material coverage in the same draw (64 captures), visualized and unloaded. Dense boundary MV and FG integration remain incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Generation 7 captured actual VS positions plus draw-bound camera CB words in 64 snapshots and unloaded. Jitter semantics/view/topology and final MV/FG admission remain incomplete.
