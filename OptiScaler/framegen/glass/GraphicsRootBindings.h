@@ -14,6 +14,28 @@ namespace GlassFg
 class GraphicsRootBindings
 {
   public:
+    struct BorrowedSlot
+    {
+        D3D12_ROOT_PARAMETER_TYPE type = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        UINT64 address = 0, known = 0;
+        const UINT* constants = nullptr;
+    };
+    // Callback-scoped metadata, never a GPU resource or CPU-dereferenceable GPU
+    // address. Unknown/reset/invalidated slots cannot expose stale payloads.
+    bool observe(UINT slot, ID3D12RootSignature* expected, BorrowedSlot& out) const noexcept
+    {
+        out = {};
+        if (!complete || !expected || root != expected || slot >= slots.size() ||
+            !(written & (UINT64(1) << slot))) return false;
+        const auto& value = slots[slot];
+        out.type = value.type;
+        out.known = value.known;
+        if (value.type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
+            out.constants = value.values.data();
+        else
+            out.address = value.address;
+        return true;
+    }
     void reset(ID3D12PipelineState* initial = nullptr)
     {
         written = 0;

@@ -2,18 +2,56 @@
 #include "../GeometryObservationCache.h"
 #include "../ExperimentPipelineService.h"
 #include <d3dcompiler.h>
+#ifdef GLASS_OBSERVATION_HOST
+#include "../GeometryCreation.h"
+#include "../GeometryCommands.h"
+#include "../ExperimentCensusBridge.h"
+static ID3D12PipelineState* observedOriginal = nullptr;
+static bool censusOkay = false;
+static const GlassFg::ExperimentCensusObserver census {
+    nullptr, [](void*) noexcept { return true; },
+    [](void*, const GlassExperimentEvent& event) noexcept
+    {
+        if (event.kind != GlassExperimentCensus || event.payloadBytes != sizeof(GlassExperimentCensusInput)) return;
+        const auto& input = *static_cast<const GlassExperimentCensusInput*>(event.payload);
+        if (input.draw.originalPipeline != observedOriginal) return;
+        const auto& draw = input.draw;
+        const auto* bindings = GlassFg::ReadGeometryBindings(static_cast<ID3D12GraphicsCommandList*>(draw.command));
+        GlassFg::GraphicsRootBindings::BorrowedSlot slot;
+        censusOkay = draw.descriptor && draw.pipelineIdentity && !draw.rootReplayable && bindings &&
+            !bindings->observe(0, static_cast<ID3D12RootSignature*>(draw.originalRoot), slot) &&
+            !GlassFg::FindGeometryPipeline(observedOriginal) && GlassFg::FindObservedGeometryPipeline(observedOriginal);
+    }
+};
+#endif
 
 int main()
 {
     try
     {
         Device device;
+#ifdef GLASS_OBSERVATION_HOST
+        const auto compiler = std::filesystem::absolute("work/glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll");
+        require(GlassFg::StartGeometryCreation(device.d.Get(), compiler), "Creation observer startup");
+        require(GlassFg::StartGeometryCommands(device.d.Get()), "Command observer startup");
+        require(GlassFg::RegisterExperimentCensus(&census), "Census registration");
+#endif
         D3D12_ROOT_SIGNATURE_DESC rd {};
+        D3D12_DESCRIPTOR_RANGE range { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 10, 0, 0 };
+        D3D12_ROOT_PARAMETER parameters[2] {};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        parameters[0].Descriptor = { 7, 0 };
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[1].DescriptorTable = { 1, &range };
+        rd.NumParameters = 2; rd.pParameters = parameters;
         ComPtr<ID3DBlob> serialized, error, vs, ps;
         check(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &error));
         ComPtr<ID3D12RootSignature> root;
         check(device.d->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
                                            IID_PPV_ARGS(&root)));
+#ifdef GLASS_OBSERVATION_HOST
+        GlassFg::ObserveGeometryRoot(device.d.Get(), 0, serialized->GetBufferPointer(), serialized->GetBufferSize(), root.Get());
+#endif
         const char shader[] = "float4 VS(uint id:SV_VertexID):SV_Position{return float4(id==1?1:-1,id==2?1:-1,0.5,1);}"
                               "float4 PS():SV_Target{return float4(1,0,0,1);}";
         check(D3DCompile(shader, sizeof(shader), nullptr, nullptr, nullptr, "VS", "vs_5_0", 0, 0, &vs, &error));
@@ -34,14 +72,48 @@ int main()
         ComPtr<ID3D12PipelineState> original, second;
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&original)));
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&second)));
+#ifdef GLASS_OBSERVATION_HOST
+        observedOriginal = original.Get();
+        device.begin();
+        device.c->SetGraphicsRootSignature(root.Get());
+        device.c->SetPipelineState(original.Get());
+        device.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        device.c->DrawInstanced(0, 0, 0, 0); // Exercise forwarding; no raster work or submission.
+        check(device.c->Close());
+        require(censusOkay, "Original-only census delivery or replay isolation failed");
+        GlassFg::StopGeometryCreation();
+        require(!GlassFg::FindObservedGeometryPipeline(original.Get()), "Stopped observation remained active");
+#endif
+        GlassFg::GraphicsRootBindings bindings;
+        GlassFg::GraphicsRootBindings::BorrowedSlot slot;
+        bindings.reset(); bindings.setRoot(root.Get());
+        require(!bindings.observe(0, root.Get(), slot), "Unset binding observed");
+        bindings.address(0, D3D12_ROOT_PARAMETER_TYPE_CBV, 256);
+        require(bindings.observe(0, root.Get(), slot) && slot.address == 256 && !slot.constants, "CBV observation");
+        bindings.table(1, { 512 }); bindings.heapsChanged();
+        require(!bindings.observe(1, root.Get(), slot) && bindings.observe(0, root.Get(), slot), "Heap invalidation");
+        const UINT constants[] { 17, 23 };
+        bindings.constants(2, 2, constants, 3);
+        require(bindings.observe(2, root.Get(), slot) && slot.known == 24 && slot.constants &&
+                slot.constants[3] == 17 && slot.constants[4] == 23 && !slot.address, "Partial constant observation");
+        bindings.invalidate();
+        require(!bindings.observe(2, root.Get(), slot) && !slot.constants, "Invalidated binding leaked");
+        bindings.reset(); bindings.setRoot(root.Get());
+        require(!bindings.observe(0, root.Get(), slot), "Reset binding leaked");
         GlassFg::ExperimentPipelineLease retained;
         {
             GlassFg::GeometryObservationCache cache(1, 1024 * 1024);
+            require(cache.rootCreated(root.Get(), serialized->GetBufferPointer(), serialized->GetBufferSize()), "Root layout observation");
             require(cache.observe(original.Get(), d), "Depth-writing descriptor not observed");
             require(cache.observe(original.Get(), d), "Duplicate observation rejected");
             require(!cache.observe(second.Get(), d), "Entry budget exceeded");
             retained = cache.find(original.Get());
             require(retained && !retained->instrumented && !retained->root->extended, "Observation became replayable");
+            memset(serialized->GetBufferPointer(), 0, serialized->GetBufferSize());
+            require(retained->root->originalParameters.size() == 2 &&
+                    retained->root->originalParameters[0].Descriptor.ShaderRegister == 7 &&
+                    retained->root->originalParameters[1].DescriptorTable.pDescriptorRanges == retained->root->ranges[1].data() &&
+                    retained->root->ranges[1][0].BaseShaderRegister == 10, "Root layout not owned");
             require(!memcmp(retained->description.VS.pShaderBytecode, d.VS.pShaderBytecode, d.VS.BytecodeLength),
                     "Observed shader differs");
             memset(vs->GetBufferPointer(), 0, vs->GetBufferSize());

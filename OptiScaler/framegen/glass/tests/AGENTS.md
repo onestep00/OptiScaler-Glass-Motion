@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [GeometryObservation.md](GeometryObservation.md): Separate original-only depth-writing PSO census; independent descriptor ownership/budget test passed. No live native MV binding or FG integration.
+- [GeometryObservation.md](GeometryObservation.md): Actual independent creation/draw census, root-layout ownership and current-slot observation pass. Module export and live native MV binding remain incomplete.
 
 - [GeometryShaders.md](GeometryShaders.md): Native target-3 extraction validates and preserves two recorded velocity PS instruction streams; absent target rejected. Assembly audit only, no native-pass GPU execution.
 

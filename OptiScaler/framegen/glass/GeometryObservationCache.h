@@ -12,12 +12,60 @@ class GeometryObservationCache
 {
     mutable std::mutex mutex;
     std::unordered_map<ID3D12PipelineState*, std::shared_ptr<const GeometryPipelineEntry>> entries;
+    std::unordered_map<ID3D12RootSignature*, std::shared_ptr<const GeometryRoot>> roots;
     std::size_t used = 0;
     const std::size_t maxEntries, maxBytes;
 
   public:
     explicit GeometryObservationCache(std::size_t count = 1024, std::size_t bytes = 32 * 1024 * 1024)
         : maxEntries(count), maxBytes(bytes) {}
+
+    bool rootCreated(ID3D12RootSignature* identity, const void* bytes, SIZE_T size) noexcept
+    {
+        if (!identity || !bytes || !size || size > 256 * 1024) return false;
+        try
+        {
+            std::lock_guard lock(mutex);
+            if (roots.contains(identity)) return true;
+            if (roots.size() >= 128) return false;
+            Microsoft::WRL::ComPtr<ID3D12VersionedRootSignatureDeserializer> reader;
+            if (FAILED(D3D12CreateVersionedRootSignatureDeserializer(bytes, size, IID_PPV_ARGS(&reader)))) return false;
+            const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* description = nullptr;
+            if (FAILED(reader->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &description)) ||
+                !description || description->Desc_1_1.NumParameters > 64) return false;
+            const auto& d = description->Desc_1_1;
+            std::size_t ranges = 0;
+            for (UINT i = 0; i < d.NumParameters; ++i)
+                if (d.pParameters[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+                {
+                    const auto n = d.pParameters[i].DescriptorTable.NumDescriptorRanges;
+                    if (n > 2048 - ranges) return false;
+                    ranges += n;
+                }
+            const auto cost = sizeof(GeometryRoot) + d.NumParameters *
+                (sizeof(D3D12_ROOT_PARAMETER1) + sizeof(std::vector<D3D12_DESCRIPTOR_RANGE1>)) +
+                ranges * sizeof(D3D12_DESCRIPTOR_RANGE1);
+            if (used > maxBytes || cost > maxBytes - used) return false;
+            auto root = std::make_shared<GeometryRoot>();
+            root->original = identity;
+            if (d.NumParameters) root->originalParameters.assign(d.pParameters, d.pParameters + d.NumParameters);
+            root->ranges.resize(d.NumParameters);
+            for (UINT i = 0; i < d.NumParameters; ++i)
+            {
+                auto& parameter = root->originalParameters[i];
+                if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) continue;
+                auto& table = parameter.DescriptorTable;
+                auto& owned = root->ranges[i];
+                if (table.NumDescriptorRanges)
+                    owned.assign(table.pDescriptorRanges, table.pDescriptorRanges + table.NumDescriptorRanges);
+                table.pDescriptorRanges = owned.data();
+            }
+            roots.emplace(identity, std::move(root));
+            used += cost;
+            return true;
+        }
+        catch (...) { return false; }
+    }
 
     bool observe(ID3D12PipelineState* identity, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) noexcept
     {
@@ -41,9 +89,15 @@ class GeometryObservationCache
                 d.InputLayout.NumElements * (sizeof(D3D12_INPUT_ELEMENT_DESC) + sizeof(std::string) + 128);
             if (entries.size() >= maxEntries || used > maxBytes || cost > maxBytes - used) return false;
             auto entry = std::make_shared<GeometryPipelineEntry>();
-            auto root = std::make_shared<GeometryRoot>();
-            root->original = d.pRootSignature;
-            entry->root = std::move(root); // extended stays null: observation is never replay admission.
+            const auto knownRoot = roots.find(d.pRootSignature);
+            if (knownRoot != roots.end()) entry->root = knownRoot->second;
+            else
+            {
+                auto root = std::make_shared<GeometryRoot>();
+                root->original = d.pRootSignature;
+                entry->root = std::move(root);
+            }
+            // extended stays null: observation is never replay admission.
             entry->original = identity;
             entry->description = d;
             entry->description.CachedPSO = {};
