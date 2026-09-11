@@ -41,8 +41,20 @@ int main()
     auto first = sourceOwners.find(address(fixtureProxy), 0x123456);
     require(first && first.source.first == 107 && first.source.count == 13);
     require(used == 1 && rows[0].header[15] == 0x123456 && rows[0].header[17] == first.generation);
+    GlassExperimentSourceQuery query = &GlassSourceOwnerQuery;
+    GlassExperimentSourceOwner result;
+    require(query(address(fixtureProxy), 0x123456, 13, &result) == 0 && !result.generation);
+    sourceReady = true;
+    require(query(address(fixtureProxy), 0x123456, 13, &result) == 1 &&
+            result.generation == first.generation && result.first == 107 && result.count == 13 &&
+            result.node == address(instance) && result.buffer == address(shared));
+    require(query(address(fixtureProxy), 0x123456, 12, &result) == 0 && !result.node);
+    result.version = 2;
+    require(query(address(fixtureProxy), 0x123456, 13, &result) == -1);
+    result = {};
     destroy(fixtureHandle.data());
     require(sourceOwners.size() == 0 && released == 1);
+    require(query(address(fixtureProxy), 0x123456, 13, &result) == 0 && !result.generation);
     recording = false; create();
     auto next = sourceOwners.find(address(fixtureProxy), 0x123456);
     require(next && next.generation > first.generation && used == 1);
@@ -50,8 +62,14 @@ int main()
     require(!sourceOwners.find(address(fixtureProxy), 0x123456) && sourceRejected == 1);
     destroy(fixtureHandle.data());
     require(sourceOwners.size() == 0 && forwarded == 3 && released == 2 && active == 0);
+    mesh[0x1f0 / 8] = 0x123456; create();
+    require(query(address(fixtureProxy), 0x123456, 13, &result) == 1);
+    originalDestroy = [](void*) {};
+    destroy(reinterpret_cast<void*>(1));
+    require(!sourceHealthy && query(address(fixtureProxy), 0x123456, 13, &result) == 0 && !result.generation);
     require(profileMagic == 0x49555035);
     std::cout << "PASS source_publication=1 cancellation_before_release=1 same_address_reuse=1 "
                  "stopped_csv_tracking=1 typed_mesh_rejection=1 transform_copies=0 "
+                 "query_abi=1 query_after_destruction_rejected=1 missed_lifecycle_disables_query=1 "
                  "live_engine=0 object_motion_produced=0\n";
 }

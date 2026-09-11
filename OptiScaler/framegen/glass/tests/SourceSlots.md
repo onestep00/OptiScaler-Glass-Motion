@@ -142,6 +142,24 @@ view/frame-to-FG ownership. No additional game hook was installed in this turn.
 
 ### Connected lifetime diagnostic (not deployed)
 
+The lifetime diagnostic now exports `GlassSourceOwnerQuery` through
+`ExperimentSourceAbi.h`. A synchronous same-process caller supplies its live
+proxy, render mesh and original array count. The query returns only node/buffer
+identities, original first/count and the creation serial; it never returns a
+borrowed transform pointer or reads engine memory. Lookup takes one cache lock
+per owner query. The caller can then translate the producer's local source index
+within the returned range, subject to separate lifetime and frame validation.
+
+The query refuses an uninstalled observer, incompatible ABI, missing owner or
+count mismatch. A failed destructor metadata read permanently disables queries
+for that observer, because an unobserved destruction could leave stale entries.
+Stopping CSV capture still leaves lifecycle tracking active. `NodeLifetimes.cpp`
+passed source query, ABI rejection, post-destruction rejection and sticky failure
+checks using the actual exported function pointer. This is an independent callback
+test; the new export is not loaded into the current game, and no producer/draw
+consumer calls it yet. Returned scalar metadata is not a GPU lifetime lease or
+proof of consecutive-frame correspondence.
+
 `GLASS_NODE_LIFETIME` connects the actual node-creation adapter to the bounded
 source-owner cache and invalidates its entry before forwarding renderer-handle
 destruction. Typed CMesh+0x1F0 and proxy+0xD8 must agree before publication.

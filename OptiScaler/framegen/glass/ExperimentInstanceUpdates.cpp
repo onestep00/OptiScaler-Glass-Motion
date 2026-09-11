@@ -5,6 +5,7 @@
 #ifdef GLASS_NODE_LIFETIME
 #define GLASS_NODE_GROUP
 #include "GeometrySourceOwners.h"
+#include "ExperimentSourceAbi.h"
 #endif
 #include <atomic>
 #include <cstdint>
@@ -29,6 +30,7 @@ Destroy originalDestroy = nullptr;
 GlassFg::GeometrySourceOwners<131072> sourceOwners;
 std::mutex sourceMutex;
 std::atomic<std::uint64_t> sourceCreated = 0, sourceDestroyed = 0, sourceRejected = 0;
+std::atomic<bool> sourceReady = false, sourceHealthy = true;
 #else
 constexpr unsigned profileMagic = 0x49555034;
 #endif
@@ -84,7 +86,11 @@ void destroy(void* handle)
         sourceOwners.destroyed(address, proxy);
         ++sourceDestroyed;
     }
-    else ++sourceRejected;
+    else
+    {
+        ++sourceRejected;
+        sourceHealthy.store(false, std::memory_order_release);
+    }
     originalDestroy(handle);
 }
 #endif
@@ -288,10 +294,39 @@ bool install()
     if (!attached || !threads.enlist())
     { DetourTransactionAbort(); original = nullptr; return false; }
     if (DetourTransactionCommit() != NO_ERROR) { original = nullptr; return false; }
+#ifdef GLASS_NODE_LIFETIME
+    sourceReady.store(true, std::memory_order_release);
+#endif
     return true;
 #endif
 }
 }
+#ifdef GLASS_NODE_LIFETIME
+extern "C" __declspec(dllexport) std::int32_t GlassSourceOwnerQuery(
+    std::uint64_t proxy, std::uint64_t mesh, std::uint32_t originalCount,
+    GlassExperimentSourceOwner* result)
+{
+    if (!result || result->size != sizeof(*result) || result->version != 1) return -1;
+    *result = {};
+    if (!sourceReady.load(std::memory_order_acquire) || !sourceHealthy.load(std::memory_order_acquire)) return 0;
+    try
+    {
+        std::lock_guard lock(sourceMutex);
+        const auto owner = sourceOwners.find(proxy, mesh);
+        if (!sourceHealthy.load(std::memory_order_acquire) || !owner || !originalCount ||
+            owner.source.count != originalCount) return 0;
+        result->node = owner.source.node; result->buffer = owner.source.buffer;
+        result->first = owner.source.first; result->count = owner.source.count;
+        result->generation = owner.generation;
+        return 1;
+    }
+    catch (...)
+    {
+        sourceHealthy.store(false, std::memory_order_release);
+        return 0;
+    }
+}
+#endif
 static DWORD start(void* directory, bool onlyArrays)
 {
     try
@@ -342,6 +377,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
             std::ofstream(output / "owners.txt") << "created=" << sourceCreated.load()
                 << "\ndestroy_callbacks=" << sourceDestroyed.load() << "\nrejected=" << sourceRejected.load()
                 << "\nlive=" << sourceOwners.size() << "\ntracking_continues=1\nobject_motion_produced=0\n";
+            std::ofstream(output / "source-query.txt") << "ready=" << sourceReady.load()
+                << "\nhealthy=" << sourceHealthy.load() << "\nabi_version=1\n";
         }
 #endif
         output.clear(); return 0;
