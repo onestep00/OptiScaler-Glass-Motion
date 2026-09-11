@@ -29,6 +29,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
     (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') `
     "/Fe$build/experiment-draw.dll" /link d3d12.lib dxgi.lib "/IMPLIB:$build/experiment-draw.lib"
 if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL build failed' }
+& cl.exe @common /LD "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot '../ExperimentCoverageModule.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') `
+    "/Fe$build/experiment-coverage.dll" /link d3d12.lib dxgi.lib "/IMPLIB:$build/experiment-coverage.lib"
+if ($LASTEXITCODE -ne 0) { throw 'Independent coverage module build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryIndirect.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
@@ -68,6 +72,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Single-draw capture insertion or root restorat
 if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL bridge failed' }
 & $instances $build $dxc --capture-module
 if ($LASTEXITCODE -ne 0) { throw 'Module capture preparation/recording/retirement failed' }
+& $instances $build $dxc --module-recorder
+if ($LASTEXITCODE -ne 0) { throw 'Independent coverage module preparation/replacement/capture failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $instances $build $dxc --recorder

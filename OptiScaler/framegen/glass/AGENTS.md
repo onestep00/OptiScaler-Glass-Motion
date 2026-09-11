@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/Experiments.md](tests/Experiments.md): Opaque compiler inputs and capture Prepare/Recorded/Retired ABI pass eight independent GPU draws. Final Reset gates unloading. Module worker/control, in-flight replacement through this owner, FG and game registration remain incomplete.
+- [tests/Experiments.md](tests/Experiments.md): Independent coverage DLL owns its worker, PSO, buffers and saves. Two generations pass reference/color and actual unload checks. Game control, in-flight owner replacement, actual contours/MV and FG remain incomplete.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Actual mesh chunk range decoder added. Diagnostic draw metadata records counts/bindings, without claiming topology or view identity. New metadata is not deployed.
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Same-process requests and same-draw surviving/contributing references detect deliberate missing mapping on an independent GPU. Original shader/recording artifacts retained locally; live target coverage pending.

@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: module capture prepare/record/retire ABI and original color/MV pass independent checks; game integration incomplete
+- Status: independently owned coverage worker and two module generations pass GPU capture/unload checks; game integration incomplete
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -74,9 +74,42 @@ it does not install the live native queue observer. Seven jobs retire before the
 last Reset; the final job and DLL remain retained even after runtime disable.
 The final actual Reset/queue completion permits its Retired callback and unloading.
 All 143,360 original pixels and 3,563 MV samples pass. Module preparation and capture
-buffers still come from explicit fixture setup. Runtime control, automatic module
-worker preparation, in-flight replacement through this owner, resource/view census,
+buffers in that mode still come from explicit fixture setup. Runtime control,
+in-flight replacement through this owner, resource/view census,
 actual engine input and FG integration remain unverified/incomplete.
+
+`ExperimentCoverageModule.cpp` now builds as a separate `experiment-coverage.dll`.
+Its private worker compiles the original material audit PSO, initializes bounded
+capture resources, and saves completed/discarded captures. No fixture supplies
+its PSO or buffers. Prepare writes only its exclusively reserved upload data;
+Recorded copies its own capture UAV to readback. The worker writes format 2
+object bits, surviving/contributing references, draw metadata and original VS/PS.
+The `.done` marker is written last. This module produces no object MV.
+
+The DLL's same-stem `.config` contains two UTF-8 lines: the absolute DXC DLL path
+and a new absolute output directory whose parent exists. It accepts Unicode paths
+and never overwrites a previous session. Eight slots, 64 pipeline/size/instance
+selections, 32 instances per draw and a conservative 256 MiB private-buffer budget
+bound this diagnostic. Failed or timed-out private GPU initialization retains
+possibly referenced resources. This is not a global budget across quarantined
+module generations or a production streaming allocation strategy.
+
+`GeometryInstances --module-recorder` uses this actual worker and capture owner,
+replaces the module at frame five and preserves both output directories. The two
+generations contain 107,520 original material reference samples; 143,360 original
+color pixels remain exact. The second generation detects deliberately absent
+object mapping. Both DLLs actually unload after completion and final Reset, joining
+their workers and completing pending saves. Unicode DLL/config/output paths are
+exercised. The fixture drains its GPU each frame: this does not prove replacement
+while these captures are GPU-in-flight. Synthetic engine identities remain test
+data; neither this result nor reference masks establish game contours or FG input.
+
+Only module identity is recorded in DllMain. Worker creation and joining occur
+outside the loader entry point, following Microsoft's
+[DLL best practices](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-best-practices).
+The module checks failure/truncation of
+[GetModuleFileNameW](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulefilenamew)
+before reading its configuration. Game control/startup registration is still pending.
 
 `ExperimentRuntime.h` loads absolute paths on its control thread. Invalid ABI,
 capabilities or failed preparation leaves the active module unchanged. Up to

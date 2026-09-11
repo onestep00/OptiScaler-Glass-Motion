@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [Experiments.md](Experiments.md): `--capture-module` drives capture Prepare/Recorded/Retired through the resident owner for eight real test draws. Submissions are forwarded by the fixture; Reset is observed. Original color/MV pass; game/FG integration pending.
+- [Experiments.md](Experiments.md): `--module-recorder` replaces two independently prepared coverage DLLs and verifies original material/color, missing mapping, Unicode paths and unload. GPU drains are fixture-only; game/FG integration pending.
 
 - [GeometryDraws.md](GeometryDraws.md): Mesh range decoder rejects malformed/stale callback inputs; owned-memory fixture only. Coverage sidecar preserves original draw/raster evidence without claiming engine history in the GPU fixture.
 

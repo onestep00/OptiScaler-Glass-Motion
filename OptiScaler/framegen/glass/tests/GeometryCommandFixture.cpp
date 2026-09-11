@@ -26,6 +26,6 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void*, std::uint32_t indices, s
     if (!geometryFixturePacket || indices != 6 || instances != 1 || startIndex || baseVertex != 2 ||
         startInstance < 7 || startInstance > 9)
         return {};
-    return { std::span(&object, 1), 2, 42, 0, 48, startInstance, instances };
+    return { std::span(&object, 1), 2, geometryFixtureFrame, 0, 48, startInstance, instances };
 }
 } // namespace GlassFg

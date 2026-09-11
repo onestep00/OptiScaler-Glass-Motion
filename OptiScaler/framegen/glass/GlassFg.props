@@ -23,6 +23,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentPipelineService.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCaptureAbi.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentCaptureOwner.h" />
+    <!-- Separate replaceable diagnostic DLL; do not link its entry point here. -->
+    <None Include="$(MSBuildThisFileDirectory)ExperimentCoverageModule.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryRasterState.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.cpp" />

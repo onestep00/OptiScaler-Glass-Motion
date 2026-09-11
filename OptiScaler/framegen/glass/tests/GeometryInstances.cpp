@@ -5,6 +5,7 @@
 #include "../GeometryDrawCapture.h"
 #include "../GeometryCoverageRecorder.h"
 #include "ExperimentDrawCheck.h"
+#include "ModuleRecorderCheck.h"
 extern bool geometryFixturePacket;
 extern bool geometryFixtureMissingIdentity;
 extern std::uint32_t geometryFixtureFrame;
@@ -190,10 +191,12 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--capture-command") == 0 ||
                                             wcscmp(argv[3], L"--recorder") == 0 ||
                                             wcscmp(argv[3], L"--experiment") == 0 ||
-                                            wcscmp(argv[3], L"--capture-module") == 0)),
+                                            wcscmp(argv[3], L"--capture-module") == 0 ||
+                                            wcscmp(argv[3], L"--module-recorder") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
-        const bool recorder = argc == 4 && wcscmp(argv[3], L"--recorder") == 0;
+        const bool moduleRecorder = argc == 4 && wcscmp(argv[3], L"--module-recorder") == 0;
+        const bool recorder = moduleRecorder || (argc == 4 && wcscmp(argv[3], L"--recorder") == 0);
         const bool captureModule = argc == 4 && wcscmp(argv[3], L"--capture-module") == 0;
         const bool experiment = captureModule || (argc == 4 && wcscmp(argv[3], L"--experiment") == 0);
         const bool captureCommand = experiment || recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
@@ -209,9 +212,12 @@ int wmain(int argc, wchar_t** argv)
         auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
         Device g;
         ExperimentDrawCheck experimentCheck;
+        ModuleRecorderCheck moduleRecorderCheck;
         if (experiment) experimentCheck.start(g.d.Get(), dir, captureModule);
-        const auto recorderOutput = std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
-        if (recorder)
+        const auto recorderOutput = moduleRecorder ? moduleRecorderCheck.start(g.d.Get(), dir, argv[2]) :
+            std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
+        std::filesystem::path secondModuleOutput;
+        if (recorder && !moduleRecorder)
         {
             std::filesystem::create_directories(recorderOutput);
             const auto request = recorderOutput / "request.txt";
@@ -402,8 +408,9 @@ int wmain(int argc, wchar_t** argv)
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
+            if (moduleRecorder && frame == 5) secondModuleOutput = moduleRecorderCheck.replace();
             if (experiment && !captureModule && frame == 2) experimentCheck.prepare(argv[2]);
-            if (recorder && frame == 5)
+            if (recorder && !moduleRecorder && frame == 5)
             {
                 g.begin(); // Discard the preceding recording before stopping.
                 g.finish();
@@ -486,6 +493,7 @@ int wmain(int argc, wchar_t** argv)
             const float fc[] { frame * .31f, frame * .023f, frame * -.017f, 0 };
             const UINT current = frame & 1, previous = current ^ 1;
             g.begin();
+            if (moduleRecorder) moduleRecorderCheck.collect();
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
             if (coverageOnly)
                 g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, CaptureBytes);
@@ -786,7 +794,10 @@ int wmain(int argc, wchar_t** argv)
         {
             g.begin(); // Discard the last recording as well as waiting for execution.
             g.finish();
-            for (const auto& captureDirectory : { recorderOutput, recorderOutput / "request-2" })
+            if (moduleRecorder) moduleRecorderCheck.finish();
+            std::vector<std::filesystem::path> captureDirectories { recorderOutput };
+            captureDirectories.push_back(moduleRecorder ? secondModuleOutput : recorderOutput / "request-2");
+            for (const auto& captureDirectory : captureDirectories)
             {
             const auto done = captureDirectory / "objects-0.done";
             const auto deadline = GetTickCount64() + 10000;
@@ -852,6 +863,13 @@ int wmain(int argc, wchar_t** argv)
             }
             require(frame >= 5 ? missingMapped > 20 : missingMapped == 0,
                     "Reference did not distinguish deliberately missing object mapping");
+            }
+            if (moduleRecorder)
+            {
+                printf("PASS independent_module_recorder=1 worker_prepared_resources=1 saved_original_samples=%u "
+                       "original_pixels=%llu same_draw_reference=1 module_generations=2 actual_unload=2 "
+                       "missing_mapping_detected=1 motion_produced=0 game_hooks=0\n", 6 * W * H, exact);
+                return 0;
             }
             printf("PASS recorder_worker=1 completion_and_discard=1 requests_same_process=2 original_material_samples=%u original_pixels=%llu "
                    "same_draw_reference=1 missing_mapping_detected=1 motion_produced=0 game_hooks=0\n", 2 * 3 * W * H, exact);

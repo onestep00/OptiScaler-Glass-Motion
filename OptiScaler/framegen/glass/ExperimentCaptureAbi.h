@@ -23,7 +23,8 @@ struct GlassExperimentCaptureInput
     GlassExperimentPreparedCapture* output; // Prepare only
     uint32_t recorded, reserved;
 };
-// Prepare: no GPU commands, waits or resource mutation; 1 reserves output,
+// Prepare: no GPU commands, waits or shared-input mutation. May fill exclusively
+// reserved upload ranges that have no pending GPU/recording use. 1 reserves output,
 // 0 declines. Recorded: callback on the original command after host restoration,
 // permits module-owned capture transitions/copies only when recorded=1.
 // Retired: control-thread notification after completion AND recording discard;
