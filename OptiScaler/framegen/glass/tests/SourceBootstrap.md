@@ -225,3 +225,28 @@ simultaneous census also observed only chunk zero for this selected mesh, so
 this run does not verify multi-chunk collection or full-object merging. The
 module unloaded with no pending captures. Local evidence:
 `work/glass-mesh-chunks-v1/capture/`. Temporal ownership and FG remain unchanged.
+
+## Same-frame mesh sampling correction in PID 72636
+
+The fcc7deb host was built, backed up and deployed through MO2 Root. The new
+process loaded DLL SHA256 2fad71eff9a175b8efe82b86deb58c3c506e090fbf1a4600595f726f81ba07fb
+alongside version.dll and mfg-unlock.asi. Creation, census, target-view and
+submission services responded. This is host verification, not FG completion.
+
+The current scene yielded different shader/mesh candidates. A 64-job capture of
+one mesh resource recorded chunks zero and two, but never in the same frame,
+although the census observed both in seven sampled frames. One request was
+filling all eight empty slots with the same chunk. Mesh-scoped sampling now
+reserves only one slot per request and defers consuming ready slots while other
+requested slots are building. It skips capture rather than waiting on rendering;
+the original draw proceeds. The eight-slot and byte budgets remain unchanged.
+
+The replacement module built with /O2 /W4 /WX and captured 64 jobs in the same
+running process: 32 frames contain both chunks. All jobs retired and the module
+unloaded. The per-draw masks match their contributing references exactly, with
+zero status errors. However, the two chunks belong to different proxy/registry
+slots despite sharing a mesh. They must NOT be merged as one object. The selected
+visualization has 705 pixels for one proxy and two pixels for the other. It is
+original-material coverage, not complete object contours or motion. No new MV or
+FG substitution occurred. Evidence: `work/glass-multichunk-p72636-v{1,2}/`;
+v2 `analysis.json` and `separate-object-chunks.png` preserve the separate identities.

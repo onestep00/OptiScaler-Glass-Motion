@@ -467,8 +467,10 @@ class Coverage
                 if (slot.frame == event.frame && slot.draw.mesh == d->mesh && slot.draw.chunk == d->chunk &&
                     slot.draw.pipelineIdentity == d->pipelineIdentity && slot.draw.startInstance == d->startInstance &&
                     slot.draw.instances == d->instances && slot.draw.recording == d->recording) return 0;
+        const bool batchPreparing = selection.meshOnly && std::any_of(slots.begin(), slots.end(), [](const Slot& slot)
+            { return slot.state == Slot::Requested || slot.state == Slot::Building; });
         for (auto& slot : slots)
-            if (slot.state == Slot::Ready && slot.view.identity == d->pipelineIdentity && slot.width == width &&
+            if (!batchPreparing && slot.state == Slot::Ready && slot.view.identity == d->pipelineIdentity && slot.width == width &&
                 slot.height == height && slot.instances == d->instances &&
                 (!(NativePixelDiagnostic || selection.meshOnly) || (slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk)) &&
                 (!VertexOutputDiagnostic || slot.mesh.vertices == vertexShape.vertices))
@@ -604,6 +606,7 @@ class Coverage
             if constexpr (VertexOutputDiagnostic) slot.mesh = vertexShape;
             selected[selections++] = { d->pipelineIdentity, width, height, d->instances, d->mesh, d->chunk };
             slot.state = Slot::Requested; changed.notify_one();
+            if (selection.meshOnly) break; // Reserve space for other chunks in the same frame.
             if constexpr (!VertexOutputDiagnostic) break;
             if (selections == MaxCaptures) break;
         }

@@ -20,7 +20,7 @@
 
 - [GeometryObservation.md](GeometryObservation.md): Depth-independent observation and one-time failed-material to vertex-only recovery pass independent D3D12 checks; retained payload is reused. Live missing-chunk descriptor and FG remain incomplete.
 
-- [SourceBootstrap.md](SourceBootstrap.md): CaptureSelection checks mesh-scoped and exact selectors. Live mesh capture retains changing instance counts; multi-chunk collection is not yet demonstrated. MRT/stencil coverage checks remain passing.
+- [SourceBootstrap.md](SourceBootstrap.md): Fixed mesh-slot monopolization; 32 live frames capture both chunks with exact reference coverage. Different proxy identities prohibit merging them into one object. Full contours/MV/FG remain incomplete.
 
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 

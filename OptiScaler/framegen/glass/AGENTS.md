@@ -14,7 +14,7 @@
 
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Bounded observation and failed-material to vertex-only recovery pass independent checks without duplicate shader storage. Missing live mesh-chunk pipeline, host deployment and FG remain incomplete.
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped capture permits separate chunks/ranges within a frame; selector checks and 64 live captures pass. Selected mesh yielded one chunk only; complete outlines and temporal/FG remain incomplete.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped slots no longer all fill from the first chunk. Both chunks captured in 32 live frames; differing proxy identities remain separate. Complete outlines and temporal/FG remain incomplete.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 
