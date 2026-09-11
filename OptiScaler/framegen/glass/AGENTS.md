@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): MRT/depth/stencil GPU checks pass; live depth-writing capture separates two instance masks totaling 2,396 pixels. Full outlines and temporal/FG integration remain incomplete.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped capture permits separate chunks/ranges within a frame; selector checks and 64 live captures pass. Selected mesh yielded one chunk only; complete outlines and temporal/FG remain incomplete.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 

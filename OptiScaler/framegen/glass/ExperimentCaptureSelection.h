@@ -12,6 +12,7 @@ namespace GlassFg
 struct ExperimentCaptureSelection
 {
     bool enabled = false;
+    bool meshOnly = false;
     uint64_t pipeline = 0, target = 0, mesh = 0, proxy = 0;
     uint32_t binding = 0, chunk = 0, indices = 0, instances = 0, startIndex = 0, startInstance = 0;
     int32_t baseVertex = 0;
@@ -20,7 +21,16 @@ struct ExperimentCaptureSelection
         ExperimentCaptureSelection result;
         if (line.empty()) return result;
         std::istringstream input(line); std::string format; uint32_t pid = 0;
-        if (!(input >> format >> pid >> result.pipeline >> result.binding >> result.target >> result.mesh >> result.chunk >>
+        if (!(input >> format >> pid) || pid != process) throw std::runtime_error("Invalid capture process");
+        if (format == "select-mesh-v1")
+        {
+            if (!(input >> result.binding >> result.target >> result.mesh) || result.binding > 8 || !result.target || !result.mesh)
+                throw std::runtime_error("Invalid mesh capture selector");
+            input >> std::ws;
+            if (!input.eof()) throw std::runtime_error("Unexpected mesh selector fields");
+            result.enabled = result.meshOnly = true; return result;
+        }
+        if (!(input >> result.pipeline >> result.binding >> result.target >> result.mesh >> result.chunk >>
               result.indices >> result.instances >> result.startIndex >> result.baseVertex >> result.startInstance >> result.proxy) ||
             format != "select-v1" || pid != process || !result.pipeline || result.binding > 8 || !result.target ||
             !result.mesh || !result.indices || !result.instances || result.instances > 64)
@@ -32,9 +42,10 @@ struct ExperimentCaptureSelection
     bool matches(const GlassExperimentDrawInput& draw) const
     {
         if (!enabled) return true;
-        if (draw.pipelineIdentity != pipeline || draw.mesh != mesh || draw.chunk != chunk || draw.indices != indices ||
+        if (draw.mesh != mesh || !draw.targetAt) return false;
+        if (!meshOnly && (draw.pipelineIdentity != pipeline || draw.chunk != chunk || draw.indices != indices ||
             draw.instances != instances || draw.startIndex != startIndex || draw.baseVertex != baseVertex ||
-            (startInstance != UINT32_MAX && draw.startInstance != startInstance) || !draw.targetAt) return false;
+            (startInstance != UINT32_MAX && draw.startInstance != startInstance))) return false;
         GlassExperimentTarget view {}; view.size = sizeof(view);
         if (draw.targetAt(draw.targetSource, binding, &view) != 1 || view.resource != target) return false;
         if (!proxy) return true;

@@ -206,3 +206,22 @@ FG input is unchanged. Evidence and per-instance visualization:
 `work/glass-array-depth-coverage-v{1,2}/`; v2 has `coverage-analysis.json` and
 `actual-instance-coverage.png`. The original shader/state preservation is from
 the independent GPU fixture; no live before/after color comparison was performed.
+
+## Mesh-scoped diagnostic capture
+
+`select-mesh-v1 PID BINDING TARGET MESH` keeps the process, render-target and
+mesh restriction but permits different chunks, pipelines and instance counts.
+It selects original draw metadata; it does not infer shared object ownership.
+In this mode the vertex recorder no longer globally stops after one draw in a
+frame. It rejects an already-recorded frame/recording/pipeline/chunk/instance
+range, keeps slots separate by mesh/chunk, and avoids duplicate pending slot
+preparation for the same shape. The existing eight-slot and byte budgets remain.
+Exact `select-v1` behavior is unchanged. `CaptureSelection.cpp` verifies both
+formats, target/mesh exclusions, changed chunks and invalid process/extra fields.
+
+The new module built and ran in PID 70152, producing 64 completed captures:
+25 two-instance draws and 39 three-instance draws. All use chunk zero. The
+simultaneous census also observed only chunk zero for this selected mesh, so
+this run does not verify multi-chunk collection or full-object merging. The
+module unloaded with no pending captures. Local evidence:
+`work/glass-mesh-chunks-v1/capture/`. Temporal ownership and FG remain unchanged.

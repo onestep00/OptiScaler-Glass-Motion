@@ -461,11 +461,16 @@ class Coverage
         std::unique_lock lock(mutex, std::try_to_lock);
         if (!lock || stopping) return 0;
         if constexpr (VertexOutputDiagnostic)
-            if (lastVertexFrame == event.frame) return 0;
+            if (!selection.meshOnly && lastVertexFrame == event.frame) return 0;
+        if (selection.meshOnly)
+            for (const auto& slot : slots)
+                if (slot.frame == event.frame && slot.draw.mesh == d->mesh && slot.draw.chunk == d->chunk &&
+                    slot.draw.pipelineIdentity == d->pipelineIdentity && slot.draw.startInstance == d->startInstance &&
+                    slot.draw.instances == d->instances && slot.draw.recording == d->recording) return 0;
         for (auto& slot : slots)
             if (slot.state == Slot::Ready && slot.view.identity == d->pipelineIdentity && slot.width == width &&
                 slot.height == height && slot.instances == d->instances &&
-                (!NativePixelDiagnostic || (slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk)) &&
+                (!(NativePixelDiagnostic || selection.meshOnly) || (slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk)) &&
                 (!VertexOutputDiagnostic || slot.mesh.vertices == vertexShape.vertices))
             {
                 slot.left = left; slot.top = top; slot.objects = {};
@@ -572,6 +577,11 @@ class Coverage
                     selected[i].height == height && selected[i].instances == d->instances &&
                     (!NativePixelDiagnostic || (selected[i].mesh == d->mesh && selected[i].chunk == d->chunk))) return 0;
         if (selections == MaxCaptures) return 0;
+        if (selection.meshOnly)
+            for (const auto& slot : slots)
+                if (slot.state != Slot::Empty && slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk &&
+                    slot.width == width && slot.height == height && slot.instances == d->instances &&
+                    selected[slot.index].pipeline == d->pipelineIdentity) return 0;
         for (auto& slot : slots) if (slot.state == Slot::Empty)
         {
             const unsigned words = unsigned(1 + (uint64_t(width) * height + 31) / 32);

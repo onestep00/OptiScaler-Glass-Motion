@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [SourceBootstrap.md](SourceBootstrap.md): NativePairGpu depth coverage checks three colors, depth and actual stencil values. Live capture produces exact per-instance/reference union for one partial chunk; full silhouette/FG absent.
+- [SourceBootstrap.md](SourceBootstrap.md): CaptureSelection checks mesh-scoped and exact selectors. Live mesh capture retains changing instance counts; multi-chunk collection is not yet demonstrated. MRT/stencil coverage checks remain passing.
 
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 
