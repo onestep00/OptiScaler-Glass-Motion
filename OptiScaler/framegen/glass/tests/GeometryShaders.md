@@ -3,7 +3,7 @@
 - Created: 2026-09-11
 - Updated: 2026-09-11
 - Status: independent GPU and public creation observer verified; engine acquisition/draw integration incomplete
-- Deployment: none; startup creation adapter added to source, with no new game draw or FG substitution
+- Deployment: creation/command acquisition staged in MO2 build 32054cc; no new game draw capture or FG substitution
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
 
@@ -13,7 +13,7 @@
 
 `RewriteMaterialMotion` preserves the original material computation/discard and emits normalized previous-minus-current motion, mean RGB attenuation, and current device depth into a separate target. Material opacity is derived from the verified destination blend factor; colored transmission becomes `1 - mean(saturate(T.rgb))`. A scalar coefficient cannot fully represent colored/refraction layers. Pixels contributing neither source color nor attenuation are excluded. Invalid history and nonfinite motion are rejected. Original color-output stores are replaced only in this separate diagnostic/capture PSO; this shader must never replace the game's color pixel shader as-is.
 
-The algorithm and creation observer remain in this module. The upstream D3D12 device hook has explicit startup and final-root-creation integration calls. The original static-world correction remains installed; the new source has not been deployed.
+The algorithm and creation observer remain in this module. The upstream D3D12 device hook has explicit startup and final-root-creation integration calls. Acquisition build 32054cc is staged in MO2 Root for fresh-process validation. Its correction still uses static-world projection; the shader capture has no production draw caller yet.
 
 `OriginalColorAndCapture` preserves the original color exports and appends a rasterizer-ordered raw-buffer capture in the same draw. A bounded per-object rectangle stores surface motion/depth and RGB transmission without a second material evaluation. Original discard still executes. Missing history or an out-of-range capture address skips only the added storage. The host must validate `MaterialCaptureConstants` against the actual allocation and prove the original pass has read-only depth/stencil before using its early-depth variant.
 

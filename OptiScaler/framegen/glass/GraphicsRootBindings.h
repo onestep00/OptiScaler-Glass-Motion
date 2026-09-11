@@ -1,6 +1,7 @@
 #pragma once
 #include "GeometryPipeline.h"
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 
@@ -14,7 +15,8 @@ class GraphicsRootBindings
   public:
     void reset(ID3D12PipelineState* initial = nullptr)
     {
-        *this = {};
+        written = 0;
+        root = nullptr;
         complete = true;
         pipeline = initial;
     }
@@ -24,16 +26,19 @@ class GraphicsRootBindings
     {
         if (root != value)
         {
-            slots = {};
+            written = 0;
             root = value;
         }
     }
     // Actual change of descriptor heaps invalidates table bindings only.
     void heapsChanged()
     {
-        for (auto& s : slots)
-            if (s.type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
-                s.known = 0;
+        for (auto remaining = written; remaining; remaining &= remaining - 1)
+        {
+            const auto index = std::countr_zero(remaining);
+            if (slots[index].type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+                written &= ~(UINT64(1) << index);
+        }
     }
     void table(UINT slot, D3D12_GPU_DESCRIPTOR_HANDLE value)
     {
@@ -49,10 +54,10 @@ class GraphicsRootBindings
             return;
         }
         auto& s = slots[slot];
-        s = {};
         s.type = type;
         s.address = value;
         s.known = 1;
+        written |= UINT64(1) << slot;
     }
     void constants(UINT slot, UINT count, const void* values, UINT offset)
     {
@@ -64,7 +69,9 @@ class GraphicsRootBindings
         if (!count)
             return;
         auto& s = slots[slot];
-        if (s.known && s.type != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
+        if (!(written & (UINT64(1) << slot)))
+            s.known = 0;
+        else if (s.type != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
         {
             invalidate();
             return;
@@ -73,18 +80,18 @@ class GraphicsRootBindings
         std::memcpy(s.values.data() + offset, values, count * sizeof(UINT));
         const auto mask = count == 64 ? UINT64_MAX : ((UINT64(1) << count) - 1) << offset;
         s.known |= mask;
+        written |= UINT64(1) << slot;
     }
     bool canReplay(const GeometryRoot& expected, ID3D12PipelineState* originalPipeline) const
     {
         if (!complete || !root || root != expected.original.Get() || !pipeline || pipeline != originalPipeline ||
             expected.originalParameters.size() > slots.size())
             return false;
-        for (size_t i = 0; i < slots.size(); ++i)
+        for (auto remaining = written; remaining; remaining &= remaining - 1)
         {
+            const auto i = std::countr_zero(remaining);
             const auto& s = slots[i];
-            if (!s.known)
-                continue;
-            if (i >= expected.originalParameters.size())
+            if (static_cast<size_t>(i) >= expected.originalParameters.size())
                 return false;
             const auto& p = expected.originalParameters[i];
             if (p.ParameterType != s.type)
@@ -101,11 +108,10 @@ class GraphicsRootBindings
     void replay(ID3D12GraphicsCommandList* command, ID3D12RootSignature* destination) const
     {
         command->SetGraphicsRootSignature(destination);
-        for (UINT i = 0; i < slots.size(); ++i)
+        for (auto remaining = written; remaining; remaining &= remaining - 1)
         {
+            const auto i = static_cast<UINT>(std::countr_zero(remaining));
             const auto& s = slots[i];
-            if (!s.known)
-                continue;
             switch (s.type)
             {
             case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
@@ -150,7 +156,11 @@ class GraphicsRootBindings
         UINT64 address = 0, known = 0;
         std::array<UINT, 64> values {};
     };
+    // Reset/root changes invalidate one mask. Stale payload bytes are never
+    // read unless that slot is written again; partial constants have their
+    // own validity mask. Address setters do not clear 64 unused constants.
     std::array<Slot, 64> slots {};
+    UINT64 written = 0;
     bool complete = false;
 };
 } // namespace GlassFg

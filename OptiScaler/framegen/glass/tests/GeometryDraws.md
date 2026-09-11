@@ -3,7 +3,7 @@
 - Created: 2026-09-11
 - Updated: 2026-09-11
 - Status: production engine callbacks and public D3D12 consumer pass independent tests; live provenance unverified
-- Deployment: none
+- Deployment: acquisition build 32054cc staged in MO2 Root; fresh-process verification pending
 - Deprecated: no
 - Scope: direct indexed mesh batches in the audited Cyberpunk executable; broader routes remain incomplete
 
@@ -34,3 +34,9 @@ A fixed 512-record table allows at most 32 probes per lookup. Registration takes
 The independent `GeometryInstances --commands` fixture uses the production public hooks with test-owned packet identities. All 40 actual indexed calls forwarded, with 24 borrowed identity/pipeline/root matches. It deliberately switches/restores roots, including separately set constants. All 143,360 original color pixels and the existing 3,563 accepted motion samples still pass. It installs no game hooks and does not prove actual engine packet frequency. The full Release x64 solution also builds successfully.
 
 Binding invalidation follows Microsoft's [root signature semantics](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-a-root-signature), [bundle state inheritance](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-executebundle) and [descriptor heap contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-setdescriptorheaps).
+
+Root binding reuse now keeps a 64-bit written-slot mask. Reset or a changed root invalidates this mask without clearing the 64 per-slot constant arrays. An address/table setter updates only its scalar payload; replay and validation visit the written slots. Partial constants retain a separate bit mask, so stale payload bytes cannot become valid through a root/heap change. This reduces deterministic memory writes without changing the fixed cache size or claiming a measured speedup.
+
+The production `--commands` GPU test still passes all 143,360 original pixels, 3,563 MV samples and 24 draw/root joins after this change. Additional checks reject stale constant ranges and foreign slots, preserve bindings on a redundant root call, invalidate only tables on heap changes, and clear prior invalidation on Reset. The full Release x64 solution also builds successfully. This optimization is source-only at this checkpoint; staged build 32054cc predates it.
+
+On 2026-09-11, after a successful quicksave, normal game exit and RootBuilder Sync/Clear, the full Release 32054cc DLL was staged as `overwrite/Root/bin/x64/dxgi.dll`. Its SHA-256 is `a5b3a6a42a5759a28f06a266b2566172fcc9d9bfe04d97f5246d025375024904`. Both HLSL files and the pinned `Glass/dxcompiler.dll` and `Glass/dxil.dll` were copied with hash verification. Settings, MFG ASI and `version.dll` hashes stayed unchanged; the existing diagnostic ASI exits before hook installation because its completed marker remains present. The previous files and a deployment manifest were backed up locally. The user will launch the game. This is staging evidence, not a live engine join or new FG-input substitution.

@@ -7,6 +7,38 @@ extern bool geometryFixturePacket;
 #include <d3dx/d3dx12.h>
 #pragma warning(pop)
 
+static void rootInvalidation(const GlassFg::GeometryRoot& root, ID3D12PipelineState* original)
+{
+    GlassFg::GraphicsRootBindings state;
+    UINT values[64] {};
+    state.reset(original);
+    state.setRoot(root.original.Get());
+    state.constants(0, 64, values, 0);
+    require(!state.canReplay(root, original), "Out-of-range constant data admitted");
+    state.setRoot(root.original.Get());
+    require(!state.canReplay(root, original), "Redundant root binding cleared live constants");
+    state.setRoot(root.extended.Get());
+    state.setRoot(root.original.Get());
+    state.constants(0, 1, values, 3);
+    require(state.canReplay(root, original), "Old constant mask survived a root change");
+    state.table(63, { 1 });
+    require(!state.canReplay(root, original), "Foreign root slot admitted");
+    state.heapsChanged();
+    require(state.canReplay(root, original), "Invalidated descriptor table remained live");
+    state.table(0, { 2 });
+    state.heapsChanged();
+    state.constants(0, 1, values, 0);
+    require(state.canReplay(root, original), "Invalidated table type corrupted new constants");
+    state.address(63, D3D12_ROOT_PARAMETER_TYPE_CBV, 256);
+    state.heapsChanged();
+    require(!state.canReplay(root, original), "Heap switch discarded a root descriptor");
+    state.invalidate();
+    state.reset(original);
+    state.setRoot(root.original.Get());
+    state.constants(0, 2, values, 2);
+    require(state.canReplay(root, original), "Reset retained old slots or invalidation");
+}
+
 static std::shared_ptr<const GlassFg::GeometryPipelineEntry>
 observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
                  bool keepActive)
@@ -229,6 +261,7 @@ int wmain(int argc, wchar_t** argv)
                               : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
                                                std::filesystem::absolute(argv[2]));
         const auto& root = *lease->root;
+        rootInvalidation(root, original.Get());
         capturePso = lease->instrumented;
         require(root.dwords == 22 && root.instanceSlot == 6, "Mapped root extension");
         D3D12_SO_DECLARATION_ENTRY so { 0, "SV_Position", 0, 0, 4, 0 };

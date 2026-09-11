@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [GeometryDraws.md](GeometryDraws.md): Engine callbacks and public draw/root consumer pass independent GPU checks and Release build. Live deployment and FG substitution remain incomplete; internal multi-instance arrays and non-mesh routes remain unverified.
+- [GeometryDraws.md](GeometryDraws.md): Acquisition build 32054cc staged in MO2; live validation and FG substitution pending. Public draw/root and written-slot invalidation checks pass. Internal multi-instance arrays and non-mesh routes remain unverified.
 
 - [GeometryObjects.md](GeometryObjects.md): Mesh lifetime generations, bounded pose candidates and callback layout/return tests. Synthetic owned memory only; no game hooks. Read the direct-provenance and unobserved-mutation limitations before using a candidate for a draw.
 

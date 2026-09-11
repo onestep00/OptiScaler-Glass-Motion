@@ -3,7 +3,7 @@
 - Created: 2026-09-10
 - Updated: 2026-09-11
 - Status: experimental; deployed native host, controls and actual moving-frame input substitution verified; paired 4x replay still shows glass ghosting, not visually accepted
-- Deployment: full b59aa86 OptiScaler DLL and both shaders installed through MO2 RootBuilder and exercised in a fresh game process; local correction enabled at strength 100
+- Deployment: acquisition build 32054cc staged in MO2 Root with both shaders and DXC; fresh-process verification pending. Last verified correction remains the b59aa86 static-world algorithm, locally enabled at strength 100
 - Deprecated: no
 - Scope: all Cyberpunk 2077 in-world transparency, excluding HUD; native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
@@ -14,11 +14,11 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 
 [The shader-history implementation](tests/GeometryShaders.md) reuses actual original VS positions and material coverage. Independent GPU checks preserve original color/position outputs, object masks through batch reordering, and perspective-correct motion with frame/generation rejection. A bounded compiler worker and public PSO/root creation observer also pass the GPU checks. The upstream device hook now starts acquisition and forwards final root bytes after sampler overrides; packaged DXC files stay in `Glass/`. Live engine identity, draw insertion, ordering and per-object boundary composition remain incomplete. This source has not replaced the installed correction.
 
-[The engine packet adapter](tests/GeometryDraws.md) now obtains direct proxy-slot provenance through the original rigid/skinned instance append and flush paths. Independent production-callback tests and the full Release build pass. Internal multi-instance arrays keep their intervals without inferred identities. The public draw consumer, live game validation and FG connection remain incomplete; this does not establish support for every transparent rendering route.
+[The engine packet adapter](tests/GeometryDraws.md) now obtains direct proxy-slot provenance through the original rigid/skinned instance append and flush paths. The public draw/root consumer passes independent GPU tests and the full Release build. Internal multi-instance arrays keep their intervals without inferred identities. Build 32054cc is staged in MO2 Root for a user-launched validation run; live game validation and the new geometry-to-FG connection remain incomplete. This does not establish support for every transparent rendering route.
 
 ## Boundaries
 
-Verification sections below retain earlier investigation results. The fresh-process deployment section records the current installation state.
+Verification sections below retain earlier investigation results. The fresh-process deployment section records the previously verified correction; tests/GeometryDraws.md records the later acquisition build staged for validation.
 
 | Component | Responsibility |
 | --- | --- |
