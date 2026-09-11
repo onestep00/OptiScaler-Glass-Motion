@@ -66,6 +66,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Actual graphics command observer GPU test fail
 if ($LASTEXITCODE -ne 0) { throw 'Single-draw capture insertion or root restoration failed' }
 & $instances $build $dxc --experiment
 if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL bridge failed' }
+& $instances $build $dxc --capture-module
+if ($LASTEXITCODE -ne 0) { throw 'Module capture preparation/recording/retirement failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $instances $build $dxc --recorder

@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: loader, GPU retirement and module-compiled geometry capture pass independent checks; game integration incomplete
+- Status: module capture prepare/record/retire ABI and original color/MV pass independent checks; game integration incomplete
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -10,8 +10,8 @@
 `ExperimentAbi.h` defines a sized/versioned C boundary with the exported
 `GlassExperimentQuery`. Its table creates a private context, handles versioned
 borrowed events and destroys the context. No STL or allocator ownership crosses
-the boundary. The draw observation payload is now defined; FG payload and GPU
-capture preparation across the DLL boundary remain incomplete.
+the boundary. Draw observation and capture preparation/lifecycle payloads are
+defined; FG payload and game control/startup integration remain incomplete.
 
 `ExperimentDrawAbi.h` and `ExperimentDrawBridge.h` pass borrowed original draw,
 pipeline/root, shader descriptor, viewport/scissor and target handles to a
@@ -50,6 +50,34 @@ startup observer registration has been added yet. Build the fixture DLL from
 beside GeometryInstances with DXC includes and d3d12/dxgi libraries; `build_geometry_shader.ps1`
 includes this check.
 
+`ExperimentCaptureAbi.h` defines capability 4 with Prepare, Recorded and Retired
+events. `ExperimentCaptureOwner.h` implements the existing resident draw-owner
+seam. The module returns its PSO, history constants and owned GPU addresses; the
+host preserves one original draw and restores root/PSO state. Prepare cannot issue
+GPU commands. Recorded permits module-owned capture copies/transitions after that
+restoration. Retired arrives on the control thread only after recording discard
+and all submitted completion points. Capture callbacks are serialized; contended
+prepare/collection skips admission instead of waiting on another callback.
+
+The initial fixed pool holds 256 jobs/command trackers, eight engine-frame leases
+and eight precreated queue fences. An engine frame keeps its selected module while
+its jobs are pending. This is not engine-to-FG token correlation. Each observed
+submission batch with jobs gets one shared completion signal. First observation
+of a command installs an official destruction token; per-draw admission allocates
+no GPU resources or full input copies. Unresolved submissions remain quarantined.
+These diagnostic capacities/admission scans are not a production throughput claim.
+
+`GeometryInstances --capture-module` uses this ABI/owner for all eight inserted
+draws. Actual public Reset hooks discard recordings. The fixture forwards each
+real submission through `NotifyGeometryCaptureSubmit` after its own GPU drain;
+it does not install the live native queue observer. Seven jobs retire before the
+last Reset; the final job and DLL remain retained even after runtime disable.
+The final actual Reset/queue completion permits its Retired callback and unloading.
+All 143,360 original pixels and 3,563 MV samples pass. Module preparation and capture
+buffers still come from explicit fixture setup. Runtime control, automatic module
+worker preparation, in-flight replacement through this owner, resource/view census,
+actual engine input and FG integration remain unverified/incomplete.
+
 `ExperimentRuntime.h` loads absolute paths on its control thread. Invalid ABI,
 capabilities or failed preparation leaves the active module unchanged. Up to
 three generations are retained. Still-loaded paths are rejected. The module
@@ -63,7 +91,8 @@ and command recordings are discarded**, not only until CPU callbacks return.
 one host-identified recording epoch. It accepts up to four submitted completion
 points, requires actual discard plus all completions, and rejects wrong epochs.
 Unknown submissions, overflow and device-removal values prevent retirement.
-These notifications are not yet wired to the game's observer. Teardown with unresolved leases conservatively
+The capture owner now accepts the resident submission/Reset seam; its game startup
+registration is not deployed. Teardown with unresolved leases conservatively
 retains at most three modules. This fallback must not be normal streaming behavior.
 Module destroy must stop/join its private workers before returning. Atomic shared
 pointer acquisition is not claimed lock-free; render callbacks perform no DLL load.

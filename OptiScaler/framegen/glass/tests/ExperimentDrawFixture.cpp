@@ -1,4 +1,5 @@
 #include "../ExperimentDrawAbi.h"
+#include "../ExperimentCaptureAbi.h"
 #include "../GeometryPipeline.h"
 #include <d3d12.h>
 #include <new>
@@ -13,6 +14,8 @@ struct Context
     GlassExperimentPipelineAccess access {};
     void* token = nullptr;
     unsigned calls = 0;
+    GlassExperimentPreparedCapture capture {};
+    unsigned prepared = 0, recorded = 0, retired = 0;
     ~Context() { if (token) access.release(token); }
 };
 Context* fixture = nullptr;
@@ -25,6 +28,34 @@ int32_t create(const GlassExperimentHost* host, void** context)
 }
 int32_t event(void* context, const GlassExperimentEvent* value)
 {
+    if (value && value->kind == GlassExperimentCapture)
+    {
+        if (value->payloadVersion != 1 || value->payloadBytes != sizeof(GlassExperimentCaptureInput) || !value->payload)
+            return -30;
+        const auto& input = *static_cast<const GlassExperimentCaptureInput*>(value->payload);
+        auto& owned = *static_cast<Context*>(context);
+        if (input.size != sizeof(input) || !input.job || !input.recording) return -31;
+        if (input.stage == GlassCapturePrepare)
+        {
+            if (!input.draw || !input.output || !input.command) return -32;
+            if (input.draw->instances != 3) return 0;
+            if (!owned.pipeline || owned.capture.size != sizeof(owned.capture)) return -33;
+            *input.output = owned.capture;
+            input.output->pipeline = owned.pipeline.Get();
+            ++owned.prepared; return 1;
+        }
+        if (input.stage == GlassCaptureRecorded)
+        {
+            if (!input.command || !input.recorded) return -34;
+            ++owned.recorded; return 0;
+        }
+        if (input.stage == GlassCaptureRetired)
+        {
+            if (input.command || input.draw || input.output || !input.recorded) return -35;
+            ++owned.retired; return 0;
+        }
+        return -36;
+    }
     if (!value || value->kind != GlassExperimentDraw || value->payloadVersion != 2 ||
         value->payloadBytes != sizeof(GlassExperimentDrawInput) || !value->payload ||
         value->frame != 42 || value->phase || value->phaseCount) return -10;
@@ -67,7 +98,7 @@ int32_t event(void* context, const GlassExperimentEvent* value)
     return static_cast<int32_t>(d.objectCount);
 }
 void destroy(void* context) { delete static_cast<Context*>(context); fixture = nullptr; }
-const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI, GlassExperimentDraw, create, event, destroy };
+const GlassExperimentApi api { sizeof(api), GLASS_EXPERIMENT_ABI, GlassExperimentDraw | GlassExperimentCapture, create, event, destroy };
 }
 extern "C" __declspec(dllexport) const GlassExperimentApi* GlassExperimentQuery() { return &api; }
 // Test-only control-thread entry: compile inside the separately loaded DLL from
@@ -76,7 +107,7 @@ extern "C" __declspec(dllexport) int32_t PrepareRetainedPipeline(const wchar_t* 
 {
     try
     {
-        if (!fixture || !fixture->token || !fixture->calls || fixture->pipeline) return -1;
+        if (!fixture || !fixture->token || fixture->pipeline) return -1;
         GlassExperimentPipelineView view {}; view.size = sizeof(view);
         if (!fixture->access.view(fixture->token, &view) || !view.identity || view.layout != 1 ||
             !view.originalRoot || !view.extendedRoot || !view.descriptor ||
@@ -101,4 +132,19 @@ extern "C" __declspec(dllexport) int32_t PrepareRetainedPipeline(const wchar_t* 
 extern "C" __declspec(dllexport) void* GetPreparedPipeline()
 {
     return fixture ? fixture->pipeline.Get() : nullptr;
+}
+extern "C" __declspec(dllexport) int32_t PrimePipeline(GlassExperimentPipelineAccess access)
+{
+    if (!fixture || fixture->token || !access.retain || !access.view || !access.release) return 0;
+    fixture->token = access.retain(access.source);
+    access.source = nullptr; fixture->access = access;
+    return fixture->token ? 1 : 0;
+}
+extern "C" __declspec(dllexport) void ConfigureCapture(const GlassExperimentPreparedCapture* capture)
+{
+    if (fixture && capture) fixture->capture = *capture;
+}
+extern "C" __declspec(dllexport) int32_t VerifyCaptureCounts()
+{
+    return fixture && fixture->prepared == 8 && fixture->recorded == 8 && fixture->retired == 8;
 }

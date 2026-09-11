@@ -68,7 +68,8 @@ class ExperimentRuntime
         {
             if (!module || event.size != sizeof(event) || event.frame != frame ||
                 !(module->api.capabilities & event.kind) ||
-                (event.kind != GlassExperimentDraw && event.kind != GlassExperimentFg) ||
+                (event.kind != GlassExperimentDraw && event.kind != GlassExperimentFg &&
+                 event.kind != GlassExperimentCapture) ||
                 (event.payloadBytes && !event.payload))
                 return -1;
             if (event.kind == GlassExperimentFg)

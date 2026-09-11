@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [Experiments.md](Experiments.md): A/B replacement and GPU retirement pass independently. A module compiles retained original shaders and supplies seven real test draws with unchanged color/MV; no game registration or FG payload yet.
+- [Experiments.md](Experiments.md): `--capture-module` drives capture Prepare/Recorded/Retired through the resident owner for eight real test draws. Submissions are forwarded by the fixture; Reset is observed. Original color/MV pass; game/FG integration pending.
 
 - [GeometryDraws.md](GeometryDraws.md): Mesh range decoder rejects malformed/stale callback inputs; owned-memory fixture only. Coverage sidecar preserves original draw/raster evidence without claiming engine history in the GPU fixture.
 

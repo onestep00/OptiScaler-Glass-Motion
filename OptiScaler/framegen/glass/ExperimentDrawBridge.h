@@ -41,13 +41,11 @@ inline int32_t ExperimentMeshShape(const void* source, GlassExperimentMesh* out)
     for (unsigned i = 0; i < 5; ++i) out->streamOffsets[i] = shape.streamOffsets[i];
     return 1;
 }
-inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t recording,
+inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandList* command, uint64_t recording,
                                   const GeometryDrawView& draw, const GeometryIndexedArguments& args,
                                   const GeometryRasterState& raster, const GraphicsRootBindings& bindings,
                                   const ExperimentPipelineLease& pipeline) noexcept
 {
-    const auto observer = experimentDrawObserver.load(std::memory_order_acquire);
-    if (!observer) return;
     GlassExperimentDrawInput input {};
     input.size = sizeof(input); input.command = command; input.recording = recording;
     input.mesh = draw.mesh; input.chunk = draw.chunk;
@@ -73,6 +71,16 @@ inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t r
         for (unsigned i = 0; i < raster.targetCount; ++i) input.renderTargets[i] = raster.targets[i].ptr;
     }
     input.source = &draw; input.objectAt = ExperimentObjectAt; input.meshShape = ExperimentMeshShape;
+    return input;
+}
+inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t recording,
+                                  const GeometryDrawView& draw, const GeometryIndexedArguments& args,
+                                  const GeometryRasterState& raster, const GraphicsRootBindings& bindings,
+                                  const ExperimentPipelineLease& pipeline) noexcept
+{
+    const auto observer = experimentDrawObserver.load(std::memory_order_acquire);
+    if (!observer) return;
+    const auto input = MakeExperimentDrawInput(command, recording, draw, args, raster, bindings, pipeline);
     const GlassExperimentEvent event { sizeof(event), GlassExperimentDraw, draw.frame, 0, 0, 2,
                                        sizeof(input), &input };
     observer(event);

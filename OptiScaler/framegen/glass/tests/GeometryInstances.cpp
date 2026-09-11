@@ -189,25 +189,27 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--coverage") == 0 ||
                                             wcscmp(argv[3], L"--capture-command") == 0 ||
                                             wcscmp(argv[3], L"--recorder") == 0 ||
-                                            wcscmp(argv[3], L"--experiment") == 0)),
+                                            wcscmp(argv[3], L"--experiment") == 0 ||
+                                            wcscmp(argv[3], L"--capture-module") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
         const bool recorder = argc == 4 && wcscmp(argv[3], L"--recorder") == 0;
-        const bool experiment = argc == 4 && wcscmp(argv[3], L"--experiment") == 0;
+        const bool captureModule = argc == 4 && wcscmp(argv[3], L"--capture-module") == 0;
+        const bool experiment = captureModule || (argc == 4 && wcscmp(argv[3], L"--experiment") == 0);
         const bool captureCommand = experiment || recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
         static CaptureOwner captureOwner;
         const bool observed = argc == 4 && !coverageOnly;
         const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
         const bool mrt = dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
         const bool commands = captureCommand || mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
-        if (captureCommand && !recorder)
+        if (captureCommand && !recorder && !captureModule)
             require(GlassFg::RegisterGeometryDrawCapture(&captureOwner), "Register capture owner");
         const std::filesystem::path dir(argv[1]);
         auto vs = read(dir / "instances.dxil");
         auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
         Device g;
         ExperimentDrawCheck experimentCheck;
-        if (experiment) experimentCheck.start(g.d.Get(), dir);
+        if (experiment) experimentCheck.start(g.d.Get(), dir, captureModule);
         const auto recorderOutput = std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
         if (recorder)
         {
@@ -335,6 +337,7 @@ int wmain(int argc, wchar_t** argv)
                               : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
                                                std::filesystem::absolute(argv[2]));
         const auto& root = *lease->root;
+        if (captureModule) experimentCheck.prime(lease, argv[2]);
         rootInvalidation(root, original.Get());
         capturePso = lease->instrumented;
         if (coverageOnly)
@@ -399,7 +402,7 @@ int wmain(int argc, wchar_t** argv)
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
-            if (experiment && frame == 2) experimentCheck.prepare(argv[2]);
+            if (experiment && !captureModule && frame == 2) experimentCheck.prepare(argv[2]);
             if (recorder && frame == 5)
             {
                 g.begin(); // Discard the preceding recording before stopping.
@@ -530,6 +533,7 @@ int wmain(int argc, wchar_t** argv)
                         history[current]->GetGPUVirtualAddress(), pixelConstants->GetGPUVirtualAddress(),
                         capture->GetGPUVirtualAddress(), mappingBuffer->GetGPUVirtualAddress() };
                     if (experimentCheck.pipeline()) captureOwner.prepared.pipeline = experimentCheck.pipeline();
+                    if (captureModule) experimentCheck.configure(captureOwner.prepared);
                     captureOwner.enabled = true;
                     geometryFixturePacket = true;
                 }
@@ -618,7 +622,7 @@ int wmain(int argc, wchar_t** argv)
                                   CaptureBytes);
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             g.finish();
-            if (recorder)
+            if (recorder || captureModule)
             {
                 ID3D12CommandList* submitted[] { g.c.Get() };
                 GlassFg::NotifyGeometryCaptureSubmit(g.q.Get(), 1, submitted);
@@ -878,7 +882,7 @@ int wmain(int argc, wchar_t** argv)
                         stats.pipelinesReady == (captureCommand ? 32u : 24u) &&
                         stats.bindingsReady == (captureCommand ? 32u : 24u),
                     "Actual public draw/packet/pipeline observation mismatch");
-            if (captureCommand)
+            if (captureCommand && !captureModule)
                 require(captureOwner.completed == 8 && captureOwner.rasterMatched == 8 &&
                             stats.captureRecorded == 8 && !stats.captureRejected,
                         "Capture command not recorded exactly once");
@@ -888,6 +892,7 @@ int wmain(int argc, wchar_t** argv)
         }
         if (experiment)
         {
+            experimentCheck.beforeFinalDiscard();
             g.begin(); // Discard the final module-PSO recording before unloading.
             g.finish();
             experimentCheck.verify();
