@@ -189,6 +189,21 @@ path is static evidence only and has not been hooked or correlated live.
 
 ## Bounded live enqueue observation
 
+The diagnostic now also exports `GlassInstanceStartArrays48`, taking the same
+fresh absolute output-directory argument as Start. It only reserves a capture
+row for a readable request header with a nonempty, ordered, user-range span at
++0x60/+0x68 whose byte length is divisible by 48. Empty/malformed counts are
+reported separately. It does not dereference that span or certify its contents.
+Default Start retains the original unfiltered behavior. Stop still pins the
+forwarding hook until game exit; this is not a production per-frame observer.
+
+The independent fixture passed 5,000 filtered empty requests followed by a
+captured array request, malformed/reversed spans, unreadable headers, bounded
+stop and unchanged original return values. The standalone DLL compiled with
+`/W4 /WX`. It has not been loaded into a game; live array-element identity and
+the final FG correction remain incomplete. This filter prevents the previously
+observed single-object calls from exhausting the array investigation's budget.
+
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input
 address and 144-byte input header. It copies no pointed-to transform arrays or

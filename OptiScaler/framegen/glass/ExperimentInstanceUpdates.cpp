@@ -16,6 +16,8 @@ Enqueue original = nullptr;
 HMODULE self = nullptr;
 std::atomic<bool> recording = false;
 std::atomic<unsigned> active = 0, used = 0;
+std::atomic<bool> arraysOnly = false;
+std::atomic<std::uint64_t> filtered = 0, malformed = 0;
 std::mutex control;
 std::filesystem::path output;
 struct Row
@@ -40,19 +42,30 @@ unsigned char enqueue(void* a, void* b)
     active.fetch_add(1, std::memory_order_acq_rel);
     if (recording.load(std::memory_order_acquire))
     {
-        const auto index = used.fetch_add(1, std::memory_order_relaxed);
-        if (index < rows.size())
+        Row row;
+        row.input = reinterpret_cast<std::uint64_t>(b);
+        row.valid = read(row.input, row.header.data(), sizeof(row.header));
+        if (!row.valid) row.header = {};
+        const auto begin = row.header[12], end = row.header[13];
+        const bool validSpan = row.valid && begin >= 0x10000 && end > begin &&
+                               end <= 0x7fffffffffffULL && (end - begin) % 48 == 0;
+        if (arraysOnly.load(std::memory_order_relaxed) && !validSpan)
         {
-            Row row;
-            row.caller = reinterpret_cast<std::uint64_t>(_ReturnAddress());
-            row.context = reinterpret_cast<std::uint64_t>(a);
-            row.input = reinterpret_cast<std::uint64_t>(b);
-            row.thread = GetCurrentThreadId();
-            row.valid = read(row.input, row.header.data(), sizeof(row.header));
-            if (!row.valid) row.header = {};
-            rows[index] = row;
+            if (!row.valid || begin != end) malformed.fetch_add(1, std::memory_order_relaxed);
+            else filtered.fetch_add(1, std::memory_order_relaxed);
         }
-        else recording.store(false, std::memory_order_release);
+        else
+        {
+            const auto index = used.fetch_add(1, std::memory_order_relaxed);
+            if (index < rows.size())
+            {
+                row.caller = reinterpret_cast<std::uint64_t>(_ReturnAddress());
+                row.context = reinterpret_cast<std::uint64_t>(a);
+                row.thread = GetCurrentThreadId();
+                rows[index] = row;
+            }
+            else recording.store(false, std::memory_order_release);
+        }
     }
     const auto result = original(a, b);
     active.fetch_sub(1, std::memory_order_release);
@@ -91,7 +104,7 @@ bool install()
     return true;
 }
 }
-extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory)
+static DWORD start(void* directory, bool onlyArrays)
 {
     try
     {
@@ -100,10 +113,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory
         const std::filesystem::path next(static_cast<const wchar_t*>(directory));
         if (!next.is_absolute() || std::filesystem::exists(next) || !install()) return 2;
         if (!std::filesystem::create_directory(next)) return 3;
-        output = next; used = 0; recording.store(true, std::memory_order_release); return 0;
+        output = next; used = 0; filtered = 0; malformed = 0; arraysOnly = onlyArrays;
+        recording.store(true, std::memory_order_release); return 0;
     }
     catch (...) { return 4; }
 }
+extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory)
+{ return start(directory, false); }
+extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStartArrays48(void* directory)
+{ return start(directory, true); }
 extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
 {
     try
@@ -126,7 +144,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
             file << '\n';
         }
         file.close(); if (!file) return 2;
-        std::ofstream(output / "status.txt") << "rows=" << count << "\nrecording=0\nresident=1\n";
+        std::ofstream(output / "status.txt") << "rows=" << count << "\nrecording=0\nresident=1\n"
+            << "arrays48_only=" << arraysOnly.load() << "\nfiltered_empty=" << filtered.load()
+            << "\nmalformed=" << malformed.load() << '\n';
         output.clear(); return 0;
     }
     catch (...) { return 3; }
