@@ -283,10 +283,13 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         !original.NumRenderTargets || original.NumRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
         original.SampleDesc.Count != 1 || original.GS.BytecodeLength || original.HS.BytecodeLength ||
         original.DS.BytecodeLength || original.StreamOutput.NumEntries || original.StreamOutput.NumStrides ||
-        !readOnly(original.DepthStencilState) ||
+        (!vertexOnly && !readOnly(original.DepthStencilState)) ||
         original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
-        !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend))
+        (!vertexOnly && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend)))
         return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
+    // Vertex capture replaces the original draw once. Its unmodified PS and
+    // depth/stencil/blend state retain native writes; material capture still
+    // requires its separate read-only-depth and supported-blend contract.
     D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
     HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
     if (!vertexOnly && (FAILED(hr) || !options.ROVsSupported))

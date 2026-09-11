@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Vertex-only capture preserves depth-writing original PS/state in five independent GPU frames. Native cache/host admission and game previous inputs remain incomplete.
+
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Exact original root serialization survives source mutation and DLL file roundtrip. Native auxiliary capture admission remains absent; no new game MV.
 
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Census-only binding recorder DLL passes independent load/record/save/unload and address checks. Live engine buffer contents and boundary MV remain incomplete.

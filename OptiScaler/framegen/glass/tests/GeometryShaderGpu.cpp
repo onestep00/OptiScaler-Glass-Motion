@@ -167,7 +167,7 @@ int wmain(int argc, wchar_t** argv)
                                                   { 0, "GLASS_PREVIOUS", 0, 0, 4, 0 },
                                                   { 0, "GLASS_HISTORY_MISSING", 0, 0, 1, 0 } };
         ComPtr<ID3D12PipelineState> pipeline[4];
-        ComPtr<ID3D12PipelineState> originalColor, vertexCapture;
+        ComPtr<ID3D12PipelineState> originalColor, vertexCapture, nativeOriginal, nativeCapture;
         for (UINT i = 0; i < 4; ++i)
         {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pd {};
@@ -220,6 +220,12 @@ int wmain(int argc, wchar_t** argv)
                 ComPtr<ID3D12PipelineState> absent;
                 require(FAILED(compiler.create(g.d.Get(), geometryRoot, rejected, absent, pipelineError)) && !absent,
                         "Depth-writing pipeline admitted");
+                rejected.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+                rejected.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+                rejected.BlendState.RenderTarget[0].BlendEnable = FALSE;
+                check(g.d->CreateGraphicsPipelineState(&rejected, IID_PPV_ARGS(&nativeOriginal)));
+                if (FAILED(compiler.createVertexCapture(g.d.Get(), geometryRoot, rejected, nativeCapture, pipelineError)))
+                    throw std::runtime_error(pipelineError);
             }
             else
                 check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pipeline[i])));
@@ -255,6 +261,22 @@ int wmain(int argc, wchar_t** argv)
         UINT64 imageBytes;
         g.d->GetCopyableFootprints(&tex, 0, 1, 0, &footprint, nullptr, nullptr, &imageBytes);
         auto vertexColorReadback = g.buffer(imageBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        auto depthDesc = tex;
+        depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE depthClear {}; depthClear.Format = depthDesc.Format; depthClear.DepthStencil.Depth = 1;
+        ComPtr<ID3D12Resource> nativeDepth;
+        check(g.d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &depthDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                           &depthClear, IID_PPV_ARGS(&nativeDepth)));
+        D3D12_DESCRIPTOR_HEAP_DESC dh {}; dh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; dh.NumDescriptors = 1;
+        ComPtr<ID3D12DescriptorHeap> dsvHeap;
+        check(g.d->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&dsvHeap)));
+        const auto dsv = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        g.d->CreateDepthStencilView(nativeDepth.Get(), nullptr, dsv);
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT depthFootprint {}; UINT64 depthBytes = 0;
+        g.d->GetCopyableFootprints(&depthDesc, 0, 1, 0, &depthFootprint, nullptr, nullptr, &depthBytes);
+        auto nativeReadback = g.buffer(imageBytes * 2 + depthBytes * 2, D3D12_HEAP_TYPE_READBACK,
+                                       D3D12_RESOURCE_STATE_COPY_DEST);
         auto readback = g.buffer(imageBytes * 4 + SOBytes * 2 + HistoryBytes + CaptureBytes, D3D12_HEAP_TYPE_READBACK,
                                  D3D12_RESOURCE_STATE_COPY_DEST);
         g.begin();
@@ -396,6 +418,35 @@ int wmain(int argc, wchar_t** argv)
                     dst.pResource = vertexColorReadback.Get();
                     g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                     g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    // Two independent renderings with the same inputs. Each
+                    // starts from cleared depth; the original draw is not replayed
+                    // over its own already-written depth in the capture case.
+                    for (UINT native = 0; native < 2; ++native)
+                    {
+                        g.c->ResourceBarrier(1, &order);
+                        saved.replay(g.c.Get(), native ? root.Get() : originalRoot.Get());
+                        g.c->SetPipelineState(native ? nativeCapture.Get() : nativeOriginal.Get());
+                        if (native)
+                        {
+                            g.c->SetGraphicsRoot32BitConstants(1, 8, &hc, 0);
+                            g.c->SetGraphicsRootShaderResourceView(2, history[previous]->GetGPUVirtualAddress());
+                            g.c->SetGraphicsRootUnorderedAccessView(3, history[current]->GetGPUVirtualAddress());
+                        }
+                        g.c->OMSetRenderTargets(1, &handles[0], FALSE, &dsv);
+                        g.c->ClearRenderTargetView(handles[0], emptyColor, 0, nullptr);
+                        g.c->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+                        g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+                        g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        dst.pResource = nativeReadback.Get(); dst.PlacedFootprint = footprint;
+                        dst.PlacedFootprint.Offset = native * imageBytes;
+                        g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                        g.barrier(color[0].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                        g.barrier(nativeDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        auto depthSource = src; depthSource.pResource = nativeDepth.Get();
+                        dst.PlacedFootprint = depthFootprint; dst.PlacedFootprint.Offset = imageBytes * 2 + native * depthBytes;
+                        g.c->CopyTextureRegion(&dst, 0, 0, 0, &depthSource, nullptr);
+                        g.barrier(nativeDepth.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                    }
                 }
             }
             g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -408,6 +459,24 @@ int wmain(int argc, wchar_t** argv)
                                   CaptureBytes);
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             g.finish();
+            void* nativeData = nullptr;
+            D3D12_RANGE nativeRange { 0, SIZE_T(imageBytes * 2 + depthBytes * 2) };
+            check(nativeReadback->Map(0, &nativeRange, &nativeData));
+            const auto* nativeBytes = static_cast<const unsigned char*>(nativeData);
+            UINT depthWritten = 0;
+            for (UINT y = 0; y < H; ++y)
+            {
+                const auto colorOffset = y * footprint.Footprint.RowPitch;
+                const auto depthOffset = imageBytes * 2 + y * depthFootprint.Footprint.RowPitch;
+                require(!memcmp(nativeBytes + colorOffset, nativeBytes + imageBytes + colorOffset, W * 16),
+                        "Native vertex capture changed color/discard");
+                require(!memcmp(nativeBytes + depthOffset, nativeBytes + depthBytes + depthOffset, W * 4),
+                        "Native vertex capture changed depth writes");
+                const auto* depths = reinterpret_cast<const float*>(nativeBytes + depthOffset);
+                for (UINT x = 0; x < W; ++x) if (depths[x] < 1) ++depthWritten;
+            }
+            require(depthWritten > 0 && depthWritten < W * H, "Native depth test was vacuous");
+            D3D12_RANGE nativeNoWrite { 0, 0 }; nativeReadback->Unmap(0, &nativeNoWrite);
             void* m;
             D3D12_RANGE range { 0, (SIZE_T) (imageBytes * 4 + SOBytes * 2 + HistoryBytes + CaptureBytes) };
             check(readback->Map(0, &range, &m));
@@ -551,7 +620,7 @@ int wmain(int argc, wchar_t** argv)
         printf("PASS original_pixels=%llu exact_current_vertices=%llu exact_previous_vertices=%llu motion_pixels=%llu "
                "capture_pixels=%llu "
                "max_motion_error_px=%.9f frames=5 generation_and_stale_rejection=1 outside_range_unchanged=1 "
-               "original_material_outline=1 simultaneous_color_capture=1\n",
+               "original_material_outline=1 simultaneous_color_capture=1 native_color_depth_preserved=1\n",
                exactColors, exactHistory, validSamples, motionPixels, capturePixels, maxMotionError);
         return 0;
     }

@@ -53,7 +53,8 @@ class GeometryCompiler
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
                                 const VertexConstantPair* capture = nullptr);
-    // Diagnostic actual vertex output only; keeps original PS bytes unchanged.
+    // Diagnostic actual vertex output only; keeps original PS/state unchanged,
+    // including depth writes. Replace the original draw once, never duplicate it.
     HRESULT createVertexCapture(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,

@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Depth-writing vertex-capture comparison preserves 122,880 color and depth samples; material rewrite still rejects writable depth. No live native-pass capture.
+
 - [GeometryObservation.md](GeometryObservation.md): Original root serialization ownership and actual recorder file equality pass. Native-pass GPU capture still requires a separate admission path.
 
 - [GeometryObservation.md](GeometryObservation.md): Actual binding recorder DLL passes independent host event/file roundtrip and unload. No GPU buffer contents or game MV captured.

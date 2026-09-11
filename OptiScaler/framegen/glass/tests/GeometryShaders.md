@@ -9,6 +9,31 @@
 
 ## Implemented source
 
+`GeometryCompiler::createVertexCapture` now permits depth-writing and arbitrary
+original blend states because it retains the original PS/state and replaces the
+draw once. Material/coverage rewriting still rejects writable depth and unsupported
+blends. This does not permit duplicating a native draw over its own depth writes.
+PSO and separately bound command state remain distinct under Microsoft's
+[pipeline-state contract](https://learn.microsoft.com/en-us/windows/win32/direct3d12/managing-graphics-pipeline-state-in-direct3d-12).
+
+The independent five-frame GPU fixture renders original and captured variants
+from separately cleared depth/color, with depth writes enabled, LESS comparison,
+blending disabled and original material discard. All 122,880 color pixels and
+122,880 depth samples match bit-for-bit; each frame checks nonempty, partial depth
+coverage. Existing actual-position/history and material-MV checks also pass.
+The compiler and fixture built with /W4 /WX. This proves supported native-state
+preservation, not a Cyberpunk previous-transform capture or FG substitution.
+The creation cache still auto-admits only the previous material subset; explicit
+worker preparation and host admission for original-only observations remain next.
+Both recorded MeshStatic native velocity VS variants also assembled and passed
+DXIL validation with per-instance vertex recording and the explicit b1 row-51
+word capture. This offline result is recorded locally in
+`outputs/glass-native-velocity-route-audit/native-vertex-capture-audit.json`.
+It does not verify their game root contents or execute those recorded shaders.
+The full Release x64 DLL also compiled and linked with exit code 0 after the
+depth-writing extension. Existing compiler/linker warnings and post-build missing
+file/path messages remain; complete packaging and game deployment are unverified.
+
 `ExtractNativeMotionTarget` can retain an explicitly identified native float4
 SV_Target as target 0 while removing other color exports. It preserves original
 inputs, arithmetic, branching and discard, and rejects non-color outputs and
@@ -118,8 +143,8 @@ recording with the original PS bytecode retained unchanged. It reuses the existi
 history instrumentation and extended root; the caller must still supply bounded
 history resources, immutable constants and verified instance mapping. This mode
 does not capture material coverage, infer topology, or produce an FG input.
-It does not require pixel ROV support, though the existing transparent-pipeline
-admission restrictions otherwise remain in force.
+It does not require pixel ROV support. Its later depth-writing extension is
+documented above; automatic material-cache admission remains restricted.
 
 The independent GPU fixture additionally renders this pipeline on each of five
 frames, preserving all 122,880 original material pixels. Its history writes are
