@@ -305,6 +305,31 @@ than equating newly created renderer handles across frames. This does not yet
 prove parent-source lifetime or moving-element stability. The owned function
 disassemblies are under `work/glass-engine-identity-probe-v2/`.
 
+### Typed source of the dominant grouped path
+
+The checked cast at 0x3c8b08 references type global 0x342b160. A bounded read
+of that global and its type metadata in PID 62100 identified name hash
+15851563823148046153, `worldInstancedMeshNode`, with size 0xA0. The local
+RED4ext SDK at commit ad7277714ad30d6885d7050c5ba24fa0102f6920 has matching
+generated type size and `worldTransformsBuffer` at node+0x38. This verifies the
+cast's target type, not the identity/lifetime of every observed source object.
+
+The actual accessor at 0xaefd28 reads the shared buffer handle at range+0,
+startIndex at +0x10 and numElements at +0x14. It computes begin as
+`sharedBuffer.data + startIndex * 48`, with data read from sharedBuffer+0x30,
+and end as `begin + numElements * 48`. The two partitioning callers use this
+accessor on node+0x38 before applying their cumulative per-group offsets.
+Therefore this path has a concrete upstream shared-buffer index domain;
+the per-group renderer handle need not define that domain. The original node
+instance, its lifetime, buffer replacement and group-to-renderer handoff still
+must be captured together before admitting history. The checked-cast wrapper
+loads the node handle from its input instance+0x60.
+
+Local evidence: `work/glass-array-wrapper-live-v1/source-type.json`, owned
+function disassemblies 0x3c8ae8/0x3c8b08/0x25422c/0x2277018 and the leaf
+accessor bytes at 0xaefd28. This is a potential bounded scalar provenance route,
+not a claim of static object motion, all-transparency coverage or FG integration.
+
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input
 address and 144-byte input header. It copies no pointed-to transform arrays or

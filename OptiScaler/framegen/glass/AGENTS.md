@@ -16,7 +16,7 @@
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
-- [tests/SourceSlots.md](tests/SourceSlots.md): Upstream-wrapper diagnostic passes bounded forwarding tests; producer packing differs. Grouped lifetime/view handoff and FG motion remain incomplete.
+- [tests/SourceSlots.md](tests/SourceSlots.md): Live wrapper capture and typed shared-transform source identified; producer packing differs. Grouped lifetime/view handoff and FG motion remain incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
 

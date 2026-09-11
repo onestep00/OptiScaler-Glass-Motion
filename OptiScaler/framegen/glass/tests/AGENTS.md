@@ -22,7 +22,7 @@
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.
 
-- [SourceSlots.md](SourceSlots.md): Separate upstream-wrapper diagnostic passes bounded forwarding tests; live array enqueue found differing packing. Grouped identity/MV remain incomplete.
+- [SourceSlots.md](SourceSlots.md): Live upstream-wrapper capture reaches a typed shared-transform source; grouped identity/MV remain incomplete.
 
 - [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
 
