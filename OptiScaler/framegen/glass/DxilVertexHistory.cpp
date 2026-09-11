@@ -132,7 +132,8 @@ std::string single(const std::string& source, const std::regex& pattern, size_t 
 }
 } // namespace
 
-VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryLayout layout)
+VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryLayout layout,
+                                         const VertexConstantPair* capture)
 {
     VertexHistoryShader result;
     try
@@ -177,6 +178,27 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
         auto inputs = split(metadata.get(signatures[0])), outputs = split(metadata.get(signatures[1]));
         auto resources = entry[3] == "null" ? Parts { "null", "null", "null", "null" } : split(metadata.get(entry[3]));
         need(resources.size() == 4 && resources[1] == "null", "Shaders with existing UAVs are not replay safe");
+        unsigned captureId = UINT32_MAX;
+        if (capture)
+        {
+            need(capture->space != 31 && capture->bytes && capture->bytes <= 65536 &&
+                     std::uint64_t(capture->row) * 16 + 8 <= capture->bytes,
+                 "Invalid diagnostic constant range");
+            if (resources[2] != "null")
+                for (const auto& node : split(metadata.get(resources[2])))
+                {
+                    const auto fields = split(metadata.get(node));
+                    need(fields.size() >= 7, "Malformed constant resource");
+                    if (number(fields[3], "i32 ") != capture->space ||
+                        number(fields[4], "i32 ") != capture->binding)
+                        continue;
+                    need(captureId == UINT32_MAX && fields[5] == "i32 1" &&
+                             number(fields[6], "i32 ") == capture->bytes,
+                         "Ambiguous or incompatible diagnostic constant binding");
+                    captureId = number(fields[0], "i32 ");
+                }
+            need(captureId != UINT32_MAX, "Diagnostic constant binding absent");
+        }
         for (const auto* op : { "dx.op.atomic", "dx.op.bufferStore", "dx.op.rawBufferStore", "dx.op.textureStore",
                                 "dx.op.barrier", "dx.op.traceRay", "dx.op.callShader" })
             need(source.find(op) == std::string::npos, "Shader side effect unsupported");
@@ -389,10 +411,18 @@ glass.read:
                  << "  %glass.p" << c << " = select i1 %glass.validbool, float %glass.oldp" << c << ", float "
                  << values[c] << "\n"
                  << "  %glass.c" << c << "i = bitcast float " << values[c] << " to i32\n";
-        code
-            << R"(  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.address, i32 undef, i32 %glass.c0i, i32 %glass.c1i, i32 %glass.c2i, i32 %glass.c3i, i8 15)
-  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, i32 undef, i32 undef, i8 3)
-  br label %glass.end
+        if (capture)
+            code << "  %glass.extra = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 "
+                 << captureId << ", i32 " << capture->binding << ", i1 false)\n"
+                 << "  %glass.extraWords = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.extra, i32 "
+                 << capture->row << ")\n"
+                 << "  %glass.extra0 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 0\n"
+                 << "  %glass.extra1 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 1\n";
+        code << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.address, i32 undef, i32 %glass.c0i, i32 %glass.c1i, i32 %glass.c2i, i32 %glass.c3i, i8 15)\n"
+             << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, "
+             << (capture ? "i32 %glass.extra0, i32 %glass.extra1, i8 15)\n"
+                         : "i32 undef, i32 undef, i8 3)\n")
+             << R"(  br label %glass.end
 glass.reject:
 )";
         if (mapped)

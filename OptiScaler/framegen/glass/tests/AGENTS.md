@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Optional bound-CB pair recording passed three recorded VS validators and live generation-7 capture (64 snapshots, 38 consecutive pairs). Candidate jitter subtraction is not final MV/FG proof.
+
 - [GeometryShaders.md](GeometryShaders.md): Live replaceable vertex recorder captured 64 x 128 valid VS outputs and unloaded. 35 consecutive pairs retain one metadata tuple; jitter/view/topology admission and FG remain incomplete.
 
 - [SourceSlots.md](SourceSlots.md): Live enqueue probe stopped after 4,096 updates; three associated recorded skinning VS accept history instrumentation. Cross-time owner overlaps are not admitted identity; live MV/FG integration remains absent.

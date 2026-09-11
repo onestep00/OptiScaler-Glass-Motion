@@ -115,8 +115,10 @@ class Coverage
         GeometryCompiler dxc(compiler);
         std::string error;
         const auto& original = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(view.descriptor);
+        // Recorded Cyberpunk layout. Capturing these words is not view/history admission.
+        const VertexConstantPair cameraWords { 0, 1, 848, 51 };
         const auto compiled = VertexOutputDiagnostic
-            ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error)
+            ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, &cameraWords)
             : dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error);
         if (FAILED(compiled))
             throw std::runtime_error(error);
@@ -209,7 +211,7 @@ class Coverage
             }
             csv.close(); if (!csv) throw std::runtime_error("Vertex metadata write failed");
             std::ofstream meta(withSuffix(".draw"));
-            meta << "vertex_format=1\nrecord_bytes=32\nframe=" << slot.frame
+            meta << "vertex_format=2\nrecord_bytes=32\nextra_word_offset=24\nextra_cb_space=0\nextra_cb_binding=1\nextra_cb_bytes=848\nextra_cb_row=51\nframe=" << slot.frame
                  << "\nrecording=" << slot.recording << "\nvertices=" << slot.mesh.vertices
                  << "\ninstances=" << slot.instances << "\nmesh=" << slot.draw.mesh
                  << "\nchunk=" << slot.draw.chunk << "\nvertex_buffer=" << slot.mesh.vertexBuffer

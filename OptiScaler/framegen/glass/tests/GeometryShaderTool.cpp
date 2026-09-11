@@ -52,6 +52,11 @@ int wmain(int argc, wchar_t** argv)
         if (mapped)
             mode.resize(mode.size() - 7);
         const auto layout = mapped ? GlassFg::GeometryLayout::PerInstance : GlassFg::GeometryLayout::Contiguous;
+        const bool cameraCapture = mode == L"rewrite-camera";
+        if (cameraCapture)
+            mode = L"rewrite";
+        // Explicit recorded Cyberpunk diagnostic layout, not a generic camera detector.
+        const GlassFg::VertexConstantPair camera { 0, 1, 848, 51 };
         if (mode == L"disassemble")
         {
             ComPtr<IDxcCompiler> compiler;
@@ -86,7 +91,7 @@ int wmain(int argc, wchar_t** argv)
                 }
                 auto patched =
                     mode == L"rewrite"
-                        ? GlassFg::RewriteVertexHistory(assembly, layout)
+                        ? GlassFg::RewriteVertexHistory(assembly, layout, cameraCapture ? &camera : nullptr)
                         : GlassFg::RewriteMaterialMotion(
                               assembly, GlassFg::MaterialSource::One,
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb

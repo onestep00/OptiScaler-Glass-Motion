@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Generation 7 captured actual VS positions plus draw-bound camera CB words in 64 snapshots and unloaded. Jitter semantics/view/topology and final MV/FG admission remain incomplete.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Original-PS vertex recorder captured 64 live frames and unloaded. Exact current VS outputs are available; jitter/view/history admission and object MV/FG remain incomplete.
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Direct source-slot cache has bounded storage, constant-index lookup and CPU-verified domain/conflict rejection. Engine provenance and motion integration remain incomplete.

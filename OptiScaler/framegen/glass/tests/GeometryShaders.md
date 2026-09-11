@@ -9,6 +9,33 @@
 
 ## Implemented source
 
+The optional `VertexConstantPair` records two raw words from an existing draw CB
+at bytes 24/28 of each 32-byte vertex record. Resource metadata resolves the CB
+ID from space/register; exact size, singleton binding and row bounds are checked.
+Absent/incompatible bindings reject compilation. Default history is unchanged.
+The generic rewriter does not identify these words as camera data. The separate
+Cyberpunk vertex diagnostic explicitly requests b1/space0, 848 bytes, row 51 XY.
+It adds no buffer allocation, CPU CB copy or new root binding. It does add a CB
+load and expands the existing tag store; no zero-cost claim is made.
+
+Three recorded game VS variants (pipelines 859, 854, 931) assembled and passed
+DXIL validation with this capture; a fixture without the binding was rejected.
+The existing independent GPU history/material regression passed. The compiler
+bridge exposes `rewrite-camera-mapped` for this explicit local diagnostic layout.
+
+Live generation 7 then captured 64 snapshots of 128 vertices in PID 56340.
+Every record had valid frame/write tags, finite clip coordinates and the same
+finite CB pair across its draw. There were 38 consecutive-frame pairs with one
+recorded owner/mesh/slot/generation/chunk/pipeline tuple. Raw CB words were acquired
+on the GPU from the original draw, not inferred from motion. Subtracting their
+candidate NDC jitter delta changed the first pair's median displacement from
+0.926960 to 0.102383 render pixels. This is a candidate calculation, not proof of
+the live jitter sign, view identity, temporal topology or final surface MV.
+The format-2 sidecar records the exact CB source and byte offset. Evidence is in
+local `outputs/glass-vertex-camera-live-v7/camera-analysis.json`.
+The generation completed 64 jobs and unloaded: host totals 248 recorded/retired,
+zero pending and zero loaded experiment modules. No FG inputs were replaced.
+
 `GeometryCompiler::createVertexCapture` now supports diagnostic actual VS-output
 recording with the original PS bytecode retained unchanged. It reuses the existing
 history instrumentation and extended root; the caller must still supply bounded

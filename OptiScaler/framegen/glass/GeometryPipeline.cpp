@@ -198,7 +198,7 @@ struct GeometryCompiler::Impl
     }
     HRESULT rewrite(D3D12_SHADER_BYTECODE input, bool vertex, MaterialSource source, MaterialDestination destination,
                     ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout,
-                    MaterialMotionTarget target)
+                    MaterialMotionTarget target, const VertexConstantPair* capture = nullptr)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -210,7 +210,7 @@ struct GeometryCompiler::Impl
         const std::string_view text(static_cast<const char*>(disassembly->GetBufferPointer()),
                                     disassembly->GetBufferSize());
         auto rewritten =
-            vertex ? RewriteVertexHistory(text, layout)
+            vertex ? RewriteVertexHistory(text, layout, capture)
                    : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout);
         if (!rewritten)
         {
@@ -259,15 +259,16 @@ HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const Geomet
 }
 HRESULT GeometryCompiler::createVertexCapture(ID3D12Device* device, const GeometryRoot& root,
                                               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
-                                              ComPtr<ID3D12PipelineState>& output, std::string& error)
+                                              ComPtr<ID3D12PipelineState>& output, std::string& error,
+                                              const VertexConstantPair* capture)
 {
     return createTarget(device, root, original, output, error,
-                        MaterialMotionTarget::OriginalColorAndCapture, true);
+                        MaterialMotionTarget::OriginalColorAndCapture, true, capture);
 }
 HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot& root,
                                        const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
-                                       MaterialMotionTarget target, bool vertexOnly)
+                                       MaterialMotionTarget target, bool vertexOnly, const VertexConstantPair* capture)
 {
     error.clear();
     if (FAILED(implementation->status))
@@ -297,7 +298,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     ComPtr<IDxcBlob> vs, ps;
     unsigned historyRegister = UINT32_MAX;
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
-                                            root.layout, target)) ||
+                                            root.layout, target, capture)) ||
         (!vertexOnly && FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
                                             root.layout, target))))
         return hr;

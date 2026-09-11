@@ -40,8 +40,16 @@ struct VertexHistoryShader
 // Neither varying is an object-identity estimator.
 // Validate VertexHistoryConstants against BOTH bound history buffers first.
 // Unsupported shaders return an error and must keep their original pipeline.
+// Optional diagnostic capture of two raw words from an existing draw-bound CB.
+// Binding/size validation does not establish the semantic meaning of the words.
+// Stored at bytes 24/28 of each existing 32-byte record; no extra allocation.
+struct VertexConstantPair
+{
+    unsigned space, binding, bytes, row;
+};
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly,
-                                         GeometryLayout layout = GeometryLayout::Contiguous);
+                                         GeometryLayout layout = GeometryLayout::Contiguous,
+                                         const VertexConstantPair* capture = nullptr);
 
 enum class MaterialSource
 {
