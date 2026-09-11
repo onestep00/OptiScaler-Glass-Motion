@@ -9,6 +9,11 @@
 static ID3D12PipelineState* observedOriginal = nullptr;
 static uint64_t expectedAddress = 0;
 static bool censusOkay = false;
+#ifdef GLASS_OBSERVATION_MODULE
+static const GlassExperimentApi* bindingsApi = nullptr;
+static void* bindingsContext = nullptr;
+static bool moduleAccepted = false;
+#endif
 static const GlassFg::ExperimentCensusObserver census {
     nullptr, [](void*) noexcept { return true; },
     [](void*, const GlassExperimentEvent& event) noexcept
@@ -29,6 +34,9 @@ static const GlassFg::ExperimentCensusObserver census {
             slot.address == expectedAddress && !slot.knownConstants &&
             !GlassFg::FindGeometryPipeline(observedOriginal) && GlassFg::FindObservedGeometryPipeline(observedOriginal);
         if (token) draw.pipelineAccess.release(token);
+#ifdef GLASS_OBSERVATION_MODULE
+        moduleAccepted = bindingsApi && bindingsApi->event(bindingsContext, &event) == 1;
+#endif
     }
 };
 #endif
@@ -43,6 +51,18 @@ int main()
         require(GlassFg::StartGeometryCreation(device.d.Get(), compiler), "Creation observer startup");
         require(GlassFg::StartGeometryCommands(device.d.Get()), "Command observer startup");
         require(GlassFg::RegisterExperimentCensus(&census), "Census registration");
+#ifdef GLASS_OBSERVATION_MODULE
+        const auto modulePath = std::filesystem::absolute("work/glass-optiscaler-source/artifacts/glass-tests/experiment-bindings.dll");
+        const auto outputPath = modulePath.parent_path() / ("binding-module-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
+        auto configPath = modulePath; configPath.replace_extension(".config");
+        { std::ofstream config(configPath); config << outputPath.generic_string() << '\n'; }
+        HMODULE bindingsModule = LoadLibraryW(modulePath.c_str());
+        require(bindingsModule != nullptr, "Load binding module");
+        const auto query = reinterpret_cast<GlassExperimentQueryFn>(GetProcAddress(bindingsModule, "GlassExperimentQuery"));
+        bindingsApi = query ? query() : nullptr;
+        const GlassExperimentHost host { sizeof(host), GLASS_EXPERIMENT_ABI, GlassExperimentCensus, device.d.Get() };
+        require(bindingsApi && bindingsApi->create(&host, &bindingsContext) == 0, "Create binding recorder");
+#endif
 #endif
         D3D12_ROOT_SIGNATURE_DESC rd {};
         D3D12_DESCRIPTOR_RANGE range { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 10, 0, 0 };
@@ -94,6 +114,20 @@ int main()
         require(censusOkay, "Original-only census delivery or replay isolation failed");
         GlassFg::StopGeometryCreation();
         require(!GlassFg::FindObservedGeometryPipeline(original.Get()), "Stopped observation remained active");
+#ifdef GLASS_OBSERVATION_MODULE
+        require(moduleAccepted, "Binding module rejected actual census");
+        bindingsApi->destroy(bindingsContext); bindingsContext = nullptr;
+        const auto csv = read(outputPath / "bindings.csv");
+        std::string text(csv.begin(), csv.end()); std::erase(text, '\r');
+        require(text.find(",0,2," + std::to_string(expectedAddress) + ",0\n") != std::string::npos,
+                "Saved CBV address differs");
+        const auto done = read(outputPath / "bindings.done");
+        std::string completion(done.begin(), done.end()); std::erase(completion, '\r');
+        require(completion.find("rows=1\npipelines=1\n") != std::string::npos,
+                "Module count/completion invalid");
+        require(FreeLibrary(bindingsModule) != 0, "Binding module unload");
+        printf("BINDING_MODULE_OK %s\n", outputPath.string().c_str());
+#endif
 #endif
         GlassFg::GraphicsRootBindings bindings;
         GlassFg::GraphicsRootBindings::BorrowedSlot slot;

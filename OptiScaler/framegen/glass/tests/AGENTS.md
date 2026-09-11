@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryObservation.md](GeometryObservation.md): Actual binding recorder DLL passes independent host event/file roundtrip and unload. No GPU buffer contents or game MV captured.
+
 - [GeometryObservation.md](GeometryObservation.md): Module-facing root layout and actual CBV address match in independent draw census. ABI versions advanced; no live game previous-transform capture yet.
 
 - [GeometryShaders.md](GeometryShaders.md): Native target-3 extraction validates and preserves two recorded velocity PS instruction streams; absent target rejected. Assembly audit only, no native-pass GPU execution.

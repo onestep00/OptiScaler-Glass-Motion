@@ -82,3 +82,27 @@ outputs from shader dataflow, and obtain actual current/previous bound transform
 and deformation data. Descriptors alone do not provide buffer contents or GPU
 resource lifetime. Do not substitute a native velocity VS onto transparent draw
 bindings without checking those inputs.
+
+## Replaceable binding recorder
+
+`ExperimentBindingsModule.cpp` is a census-only DLL. Its adjacent `.config`
+contains one UTF-8 line naming a fresh absolute output directory whose parent
+already exists. It retains at most 256 unique pipeline tokens and 2,048 draw
+records, with approximately 35.1 MiB of fixed row storage. Locks are try-only
+in the callback; overflow/contention increments a drop counter. New pipeline
+tokens allocate once per admitted pipeline. There are no GPU commands, buffer
+readbacks or callback file writes. Retained shader/root references add storage
+beyond the fixed rows. This is an on-demand diagnostic, not the runtime algorithm.
+
+After callbacks stop, destroy writes draws/bindings/constants/layout CSV files
+and original VS/PS bytecode. `bindings.done` records counts, drops, CPU ordering,
+unknown frame-zero semantics and absence of previous-transform verification.
+GPU virtual addresses and descriptor handles are observations, not retained
+buffer leases. No generated-frame or silhouette correctness follows from them.
+
+The independent host test with `GLASS_OBSERVATION_MODULE` loads the actual DLL,
+passes a real draw callback, stops the creation cache, saves through module
+destruction, checks the exact CBV address and completion counts, then unloads.
+It passed. An initial test failure was Windows CRLF comparison in the test;
+normalizing line endings resolved it without changing the recorded address.
+The module compiled with /W4 /WX. No game deployment occurred.
