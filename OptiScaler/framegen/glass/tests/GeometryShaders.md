@@ -9,6 +9,26 @@
 
 ## Implemented source
 
+`GeometryCoverageRecorder` is a one-shot game diagnostic owner, enabled only by
+`Glass/capture-objects.request` at startup. The file contains an absolute output
+directory. It requests supported pipelines from actual engine-mapped draws, builds
+coverage variants and allocates buffers on a worker, then records each admitted
+draw once with its original material and a separate object bit allocation.
+Eight slots, at most 32 instances per draw and a conservative 256 MiB buffer
+reservation budget bound this diagnostic. It stops accepting after 30 seconds
+from its first request. Missing completion/discard stops the worker after two
+minutes without authorizing readback or releasing possibly referenced resources.
+PSO/driver allocations are additional; this is not the continuous production cost.
+
+The native submission observer forwards actual submissions; successful command
+Reset marks old recordings discarded. Readback and CSV identity metadata are
+written only after both events and the actual GPU fence. Copy calls run without
+the recorder mutex, avoiding inversion with the native host's submission lock.
+The independent `--recorder` fixture compared all 53,760 individual material
+samples against original draws and preserved 143,360 original color pixels.
+The fixture supplies test identities, not Cyberpunk objects. This recorder emits
+no MV, makes no FG substitution, and has not yet been verified in a fresh game.
+
 Latest source checkpoint (2026-09-11): `OriginalColorAndCoverage` records separate
 object material coverage as bits, independent of vertex-history availability.
 It preserves original color exports, material discard and read-only depth tests.

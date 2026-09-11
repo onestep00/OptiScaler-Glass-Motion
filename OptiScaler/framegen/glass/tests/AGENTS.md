@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): `--recorder` checks asynchronous coverage allocation, actual submission/Reset gates and saved per-object material bits. It uses a new artifact directory and an independent device.
+
 - [GeometryShaders.md](GeometryShaders.md): `--coverage` verifies per-object material bits without motion; `--capture-command` verifies production draw insertion/restoration with actual shader-history MV on a standalone device. Neither is game integration.
 
 - [../Compatibility.md](../Compatibility.md): MRT preservation, public indirect resets, relocation/rejection and health tests. GeometryCompatibility reads an explicitly supplied PE into owned CPU memory; it never executes game code or attaches to a process.

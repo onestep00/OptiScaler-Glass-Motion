@@ -216,7 +216,11 @@ HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12
     if (scope.outer)
     {
         if (SUCCEEDED(result))
+        {
+            if (auto* owner = captureOwner.load(std::memory_order_acquire))
+                owner->discarded(command);
             begin(command, initial);
+        }
         else if (auto* r = find(command))
             r->bindings.invalidate();
     }
@@ -419,6 +423,11 @@ bool RegisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept
         return false;
     GeometryDrawCaptureOwner* expected = nullptr;
     return captureOwner.compare_exchange_strong(expected, owner, std::memory_order_release) || expected == owner;
+}
+void NotifyGeometryCaptureSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands) noexcept
+{
+    if (auto* owner = captureOwner.load(std::memory_order_acquire))
+        owner->submitted(queue, count, commands);
 }
 const GeometryRasterState* ReadGeometryRasterState(ID3D12GraphicsCommandList* command) noexcept
 {

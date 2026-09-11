@@ -3,6 +3,7 @@
 // Owned test identity only. The real engine callbacks have a separate fixture;
 // this supplies a borrowed packet during one actual independent GPU draw.
 bool geometryFixturePacket = false;
+std::uint32_t geometryFixtureFrame = 42;
 namespace GlassFg
 {
 GeometryDrawView ReadCyberpunkGeometryDraw(const void*, std::uint32_t indices, std::uint32_t instances,
@@ -14,7 +15,7 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void*, std::uint32_t indices, s
                                              { { 5, 2, 6, 7 }, 1, 1, 1, false },
                                              { { 8, 2, 9, 10 }, 2, 1, 2, false } };
     if (geometryFixturePacket && indices == 6 && instances == 3 && !startIndex && baseVertex == 2 && startInstance == 7)
-        return { batch, 2, 42, 0, 48, startInstance, instances };
+        return { batch, 2, geometryFixtureFrame, 0, 48, startInstance, instances };
     if (!geometryFixturePacket || indices != 6 || instances != 1 || startIndex || baseVertex != 2 ||
         startInstance < 7 || startInstance > 9)
         return {};

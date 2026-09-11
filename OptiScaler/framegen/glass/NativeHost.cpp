@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "GeometryDrawCapture.h"
 #include "GeometryCreation.h"
 #include "NativeHost.h"
 #include "NativeSession.h"
@@ -130,6 +131,7 @@ D3D12Callbacks makeCallbacks()
     {
         auto& r = *static_cast<Runtime*>(p);
         InternalD3D12Scope ownSignals;
+        NotifyGeometryCaptureSubmit(q, count, lists);
         r.each([&](Entry& e) { e.session.afterSubmit(q, count, lists); });
         r.reap();
     };

@@ -19,6 +19,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader compiler test build failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryInstances.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryCoverageRecorder.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
     (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
@@ -61,6 +62,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Actual graphics command observer GPU test fail
 if ($LASTEXITCODE -ne 0) { throw 'Single-draw capture insertion or root restoration failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
+& $instances $build $dxc --recorder
+if ($LASTEXITCODE -ne 0) { throw 'Asynchronous object recorder failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialMrt.hlsl') (Join-Path $build 'fixture-mrt.dxil') ps_6_0
 if ($LASTEXITCODE -ne 0) { throw 'MRT material compilation failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialDual.hlsl') (Join-Path $build 'fixture-dual.dxil') ps_6_0

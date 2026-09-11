@@ -3,7 +3,9 @@
 #include "../GeometryCreation.h"
 #include "../GeometryCommands.h"
 #include "../GeometryDrawCapture.h"
+#include "../GeometryCoverageRecorder.h"
 extern bool geometryFixturePacket;
+extern std::uint32_t geometryFixtureFrame;
 struct CaptureOwner final : GlassFg::GeometryDrawCaptureOwner
 {
     GlassFg::GeometryPreparedDraw prepared;
@@ -183,21 +185,31 @@ int wmain(int argc, wchar_t** argv)
         require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0 ||
                                             wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0 ||
                                             wcscmp(argv[3], L"--coverage") == 0 ||
-                                            wcscmp(argv[3], L"--capture-command") == 0)),
+                                            wcscmp(argv[3], L"--capture-command") == 0 ||
+                                            wcscmp(argv[3], L"--recorder") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
-        const bool captureCommand = argc == 4 && wcscmp(argv[3], L"--capture-command") == 0;
+        const bool recorder = argc == 4 && wcscmp(argv[3], L"--recorder") == 0;
+        const bool captureCommand = recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
         static CaptureOwner captureOwner;
         const bool observed = argc == 4 && !coverageOnly;
         const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
         const bool mrt = dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
         const bool commands = captureCommand || mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
-        if (captureCommand)
+        if (captureCommand && !recorder)
             require(GlassFg::RegisterGeometryDrawCapture(&captureOwner), "Register capture owner");
         const std::filesystem::path dir(argv[1]);
         auto vs = read(dir / "instances.dxil");
         auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
         Device g;
+        const auto recorderOutput = std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
+        if (recorder)
+        {
+            std::filesystem::create_directories(recorderOutput);
+            const auto request = recorderOutput / "request.txt";
+            { std::ofstream file(request); file << recorderOutput.string() << '\n'; }
+            GlassFg::StartGeometryCoverageRecorder(g.d.Get(), std::filesystem::absolute(argv[2]), request);
+        }
         if (commands)
             require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
         struct Stop
@@ -223,6 +235,7 @@ int wmain(int argc, wchar_t** argv)
         check(GlassFg::CreateObservedGeometryRoot(createRoot, g.d.Get(), 0, serialized->GetBufferPointer(),
                                                   serialized->GetBufferSize(), IID_PPV_ARGS(&originalRoot)));
         constexpr UINT W = 160, H = 112, SOBytes = 4096, Slots = 64, HistoryBytes = Slots * sizeof(History);
+        std::vector<unsigned char> expectedCoverage(recorder ? 9 * 3 * W * H : 0);
         constexpr UINT RoiLeft = 12, RoiTop = 10, RoiWidth = W - 24, RoiHeight = H - 20, RoiStride = RoiWidth + 4;
         constexpr UINT Segment = RoiStride * RoiHeight + 32, CapturePixels = 3 * Segment + 32,
                        CaptureBytes = CapturePixels * 32;
@@ -380,6 +393,8 @@ int wmain(int argc, wchar_t** argv)
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
+            if (recorder)
+                geometryFixtureFrame = frame;
             UINT order[10] {};
             std::array<GlassFg::GeometryInstance, 10> mapping {};
             for (UINT i = 0; i < 3; ++i)
@@ -568,6 +583,11 @@ int wmain(int argc, wchar_t** argv)
                                   CaptureBytes);
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             g.finish();
+            if (recorder)
+            {
+                ID3D12CommandList* submitted[] { g.c.Get() };
+                GlassFg::NotifyGeometryCaptureSubmit(g.q.Get(), 1, submitted);
+            }
             if (commands)
                 require(!GlassFg::ReadGeometryBindings(g.c.Get()), "Closed recording remained readable");
             void* data;
@@ -588,6 +608,21 @@ int wmain(int argc, wchar_t** argv)
                                    clear, sizeof(clear)) != 0;
             }
             exact += W * H;
+            if (recorder)
+            {
+                for (UINT i = 0; i < 3; ++i)
+                    for (UINT y = 0; y < H; ++y)
+                        for (UINT x = 0; x < W; ++x)
+                        {
+                            const auto* color = reinterpret_cast<const float*>(bytes + (order[7 + i] + 2) * imageBytes +
+                                y * footprint.Footprint.RowPitch + x * 16);
+                            expectedCoverage[((frame * 3 + i) * H + y) * W + x] = color[3] > 0;
+                        }
+                D3D12_RANGE noWrite { 0, 0 };
+                readback->Unmap(0, &noWrite);
+                Sleep(200); // Independent fixture gives the diagnostic worker time to compile.
+                continue;
+            }
             require(*reinterpret_cast<const UINT64*>(bytes + 5 * imageBytes) == 18 * sizeof(Clip),
                     "Original SO byte count");
             const auto* emitted = reinterpret_cast<const Clip*>(bytes + 5 * imageBytes + 256);
@@ -707,6 +742,36 @@ int wmain(int argc, wchar_t** argv)
                                 reinterpret_cast<const char*>(pixels) + CaptureBytes);
             D3D12_RANGE noWrite { 0, 0 };
             readback->Unmap(0, &noWrite);
+        }
+        if (recorder)
+        {
+            g.begin(); // Discard the last recording as well as waiting for execution.
+            g.finish();
+            const auto done = recorderOutput / "objects-0.done";
+            const auto deadline = GetTickCount64() + 10000;
+            while (!std::filesystem::exists(done) && GetTickCount64() < deadline)
+                Sleep(10);
+            require(std::filesystem::exists(done), "Diagnostic recorder did not complete");
+            std::ifstream metadata(recorderOutput / "objects-0.csv");
+            std::string line;
+            std::getline(metadata, line);
+            std::getline(metadata, line);
+            const auto frame = std::stoul(line);
+            require(frame >= 1 && frame <= 8, "Recorder frame not from fixture");
+            const auto data = read(recorderOutput / "objects-0.bin");
+            constexpr UINT words = 1 + (W * H + 31) / 32;
+            require(data.size() == 3 * words * 4, "Recorder allocation size");
+            for (UINT i = 0; i < 3; ++i)
+                for (UINT p = 0; p < W * H; ++p)
+                {
+                    UINT word;
+                    memcpy(&word, data.data() + (i * words + 1 + p / 32) * 4, 4);
+                    require(((word >> (p % 32)) & 1) == expectedCoverage[(frame * 3 + i) * W * H + p],
+                            "Recorded engine-mapped material coverage differs from original draw");
+                }
+            printf("PASS recorder_worker=1 completion_and_discard=1 original_material_samples=%u original_pixels=%llu "
+                   "motion_produced=0 game_hooks=0\n", 3 * W * H, exact);
+            return 0;
         }
         if (coverageOnly)
         {

@@ -52,7 +52,10 @@ struct GeometryDrawCaptureOwner
                          const std::shared_ptr<const GeometryPipelineEntry>&, const GraphicsRootBindings&,
                          GeometryPreparedDraw&) noexcept = 0;
     virtual void finish(ID3D12GraphicsCommandList*, bool recorded) noexcept = 0;
+    virtual void submitted(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept {}
+    virtual void discarded(ID3D12GraphicsCommandList*) noexcept {}
   protected:
     ~GeometryDrawCaptureOwner() = default;
 };
+void NotifyGeometryCaptureSubmit(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
 } // namespace GlassFg

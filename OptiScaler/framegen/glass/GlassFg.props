@@ -15,6 +15,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCommands.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryDrawCapture.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryRasterState.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryHealth.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCommands.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryObjectRegistry.h" />
