@@ -75,6 +75,19 @@ No new destructor hook has been installed. Local function disassemblies are unde
 
 ### Same-process follow-up and whole-array route
 
+A subsequent bounded read-only check followed the recorded node candidates to
+their current renderer handles and compared them with the linear producer tuples.
+It accepted 2,254 current chains; 13 candidate records had changed node handles
+and were rejected. Each accepted chain was read twice and included node/shared
+handle controls, original source range, typed render mesh, renderer handle,
+proxy, registry slot and current array count. This used 45,093 metadata reads /
+559,200 bytes and copied no transform contents. The historical candidates only
+bound the search; they do not prove temporal identity or safely bootstrap a cache
+without concurrent lifecycle observation. No shader input changed.
+
+Local reproducible checker: `work/check-glass-source-chain.py`. Result:
+`work/glass-instance-producer-live-v3/capture-2/current-source-chains.json`.
+
 The whole-array-only profile 0x49535033 was subsequently built and tested in
 PID 70152 without restarting. It uses the extended header but installs only the
 outer producer and packet hooks. It deliberately does not install the selection
