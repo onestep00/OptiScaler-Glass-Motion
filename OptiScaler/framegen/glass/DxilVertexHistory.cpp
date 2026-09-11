@@ -480,6 +480,81 @@ glass.end:
     }
     return result;
 }
+VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsigned targetIndex)
+{
+    VertexHistoryShader result;
+    try
+    {
+        need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024 && targetIndex < 8,
+             "Invalid native output request");
+        std::string source(disassembly);
+        while (!source.empty() && source.back() == '\0') source.pop_back();
+        need(source.find('\0') == std::string::npos, "Embedded NUL");
+        Metadata metadata;
+        std::string body, line;
+        std::istringstream lines(source);
+        const std::regex ordinary(R"(^!(\d+) = !\{(.*)\}$)"), any(R"(^!(\d+) = .*$)");
+        while (std::getline(lines, line))
+        {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::smatch match;
+            if (std::regex_match(line, match, any))
+                metadata.next = std::max(metadata.next, number(match[1], "") + 1);
+            if (std::regex_match(line, match, ordinary))
+                metadata.nodes.emplace(number(match[1], ""), match[2]);
+            else if (!line.starts_with("!dx.viewIdState")) body += line + "\n";
+        }
+        const auto model = single(source, std::regex(R"(!dx.shaderModel = !\{(!\d+)\})"), 1, "Missing shader model");
+        need(metadata.get(model) == "!\"ps\", i32 6, i32 0", "Only native PS 6.0 validated");
+        for (const auto* op : { "dx.op.atomic", "dx.op.bufferStore", "dx.op.rawBufferStore", "dx.op.textureStore",
+                                "dx.op.barrier", "dx.op.traceRay", "dx.op.callShader" })
+            need(source.find(op) == std::string::npos, "Native pixel side effect unsupported");
+        const auto ep = single(source, std::regex(R"(!dx.entryPoints = !\{(!\d+)\})"), 1, "Missing entry point");
+        const auto entry = split(metadata.get(ep));
+        need(entry.size() == 5, "Unsupported entry point");
+        const auto signatures = split(metadata.get(entry[2]));
+        need(signatures.size() == 3 && signatures[2] == "null", "Unsupported native signature");
+        unsigned selected = UINT32_MAX;
+        std::string selectedNode;
+        for (const auto& node : split(metadata.get(signatures[1])))
+        {
+            Signature s(metadata.get(node));
+            need(s.fields[1] == "!\"SV_Target\"" && s.rows == 1 && s.fields[9] == "i8 0",
+                 "Native non-color output unsupported");
+            if (number(metadata.get(s.fields[4]), "i32 ") != targetIndex) continue;
+            need(selected == UINT32_MAX && s.columns == 4 && s.fields[2] == "i8 9",
+                 "Native target must be one float4");
+            selected = s.id; selectedNode = node;
+            s.fields[0] = "i32 0"; s.fields[4] = metadata.add("i32 0"); s.fields[8] = "i32 0";
+            metadata.get(node) = join(s.fields);
+        }
+        need(selected != UINT32_MAX, "Native target absent");
+        metadata.get(signatures[1]) = selectedNode;
+        std::string rewritten;
+        std::istringstream instructions(body);
+        const std::regex store(R"(^\s*call void @dx.op.storeOutput\.f32\(i32 5, i32 (\d+),(.*)$)");
+        unsigned stores = 0;
+        while (std::getline(instructions, line))
+        {
+            std::smatch match;
+            if (line.find("call void @dx.op.storeOutput.") != std::string::npos)
+            {
+                need(std::regex_match(line, match, store), "Unsupported native export instruction");
+                if (number(match[1], "") != selected) continue;
+                line = "  call void @dx.op.storeOutput.f32(i32 5, i32 0," + match[2].str();
+                ++stores;
+            }
+            rewritten += line + "\n";
+        }
+        need(stores != 0, "Native target has no exports");
+        for (const auto& [id, value] : metadata.nodes)
+            rewritten += "!" + std::to_string(id) + " = !{" + value + "}\n";
+        result.assembly = std::move(rewritten);
+    }
+    catch (const std::exception& error) { result.error = error.what(); }
+    return result;
+}
+
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
                                           MaterialDestination destinationFactor, MaterialMotionTarget target,
                                           unsigned firstHistoryRegister, GeometryLayout layout)

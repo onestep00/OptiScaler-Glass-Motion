@@ -65,9 +65,9 @@ int wmain(int argc, wchar_t** argv)
             check(compiler->Disassemble(input.Get(), &disassembly));
             output = disassembly;
         }
-        else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material" || mode == L"capture")
+        else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"native-motion")
         {
-            if (mode == L"rewrite" || mode == L"material" || mode == L"capture")
+            if (mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"native-motion")
             {
                 ComPtr<IDxcCompiler> compiler;
                 check(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
@@ -90,7 +90,7 @@ int wmain(int argc, wchar_t** argv)
                     historyRegister = vertex.previousRegister;
                 }
                 auto patched =
-                    mode == L"rewrite"
+                    mode == L"native-motion" ? GlassFg::ExtractNativeMotionTarget(assembly, unsigned(std::stoul(argv[5]))) : mode == L"rewrite"
                         ? GlassFg::RewriteVertexHistory(assembly, layout, cameraCapture ? &camera : nullptr)
                         : GlassFg::RewriteMaterialMotion(
                               assembly, GlassFg::MaterialSource::One,

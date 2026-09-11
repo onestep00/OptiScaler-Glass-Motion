@@ -9,6 +9,24 @@
 
 ## Implemented source
 
+`ExtractNativeMotionTarget` can retain an explicitly identified native float4
+SV_Target as target 0 while removing other color exports. It preserves original
+inputs, arithmetic, branching and discard, and rejects non-color outputs and
+pixel write side effects. It does not discover motion semantics or supply engine
+previous transforms. The compiler tool's `native-motion` mode takes the known
+target index as its final argument and assembles/validates the result.
+
+Recorded MeshStatic velocity PS variants for `glass_deferred` and
+`glass_cracked_edge` passed target-3 extraction and DXIL validation. Their four
+retained export values match the originals exactly; all non-export instructions
+also match after resolving renumbered/self-referential control-flow metadata.
+Requesting absent target 7 was rejected. Local audit is
+`outputs/glass-native-velocity-route-audit/motion-extraction-audit.json`.
+This has not been GPU-rendered or integrated into a live engine velocity draw.
+Unused material calculations are still present in the intermediate shader; no
+reduced execution-cost claim follows from removing exports. Native input binding,
+MV-only pipeline state and inward-boundary selection remain required.
+
 Source now has optional `D3D12Callbacks::beforeSubmit`, called under the existing
 enter/leave submission lock before the real ExecuteCommandLists. NativeHost
 forwards it to `GeometryDrawCaptureOwner::beforeSubmit`; existing owners default
