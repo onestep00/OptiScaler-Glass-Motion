@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [CoverageLayout.md](CoverageLayout.md): Allocation-free rectangle mask layout passes CPU address checks; three same-draw geometry samples contain all mask pixels. Runtime bounds/MV integration remains absent.
+- [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 
 - [Experiments.md](Experiments.md): Explicit capture selection now matches the recorder's 64-instance capacity; prior limit rejected the 40-instance draw.
 

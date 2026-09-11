@@ -4,6 +4,7 @@
 #include "../GeometryCommands.h"
 #include "../GeometryDrawCapture.h"
 #include "../GeometryCoverageRecorder.h"
+#include "../GeometryCoverageLayout.h"
 #include "ExperimentDrawCheck.h"
 #include "ModuleRecorderCheck.h"
 #include "InFlightCaptureCheck.h"
@@ -430,6 +431,7 @@ int wmain(int argc, wchar_t** argv)
         std::array<std::vector<char>, 2> priorHistory;
         std::vector<char> priorCapture;
         UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0, auxiliaryWritten = 0;
+        UINT maximumCoverageWords = 0;
         double maximum = 0;
         unsigned recorderSplitFrame = 5;
         bool checkedInFlight = false;
@@ -508,15 +510,22 @@ int wmain(int argc, wchar_t** argv)
             require(!hc.valid(badMap, Slots, CapturePixels), "Entirely inactive draw admitted");
             upload(objects.Get(), order, sizeof(order));
             if (coverageOnly)
-                for (auto& entry : mapping)
+            {
+                std::array<GlassFg::GeometryCoverageRegion, 10> regions {};
+                for (UINT i = 0; i < mapping.size(); ++i)
                 {
+                    const auto& entry = mapping[i];
                     if (entry.inactive())
                         continue;
-                    entry.historyBase = entry.vertices = entry.vertexOrigin = 0;
-                    entry.pixelBase = (entry.statusIndex + 1) * 32;
-                    entry.pixelCapacity = CapturePixels * 32;
-                    require(entry.validCoverage(CapturePixels), "Coverage bit allocation validation");
+                    regions[i] = { entry.left, entry.top, entry.width, entry.height, entry.generation };
                 }
+                UINT usedWords = 0;
+                require(GlassFg::PackGeometryCoverage(regions, mapping, W, H, CapturePixels, usedWords),
+                        "Packed coverage layout rejected");
+                maximumCoverageWords = std::max(maximumCoverageWords, usedWords);
+                for (const auto& entry : mapping)
+                    require(entry.inactive() || entry.validCoverage(usedWords), "Packed coverage allocation invalid");
+            }
             upload(mappingBuffer.Get(), mapping.data(), sizeof(mapping));
             GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame,         0,
                                                    0, 0, W,       H,       0, W, CapturePixels, 0 };
@@ -726,6 +735,7 @@ int wmain(int argc, wchar_t** argv)
             {
                 require(!memcmp(hist, zero.data(), HistoryBytes), "Coverage-only draw wrote vertex history");
                 const auto* words = reinterpret_cast<const UINT*>(pixels);
+                std::vector<UINT> expectedWords(CaptureBytes / sizeof(UINT));
                 for (UINT i = 0; i < 3; ++i)
                 {
                     const UINT object = order[7 + i];
@@ -734,6 +744,7 @@ int wmain(int argc, wchar_t** argv)
                         continue;
                     require(words[entry.statusIndex] == (frame == 4 && object == 1 ? 1u : 0u),
                             "Coverage escape flag mismatch");
+                    expectedWords[entry.statusIndex] = frame == 4 && object == 1 ? 1u : 0u;
                     for (UINT y = entry.top; y < entry.top + entry.height; ++y)
                         for (UINT x = entry.left; x < entry.left + entry.width; ++x)
                         {
@@ -742,9 +753,13 @@ int wmain(int argc, wchar_t** argv)
                             const UINT bit = entry.pixelBase + (y - entry.top) * entry.stride + x - entry.left;
                             const bool actual = (words[bit / 32] & (1u << (bit % 32))) != 0;
                             require(actual == (color[3] > 0), "Coverage bit differs from original object material");
+                            if (color[3] > 0)
+                                expectedWords[bit / 32] |= 1u << (bit % 32);
                             checked += actual;
                         }
                 }
+                require(!memcmp(words, expectedWords.data(), CaptureBytes),
+                        "Packed coverage changed padding, inactive region or another object's bits");
                 D3D12_RANGE noWrite { 0, 0 };
                 readback->Unmap(0, &noWrite);
                 continue;
@@ -947,7 +962,9 @@ int wmain(int argc, wchar_t** argv)
         {
             require(checked > 1000, "Insufficient coverage samples");
             printf("PASS object_bit_coverage=1 original_material_discard=1 original_pixels=%llu covered_samples=%llu "
-                   "vertex_history_writes=0 motion_produced=0 game_hooks=0\n", exact, checked);
+                   "packed_layout=1 padding_and_inactive_exact=1 maximum_mask_bytes=%u "
+                   "vertex_history_writes=0 motion_produced=0 game_hooks=0\n", exact, checked,
+                   maximumCoverageWords * unsigned(sizeof(UINT)));
             return 0;
         }
         require(checked > 1000 && overlaps > 100, "Insufficient per-object overlap coverage");

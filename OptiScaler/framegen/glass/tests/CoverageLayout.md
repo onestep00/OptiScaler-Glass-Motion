@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: layout implementation and CPU address checks pass; runtime bounds producer absent
+- Status: CPU address checks and original-material GPU coverage comparison pass; runtime bounds producer absent
 - Deployment: none; existing game correction unchanged
 - Deprecated: no
 - Scope: packing supplied current geometry rectangles into the existing per-instance bit-mask ABI
@@ -39,3 +39,17 @@ CPU fixture checks non-word-aligned rows, disjoint status/pixel addresses, outer
 guards, exact-budget success, insufficient capacity, overflow and transactional
 rejection. It passed with `COVERAGE_LAYOUT_OK`. It does not execute the shader,
 derive engine bounds or prove FG quality.
+
+`GeometryInstances --coverage` now uses the same packer for its GPU mapping.
+Across eight fixture frames, original color matched at all 143,360 samples and
+5,296 recorded material samples matched the independent original-object draws.
+All capture-buffer words matched the expected masks, status words and zero padding,
+including reordered instances, an inactive instance and a deliberately undersized
+rectangle that set the escape flag. Maximum packed storage was 4,704 bytes in
+this fixture; the test retains its larger shared diagnostic resource for guard
+checks, so this is not a measured GPU-allocation or timing reduction.
+
+The default instance-history regression also passed: 3,563 motion samples,
+896 overlap samples and maximum error 0.001688 pixels. Both tests use synthetic
+geometry on an independent device. No engine bounds producer, game MV substitution
+or generated-frame improvement follows from these checks.

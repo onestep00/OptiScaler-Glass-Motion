@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry-rectangle mask layout reduces reserved area without deriving masks from images; standalone checks pass, runtime producer not connected.
+- [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
