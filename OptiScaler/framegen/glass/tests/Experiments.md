@@ -457,3 +457,23 @@ saved 22 more jobs; all 120 cumulative jobs retired and all five coverage DLL
 versions unloaded. The separately pinned CPU observer remains stopped/resident.
 No new MV correction was applied. Next work must carry source identity through
 the actual draw and obtain owner/array lifetime before authorizing shader history.
+
+## Instance-array mutation and rejected secondary-history candidate
+
+Local PE analysis follows the actual mesh proxy vtable (RVA 0x2ac22a0) to
+constructor 0x236bd0 and destructor 0x2943d8. Setter 0x3cbde0 writes proxy+0x110,
+allocates/reuses proxy+0x108, and calls converter 0x3cc114 with the current input
+span. When its optional branch is enabled, proxy+0x158 receives that same input
+through the same converter. It is not an observed previous-frame shift/swap.
+The setter calls 0x3cbd40 to invalidate group data via 0xc23f84, so source-array
+content changes must not be inferred solely from an unchanged pointer/count.
+This identifies an actual mutation path for the lifetime adapter; completeness
+of all mutation routes is not yet established.
+
+A read-only follow-up on the 1,214 previously observed owner addresses found
+proxy+0x158 null for every owner. Evidence is
+outputs/glass-secondary-array-check-v1/result.json. No frame correlation or
+previous-transform validity is inferred from this snapshot. The secondary array
+is rejected as a usable previous-transform source in this process. Continue the
+verified source-index/actual-vertex-history path; do not substitute this pointer
+or a camera-only estimate. No running DLL or FG input was modified by this audit.
