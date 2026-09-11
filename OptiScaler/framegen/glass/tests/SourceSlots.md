@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: slot cache implemented; simultaneous live producer/draw candidates verified; lifetime/view adapter incomplete
+- Status: slot cache implemented; live array enqueue and differing upstream packing verified; lifetime/view adapter incomplete
 - Deployment: none; no motion or FG input changes
 - Deprecated: no
 - Scope: bounded CPU correspondence within one proven producer/consumer domain
@@ -200,9 +200,54 @@ forwarding hook until game exit; this is not a production per-frame observer.
 The independent fixture passed 5,000 filtered empty requests followed by a
 captured array request, malformed/reversed spans, unreadable headers, bounded
 stop and unchanged original return values. The standalone DLL compiled with
-`/W4 /WX`. It has not been loaded into a game; live array-element identity and
+`/W4 /WX`. Its later live deployment is recorded below; array-element identity and
 the final FG correction remain incomplete. This filter prevents the previously
 observed single-object calls from exhausting the array investigation's budget.
+
+### Live array enqueue and upstream packing
+
+PID 62100 loaded diagnostic SHA-256
+`41d8dd8c12c6a29c6a1031f934efc7aed193c174c0248b975c3e9534aecb6107`.
+StartArrays48 and Save returned zero. Capture-2 filled its 4,096-row bound with
+4,096 distinct owner pointers, spans of 1--50 entries, and one return RVA,
+`0x3cbd30`. It skipped 451,319 empty requests and reported no malformed headers.
+The recording began before the user loaded the save. It cannot establish which
+of these records occurred after loading, or identify a particular cup from count.
+
+A second recording started after the user confirmed the save was loaded.
+Capture-3 observed 648,984 empty requests but zero array requests. Both recordings
+were saved with recording disabled. This is an observation interval, not proof
+that arrays never update during gameplay. It rules out using this observed
+event stream alone as a per-rendered-frame sample clock. No transform-array
+contents or GPU buffers were copied and no FG inputs were changed.
+
+Static inspection identifies `0x3cbca8` as the common wrapper. It copies the
+caller's begin/end pair from RDX into request +0x60/+0x68, reads the owner from
+the handle at RCX+0x10, and submits through the interface at RCX+8. Six validated
+direct call sites reach this wrapper in the audited executable. This does not
+claim complete indirect-call coverage. The caller bodies have different source
+packing behavior:
+
+- `0x579ab8` walks 32-byte input entries and appends only those enabled by its
+  source-indexed bitset. A packed ordinal can therefore change when earlier
+  entries become inactive.
+- `0x57b114` walks 64-byte input entries. Its inactive branch appends a placeholder
+  and sets the corresponding bit in a separate mask; this differs from the
+  preceding compacting path. Source-array replacement still needs validation.
+- `0x3a2038` builds 48-byte transforms from position/rotation/scale arrays in
+  explicit source ranges before enqueueing each group.
+- `0xa040c0` walks 32-byte inputs in order and appends transformed entries.
+- `0x3c8508` and `0x2276c30` forward an externally supplied span; their local
+  bodies do not establish its element lifetime.
+
+These findings require preserving source provenance before packing. Neither the
+common wrapper's packed ordinal nor unchanged count is a general object ID.
+The next diagnostic must distinguish the wrapper's upstream caller and its
+source-index domain, then connect that to the later render grouping. Do not add
+CPU vertex copies or a full-screen mask per instance to solve this identity gap.
+Local evidence: `work/glass-instance-updates-live-v2/capture-{2,3}/analysis.json`
+and `work/glass-engine-identity-probe-v2/function-{3cbca8,579ab8,57b114,3a2038,a040c0,3c8508,2276c30}.txt`.
+All RVAs describe the audited binary only; no production hook or signature was added.
 
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input
