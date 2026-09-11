@@ -330,6 +330,34 @@ function disassemblies 0x3c8ae8/0x3c8b08/0x25422c/0x2277018 and the leaf
 accessor bytes at 0xaefd28. This is a potential bounded scalar provenance route,
 not a claim of static object motion, all-transparency coverage or FG integration.
 
+### Shared-range accessor diagnostic
+
+The same standalone source now supports `GLASS_TRANSFORM_RANGE`, mutually
+exclusive with wrapper mode. This mode forwards the audited two-argument
+accessor first and preserves its pointer return and output span. It reads the
+24-byte original range, the resulting 16-byte span, and one 8-byte data pointer
+from the shared buffer. It copies no transform contents. Its distinct profile
+magic is 0x49555033. Normalized fields q0/q1 retain the shared handle, q2 packs
+start/count as supplied, q3 is the shared data pointer, and q12/q13 are the
+returned endpoints. Context is the range-header address; input is the output
+span-header address. Neither is automatically a persistent object identity.
+
+`TransformRange.cpp` passes pointer-return/output preservation, exact metadata,
+unreadable inputs, intentionally unmapped transform data and bounded stop.
+The wrapper and original enqueue fixtures were rebuilt and also passed.
+All three use MSVC `/W4 /WX`. The runtime comparison must verify the observed
+span arithmetic and distinguish shared-buffer/source-range provenance from
+temporal owner lifetime; pointer containment alone does not authorize history.
+
+The accessor DLL, SHA-256
+`e191f78aac2d6fba80ff5235f10e11800f8b1b4f50b5ff09db8a83d3586dd4ce`,
+loaded into PID 62100 without restarting. Its 51-byte audited leaf profile
+passed installation and both Start and Save returned zero. The first interval
+had zero accessor calls and the simultaneous wrapper interval also had zero
+calls. This is control/installation evidence only. Raw local output is in
+`work/glass-transform-range-live-v1/capture/` and
+`work/glass-array-wrapper-live-v1/capture-3/`. No FG input was changed.
+
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input
 address and 144-byte input header. It copies no pointed-to transform arrays or

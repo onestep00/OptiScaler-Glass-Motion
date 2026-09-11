@@ -11,10 +11,19 @@
 
 namespace
 {
-#ifdef GLASS_ARRAY_WRAPPER
+#if defined(GLASS_ARRAY_WRAPPER) && defined(GLASS_TRANSFORM_RANGE)
+#error Select one diagnostic ABI
+#endif
+#ifdef GLASS_TRANSFORM_RANGE
+using EnqueueResult = void*;
+using Enqueue = EnqueueResult (*)(void*, void*);
+constexpr unsigned profileMagic = 0x49555033;
+#elif defined(GLASS_ARRAY_WRAPPER)
+using EnqueueResult = unsigned char;
 using Enqueue = unsigned char (*)(void*, void*, void*);
 constexpr unsigned profileMagic = 0x49555032;
 #else
+using EnqueueResult = unsigned char;
 using Enqueue = unsigned char (*)(void*, void*);
 constexpr unsigned profileMagic = 0x49555031;
 #endif
@@ -43,18 +52,32 @@ bool read(std::uint64_t address, void* data, unsigned bytes) noexcept
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-unsigned char enqueue(void* a, void* b
+EnqueueResult enqueue(void* a, void* b
 #ifdef GLASS_ARRAY_WRAPPER
                       , void* bounds
 #endif
 )
 {
     active.fetch_add(1, std::memory_order_acq_rel);
+#ifdef GLASS_TRANSFORM_RANGE
+    // The audited leaf writes its borrowed span to b and returns b.
+    const auto result = original(a, b);
+#endif
     if (recording.load(std::memory_order_acquire))
     {
         Row row;
         row.input = reinterpret_cast<std::uint64_t>(b);
-#ifdef GLASS_ARRAY_WRAPPER
+#ifdef GLASS_TRANSFORM_RANGE
+        // Original 24-byte range plus resulting span and one data pointer.
+        // No transform data is copied; caller owns the object lifetime.
+        row.valid = read(reinterpret_cast<std::uint64_t>(a), row.header.data(), 24) &&
+                    read(row.input, &row.header[12], 16);
+        if (row.valid && row.header[0])
+        {
+            row.valid = row.header[0] <= 0x7fffffffffffULL - 56 &&
+                        read(row.header[0] + 48, &row.header[3], 8);
+        }
+#elif defined(GLASS_ARRAY_WRAPPER)
         // Normalized diagnostic fields, not a copy of an engine request.
         // Preserve the real upstream return site. Do not dereference the span.
         const auto handle = reinterpret_cast<std::uint64_t>(a);
@@ -87,11 +110,13 @@ unsigned char enqueue(void* a, void* b
             else recording.store(false, std::memory_order_release);
         }
     }
+#ifndef GLASS_TRANSFORM_RANGE
     const auto result = original(a, b
 #ifdef GLASS_ARRAY_WRAPPER
                                  , bounds
 #endif
     );
+#endif
     active.fetch_sub(1, std::memory_order_release);
     return result;
 }
