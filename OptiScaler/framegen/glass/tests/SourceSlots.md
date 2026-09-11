@@ -332,6 +332,30 @@ Current address/handle agreement is not a lifetime-generation proof, and none of
 these reads supplies previous vertices or changes FG input. Connecting the
 captured provenance to registered generations and the draw consumer is next.
 
+A subsequent census-only hot module saved 32,768 draw observations in PID 70152,
+then unloaded with zero GPU captures/pending jobs. It deliberately selected no
+capture pipeline. Of those rows, 4,430 share a render mesh with the preceding
+typed node snapshot, spanning 169 meshes. This is mesh-resource correspondence,
+not individual source-instance ownership; meshes are shared and the snapshots
+are not simultaneous. The single 40-source-instance mesh appears in 152 rows
+with several draw counts/chunks and unclassified pipeline IDs. It must not be
+identified as a cup from the instance count. The census contains frame-zero
+observations, 51,610 contended attempts and 1,296,834 overflow attempts, so it is
+not a complete frame census. Local evidence:
+`work/glass-node-draw-census-v1/capture/{draw-census.done,node-mesh-join.json}`.
+
+Control requests in this run had to use MO2 overwrite/bin/x64/Glass for both
+request and response. An older overwrite request shadowed a request written to
+the physical game path; the first status call timed out but did not load a DLL.
+The corrected status/load/disable requests completed and the module unloaded.
+
+Further creation tracing shows 0x296cd0 can either call 0x297314 immediately or
+append the renderer handle to a pending list when its 0x400 counter limit is
+reached. Therefore a source association must not assume registration has already
+completed at outer creation return. Pending-source publication and later registry
+generation attachment need explicit ordering/lifetime handling. This call graph
+alone does not establish the completion order of its virtual renderer calls.
+
 `ExperimentInstanceUpdates.cpp` also builds with `GLASS_ARRAY_WRAPPER`. This
 separate diagnostic observes the audited three-argument wrapper before enqueue,
 so the recorded caller distinguishes its upstream producers. It forwards all
