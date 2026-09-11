@@ -16,7 +16,7 @@
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
-- [tests/SourceSlots.md](tests/SourceSlots.md): Producer consumes guarded owner-query ABI once per scope in independent checks. Linked pair not deployed; temporal MV/FG integration remains incomplete.
+- [tests/SourceSlots.md](tests/SourceSlots.md): Actual fixture DLL export/discovery/pinning and producer source-generation propagation pass. Game-linked lifetime pair and temporal MV/FG remain incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
 

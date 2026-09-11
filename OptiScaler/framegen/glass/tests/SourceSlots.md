@@ -142,6 +142,18 @@ view/frame-to-FG ownership. No additional game hook was installed in this turn.
 
 ### Connected lifetime diagnostic (not deployed)
 
+`SourceQueryConnection.cpp` subsequently loaded the independent fixture DLL
+`SourceQueryProvider.cpp` and exercised the actual exported owner query through
+the producer's `connectSource` and `observe` paths. Missing/relative provider paths
+were rejected; an absent sidecar left lookup disabled. Creation reached the
+producer, destruction removed it, and recreation returned a newer generation.
+After releasing the test's original LoadLibrary reference, the pinned callback
+remained callable. Both files compile with `/O2 /W4 /WX`, and the executable
+passed. Fixtures never install engine hooks and must never be injected into a
+game. Local executable/provider artifacts are in `work/glass-source-query-test-v1/`.
+This closes independent module discovery/pinning coverage, not live engine
+lifetime coverage, bootstrap or FG admission.
+
 The producer now consumes the scalar owner-query ABI. An optional UTF-8 `.source`
 sidecar contains one absolute path to an already-loaded owner-query DLL. Start
 resolves its named export and pins the module; it neither loads a guessed DLL nor
@@ -154,8 +166,8 @@ index and additionally writes source node/buffer/generation and absolute buffer
 index. A missing/malformed result leaves those ownership fields unavailable;
 exceptions do not escape into the engine. The fixture verifies one query for
 multiple records in a scope, index translation, count mismatch and exception
-containment. Build and execution passed. This tests a callback substitute, not
-module discovery/pinning or a live linked pair. The currently pinned game
+containment. Build and execution passed. That fixture uses a callback substitute;
+the separate connection test above covers discovery/pinning. The currently pinned game
 producer predates this consumer; no new pair was deployed.
 
 The lifetime diagnostic now exports `GlassSourceOwnerQuery` through
