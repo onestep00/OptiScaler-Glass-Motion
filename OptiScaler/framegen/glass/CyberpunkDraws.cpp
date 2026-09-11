@@ -178,9 +178,18 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                 copyAt(before.entry, encoded) && copyAt(before.geometry, geometry) && geometry.kind == 0)
             {
                 const auto proxy = encoded & 0x00ffffffffffffffull;
-                if (copyAt(proxy + 0x98, actualSlot) && actualSlot == index && copyAt(proxy + 0xd8, mesh) && mesh &&
-                    mesh == geometry.mesh)
+                struct Instances
                 {
+                    std::uint64_t transforms = 0;
+                    std::uint32_t count = 0, globalStart = UINT32_MAX;
+                } instances;
+                if (copyAt(proxy + 0x98, actualSlot) && actualSlot == index && copyAt(proxy + 0xd8, mesh) && mesh &&
+                    mesh == geometry.mesh && copyAt(proxy + 0x108, instances) &&
+                    !instances.transforms && !instances.count && instances.globalStart == UINT32_MAX)
+                {
+                    // A culled cluster can emit count=1 while its proxy owns
+                    // many objects. Until its original sub-instance index is
+                    // available, proxy identity alone cannot authorize history.
                     try
                     {
                         const auto generation = state->registry->ticket(proxy, index);

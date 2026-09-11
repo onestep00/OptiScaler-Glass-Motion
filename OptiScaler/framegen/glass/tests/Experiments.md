@@ -149,6 +149,23 @@ outputs/glass-experiment-live-instances-v2. No new object MV or FG correction wa
 applied. Next work must resolve actual packet sub-instance provenance and history,
 not reuse draw ordinal as a temporal object identifier.
 
+A later read-only snapshot in the same process found that the cup proxy seen in
+a count=1 capture owns 40 source transforms. Packet count=1 is therefore insufficient
+for proxy-only history admission. `CyberpunkDraws` now rejects both CPU-array and
+global-array proxies in that path until sub-instance mapping exists. This source
+guard is not deployed into the running resident host. The diagnostic coverage
+module produces no history/MV and remains safe to interpret only as draw coverage.
+Local engine code shows a uint16 source-index array per spatial group used to
+gather 48-byte original transforms. Correlating that array with actual packet
+ranges is the next live acquisition task; source indices and their lifetime have
+not yet been validated at a captured draw.
+
+The production callback fixture passes `/W4 /WX` compilation and checks a
+40-entry CPU cluster reduced to one draw instance, a global-array cluster and
+recovery to an ordinary proxy. Both clusters retain unknown coverage intervals
+without authorizing proxy-only history. All 19 original appends and 12 flushes
+remain forwarded once. This is owned-memory validation, not live deployment.
+
 The resident host from fc151fc is staged in MO2 `overwrite/Root/bin/x64/dxgi.dll`,
 SHA-256 `57E7BB11A91D393563156D3DE3CE666B948DD05A3F8868D22004EBC6CF0BC6ED`.
 `Glass/experiment-host.enable` enables the event controller and target observer;

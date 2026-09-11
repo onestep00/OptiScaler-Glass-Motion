@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/Experiments.md](tests/Experiments.md): Read-only live evidence shows count=1 can belong to a 40-instance proxy. Source rejects array proxies from proxy-only history admission; not deployed. Original group indices remain the next acquisition task.
+
 - [tests/Experiments.md](tests/Experiments.md): Live same-process DLL load/capture/unload verified. Draw-instance regions match original material references, including cups/railings. Persistent multi-instance identity, actual MV and FG remain incomplete.
 
 - [tests/Experiments.md](tests/Experiments.md): Raw census, selection and actual queue/in-flight replacement pass independent checks. Common host fc151fc staged in MO2 with backups; user launch/live validation pending. Game contours/MV/FG remain incomplete.

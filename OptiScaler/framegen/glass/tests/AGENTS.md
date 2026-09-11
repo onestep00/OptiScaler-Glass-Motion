@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [Experiments.md](Experiments.md): Single visible instances of CPU/global clusters reject proxy-only history in production callback fixture. 19 appends/12 flushes remain forwarded; source guard not deployed.
+
 - [Experiments.md](Experiments.md): Live 56 captures across two unloaded DLL generations. MO2 response redirection fixed in external client. Diagnostic ordinal coverage is not persistent object identity or MV.
 
 - [Experiments.md](Experiments.md): Census analyzer validates CSV/target provenance; actual queue/in-flight capture/Reset/replacement preserve DLLs and pixels. Common host staged, no live game or FG proof.

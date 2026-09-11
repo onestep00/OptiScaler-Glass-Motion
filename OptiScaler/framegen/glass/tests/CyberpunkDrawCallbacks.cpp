@@ -191,6 +191,24 @@ void fixtureRun(void*, void*, void*)
     fixture->registry->registered(proxy, 1, geometry.mesh, pose);
     flush();
     require(observed.empty(), "Reused slot consumed old packet identity");
+    put(proxies[0].data(), 0x108, std::uint64_t(0x12340000));
+    put(proxies[0].data(), 0x110, std::uint32_t(40));
+    storeInstance(0, 31, false);
+    flush();
+    require(observed.size() == 1 && !observed[0].identity,
+            "One visible instance of a CPU cluster acquired proxy-only history");
+    put(proxies[0].data(), 0x108, std::uint64_t(0));
+    put(proxies[0].data(), 0x114, std::uint32_t(300));
+    storeInstance(0, 32, false);
+    flush();
+    require(observed.size() == 1 && !observed[0].identity,
+            "One visible instance of a global cluster acquired proxy-only history");
+    put(proxies[0].data(), 0x110, std::uint32_t(0));
+    put(proxies[0].data(), 0x114, UINT32_MAX);
+    storeInstance(0, 33, false);
+    flush();
+    require(observed.size() == 1 && observed[0].identity.slot == 1,
+            "Ordinary proxy admission did not recover");
     crossFrame = true;
     storeInstance(0, 30, false);
     flush();
@@ -207,6 +225,7 @@ int main()
         fixture->tick = &tick;
         fixture->rendererGlobal = &root;
         fixture->drawReturn = callsite;
+        for (auto& proxy : proxies) put(proxy.data(), 0x114, UINT32_MAX);
         const auto renderer = reinterpret_cast<std::uint64_t>(rendererMemory.data());
         put(rootMemory.data(), 0x4628, renderer);
         geometry.kind = 0;
@@ -237,7 +256,7 @@ int main()
         GlassFg::activeDrawState.store(fixture.get());
         GlassFg::run(nullptr, nullptr, nullptr);
         require(!GlassFg::currentBatch && fixture->occupied == 0 && !GlassFg::currentFlush, "Scope cleanup");
-        require(forwardedAppends == 16 && forwardedFlushes == 9, "Original operations were dropped or repeated");
+        require(forwardedAppends == 19 && forwardedFlushes == 12, "Original operations were dropped or repeated");
         GlassFg::GeometryDrawBatch batch;
         for (unsigned i = 0; i < 2049; ++i)
             batch.append(i, i + 1, { {}, 0, 1, i, false });
@@ -253,7 +272,7 @@ int main()
         printf("PASS direct_packet_slots=1 coincident_objects=1 batch_reorder=1 rigid_and_skinned=1 "
                "unknown_intervals_preserved=1 global_range=1 failed_upload_rejected=1 lifetime_reuse_rejected=1 "
                "mixed_frame_rejected=1 borrowed_view_scope=1 bounded_pool=1 original_calls_preserved=1 "
-               "game_hooks_installed=0\n");
+               "single_visible_cluster_rejected=1 game_hooks_installed=0\n");
         return 0;
     }
     catch (const std::exception& error)
