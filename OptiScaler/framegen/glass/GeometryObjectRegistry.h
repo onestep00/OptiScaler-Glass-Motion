@@ -43,8 +43,8 @@ struct GeometryObjectStats
     std::uint64_t registered = 0, removed = 0, updates = 0, live = 0, ambiguous = 0, invalidations = 0;
 };
 
-// Immutable copies only: queries never dereference game memory. Four recent
-// poses per live engine registry slot allow an already recorded instance upload
+// Queries never dereference game memory. Default mode stores lifetime slots
+// only. Explicit diagnostic mode retains four recent poses per slot to allow an instance upload
 // to match an earlier pose. Identity comes from registration/lifetime events,
 // not the transform hash. Equal live mesh/pose candidates remain ambiguous.
 // Intrusive hash buckets use fixed storage: no allocation on pose updates.
@@ -95,7 +95,7 @@ class GeometryObjectRegistry
     void erase(std::uint32_t index)
     {
         auto& slot = slots[index];
-        for (unsigned i = 0; i < History; ++i)
+        for (unsigned i = 0; !nodes.empty() && i < History; ++i)
             unlink(index * History + i);
         if (slot.proxy)
             --counters.live;
@@ -117,6 +117,7 @@ class GeometryObjectRegistry
     }
     void append(std::uint32_t index, const GeometryObjectPose& pose)
     {
+        if (nodes.empty()) return;
         auto& slot = slots[index];
         if (slot.cursor)
         {
@@ -136,13 +137,18 @@ class GeometryObjectRegistry
     }
 
   public:
-    explicit GeometryObjectRegistry(std::uint32_t capacity = 131072)
+    // Pose matching is retained only for explicit offline diagnostics. Runtime
+    // draw ownership uses direct provenance plus lifetime tickets, not old poses.
+    explicit GeometryObjectRegistry(std::uint32_t capacity = 131072, bool indexPoses = false)
     {
         if (!capacity || capacity > 131072)
             throw std::invalid_argument("Invalid engine registry capacity");
         slots.resize(capacity);
-        nodes.resize(std::size_t(capacity) * History);
-        buckets.assign(std::bit_ceil(capacity * 2), None);
+        if (indexPoses)
+        {
+            nodes.resize(std::size_t(capacity) * History);
+            buckets.assign(std::bit_ceil(capacity * 2), None);
+        }
     }
     bool registered(std::uint64_t proxy, std::uint32_t index, std::uint64_t mesh, const GeometryObjectPose& pose)
     {
@@ -196,7 +202,7 @@ class GeometryObjectRegistry
         if (slots[index].proxy == proxy && slots[index].generation == generation)
         {
             auto& slot = slots[index];
-            for (unsigned i = 0; i < History; ++i)
+            for (unsigned i = 0; !nodes.empty() && i < History; ++i)
                 unlink(index * History + i);
             slot.cursor = 0;
             if (slot.generation == UINT32_MAX)
@@ -219,7 +225,7 @@ class GeometryObjectRegistry
     }
     GeometryObjectMatch find(std::uint64_t mesh, const std::array<std::uint32_t, 12>& packed, std::uint32_t frame) const
     {
-        if (!mesh)
+        if (!mesh || nodes.empty())
             return {};
         std::shared_lock lock(mutex);
         GeometryObjectMatch result;
@@ -249,6 +255,13 @@ class GeometryObjectRegistry
         auto result = counters;
         result.ambiguous = ambiguous.load(std::memory_order_relaxed);
         return result;
+    }
+    // Allocation sizes are immutable after construction; excludes vector/lock
+    // bookkeeping and allocator overhead. No engine memory is included.
+    std::size_t storageBytes() const
+    {
+        return slots.capacity() * sizeof(Slot) + nodes.capacity() * sizeof(Node) +
+               buckets.capacity() * sizeof(std::uint32_t);
     }
 };
 } // namespace GlassFg

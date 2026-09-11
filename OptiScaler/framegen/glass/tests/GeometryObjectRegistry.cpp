@@ -20,7 +20,7 @@ int main()
 {
     try
     {
-        GlassFg::GeometryObjectRegistry registry(8);
+        GlassFg::GeometryObjectRegistry registry(8, true);
         auto p = pose(0x7fc00000, 10); // Fixed-point position bits can spell float NaN.
         require(p.valid(), "Packed W lane was interpreted as a float");
         require(registry.registered(100, 2, 400, p), "Registration failed");
@@ -50,7 +50,7 @@ int main()
         require(registry.ticket(100, 2) != generation && !registry.find(400, pose(8, 18).packed, 20),
                 "Mesh replacement inherited old geometry history");
 
-        GlassFg::GeometryObjectRegistry concurrent(64);
+        GlassFg::GeometryObjectRegistry concurrent(64, true);
         std::atomic<unsigned> errors = 0;
         std::vector<std::thread> workers;
         for (unsigned index = 0; index < 32; ++index)
@@ -77,6 +77,21 @@ int main()
             worker.join();
         require(!errors && concurrent.stats().live == 0 && concurrent.stats().updates == 4096,
                 "Concurrent event/query mismatch");
+        GlassFg::GeometryObjectRegistry lifetime(8);
+        require(lifetime.registered(100, 2, 400, p), "Lifetime-only registration");
+        const auto lifetimeTicket = lifetime.ticket(100, 2);
+        for (unsigned i = 0; i < 8; ++i)
+            require(lifetime.update(100, 2, lifetimeTicket, 400, pose(i, i)), "Lifetime-only update");
+        require(!lifetime.find(400, pose(7, 7).packed, 7), "Runtime retained a pose index");
+        lifetime.invalidate(100, 2, lifetimeTicket);
+        require(lifetime.ticket(100, 2) != lifetimeTicket &&
+                !lifetime.update(100, 2, lifetimeTicket, 400, p), "Lifetime-only invalidation");
+        lifetime.removed(100, 2);
+        require(!lifetime.ticket(100, 2), "Lifetime-only removal");
+        lifetime.pending(100, 2);
+        require(lifetime.ticket(100, 2) && lifetime.registered(100, 2, 400, p), "Pending recovery");
+        require(lifetime.storageBytes() < registry.storageBytes(), "Unused pose allocation retained");
+        printf("storage_per_8_slots lifetime=%zu pose_index=%zu\n", lifetime.storageBytes(), registry.storageBytes());
         printf("PASS engine_slot_generation=1 pointer_reuse=1 duplicate_registration=1 ambiguous_objects_rejected=1 "
                "mesh_replacement=1 recent_pose_lookup=1 fixed_point_bits=1 concurrent_updates=4096\n");
         return 0;

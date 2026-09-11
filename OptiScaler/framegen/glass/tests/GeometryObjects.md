@@ -2,12 +2,33 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: CPU registry/callback tests and Release build passed; live draw ownership unverified
-- Deployment: none; startup observer is connected in source only
+- Status: lifetime-only default passes registry and production callback checks; live geometry MV incomplete
+- Deployment: latest cache reduction is source-only; installed host remains unchanged
 - Deprecated: no
 - Scope: audited Cyberpunk mesh-proxy registration, removal and one transform-update route
 
 ## Implemented behavior
+
+The runtime registry now defaults to lifetime-only storage. A current call-site
+search found that production draw consumers use `ticket`, while pose `find` is
+used only by standalone diagnostics. The default therefore allocates no pose
+nodes or pose hash buckets, and performs no pose insertion/hash updates. Explicit
+`indexPoses=true` retains the old diagnostic candidate index described below.
+Neither mode supplies previous vertices to FG or permits stale-frame motion.
+
+The eight-slot fixture measured 192 bytes of vector storage in lifetime mode
+versus 3,072 bytes with the pose index. At the configured 131,072 slots this
+corresponds to 3 MiB versus 48 MiB (45 MiB less), excluding vector/lock/allocator
+overhead. This is structural CPU storage accounting, not measured process memory
+or frame time. Existing engine callback snapshot reads and its update hook remain;
+they have not been removed by this change.
+
+Lifetime-only tests cover update, generation invalidation, stale callback rejection,
+removal and pending registration recovery without pose lookup. The production
+draw callback fixture now runs with that default and passes identity reuse,
+coincident objects, batching and unknown-array rejection. All three executables
+in `build_geometry_objects.ps1` passed. No full DLL rebuild or game deployment of
+this reduction has occurred yet.
 
 `GeometryObjectRegistry` associates an engine registry slot with its proxy, mesh and generation. Reusing a slot/address or replacing its mesh cannot inherit the previous geometry generation. A repeated registration of the same live identity does not change its generation. Unregistration removes all lookup entries before the engine frees the slot. An update must present the generation sampled before its original call; an old callback cannot modify a newer occupant.
 

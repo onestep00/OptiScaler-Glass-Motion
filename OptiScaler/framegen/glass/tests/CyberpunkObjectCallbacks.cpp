@@ -50,7 +50,7 @@ int main()
         GlassFg::State state;
         fixture = &state;
         state.tick = &tick;
-        state.registry = std::make_shared<GlassFg::GeometryObjectRegistry>(8);
+        state.registry = std::make_shared<GlassFg::GeometryObjectRegistry>(8, true);
         GlassFg::originalRegister = &originalRegister;
         GlassFg::originalRemove = &originalRemove;
         GlassFg::originalUpdate = &originalUpdate;
