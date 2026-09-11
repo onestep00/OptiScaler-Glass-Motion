@@ -9,6 +9,20 @@
 
 ## Implemented source
 
+Source now has optional `D3D12Callbacks::beforeSubmit`, called under the existing
+enter/leave submission lock before the real ExecuteCommandLists. NativeHost
+forwards it to `GeometryDrawCaptureOwner::beforeSubmit`; existing owners default
+to no operation. It neither skips game commands nor inserts waits or barriers.
+The independent observed-session GPU test passed 13 paired pre/post callbacks,
+checking queue/count/list identity with a sticky ordering failure flag. Existing
+lifetime, state and timing checks also passed. This is the host seam only: no
+GPU-history owner, pre-submit experiment ABI or production MV is implemented by
+this change, and the running game retains its previous resident host.
+Release x64 solution build also passed after limiting compilation to one process.
+The first parallel attempt failed with Windows commit-limit/PCH allocation errors;
+no page-file or game settings were changed. Existing XeSS inheritance and native
+alignment warnings remain. The newly built host has not been deployed.
+
 Generation 9 measured when the diagnostic Retired callback arrives, using the
 latest observed engine draw frame (not a wall-clock FPS estimate). Of 64 jobs,
 53 arrived two frames later, 3 three frames later, 7 four frames later and 1 five

@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Pre-submit host seam forwards to geometry owner and passed 13 independent GPU callback pairs. Not deployed; GPU-resident N-1 history owner and dense MV remain incomplete.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Live retirement arrives 2-5 frames late; CPU-retired handoff is unsuitable for N-1 history. GPU-resident ordered history requires a production admission seam beyond the current post-submit diagnostic callbacks.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Generation 8 captured actual vertices and original-material coverage in the same draw (64 captures), visualized and unloaded. Dense boundary MV and FG integration remain incomplete.

@@ -286,6 +286,8 @@ int wmain(int argc, wchar_t** argv)
         const auto& observed = ObserverTest::context();
         check(observed.resets && observed.mutations && observed.barriers && observed.submits &&
               observed.signals && observed.waits, "missing actual observer callback");
+        check(observed.submitOrderOkay && observed.preparedSubmits == observed.submits,
+              "pre/post submission order or identity mismatch");
         std::printf("D3D12_OBSERVER_OK mask=%x reset=%u mutation=%u barrier=%u submit=%u signal=%u wait=%u\n",
                     GlassFg::ObservedComputeMethods(), observed.resets, observed.mutations, observed.barriers,
                     observed.submits, observed.signals, observed.waits);

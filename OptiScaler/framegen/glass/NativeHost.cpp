@@ -128,6 +128,11 @@ D3D12Callbacks makeCallbacks()
                     ++r.captures;
             }
     };
+    value.beforeSubmit = [](void*, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
+    {
+        InternalD3D12Scope ownCalls;
+        NotifyGeometryCaptureBeforeSubmit(q, count, lists);
+    };
     value.submit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {
         auto& r = *static_cast<Runtime*>(p);

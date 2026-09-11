@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): ObservedSession verifies paired pre/post submit queue/list identities with sticky failure state; independent GPU passed. No game history integration follows from this hook test.
+
 - [GeometryShaders.md](GeometryShaders.md): Generation 9 measured retirement latency (64 jobs, 2-5 frames), unloaded. This rules out retired-readback delivery for consecutive-frame runtime MV; GPU history integration remains required.
 
 - [GeometryShaders.md](GeometryShaders.md): Same-draw vertex/coverage diagnostic passed 64 live captures with exact contributing-reference masks and zero status. Visualization is vertex displacement plus material coverage, not dense boundary MV.

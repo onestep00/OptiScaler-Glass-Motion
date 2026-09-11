@@ -126,6 +126,8 @@ void WINAPI submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* con
     if (call.active)
         for (UINT i = 0; i < count; ++i)
             commands[i]->AddRef();
+    if (call.active && callbacks.beforeSubmit)
+        callbacks.beforeSubmit(callbacks.context, queue, count, commands);
     originalSubmit(queue, count, commands);
     if (call.active)
     {

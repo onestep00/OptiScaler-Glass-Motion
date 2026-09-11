@@ -14,6 +14,10 @@ struct Context
     ID3D12Resource* surface = nullptr;
     bool omitWait = false, okay = true, captured = false;
     unsigned resets = 0, mutations = 0, barriers = 0, submits = 0, signals = 0, waits = 0;
+    unsigned preparedSubmits = 0, preparedCount = 0;
+    bool submitOrderOkay = true;
+    ID3D12CommandQueue* preparedQueue = nullptr;
+    ID3D12CommandList* const* preparedLists = nullptr;
 };
 inline Context& context()
 {
@@ -58,10 +62,19 @@ inline GlassFg::D3D12Callbacks callbacks()
             }
         }
     };
+    result.beforeSubmit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
+    {
+        auto& x = *static_cast<Context*>(p);
+        x.submitOrderOkay &= x.preparedSubmits == x.submits;
+        ++x.preparedSubmits;
+        x.preparedQueue = q; x.preparedCount = count; x.preparedLists = lists;
+    };
     result.submit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {
         auto& x = *static_cast<Context*>(p);
         ++x.submits;
+        x.submitOrderOkay &= x.preparedSubmits == x.submits && x.preparedQueue == q &&
+                  x.preparedCount == count && x.preparedLists == lists;
         if (x.session)
         {
             GlassFg::InternalD3D12Scope ownSignals;

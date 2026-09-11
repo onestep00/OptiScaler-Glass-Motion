@@ -17,6 +17,10 @@ struct D3D12Callbacks
     void (*submit)(void*, ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) = nullptr;
     void (*signal)(void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) = nullptr;
     void (*wait)(void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) = nullptr;
+    // Optional notification inside the same submission lock, before the real
+    // ExecuteCommandLists. No CPU/GPU wait, nested submission or list mutation.
+    // Does not itself authorize history access or allow skipping game commands.
+    void (*beforeSubmit)(void*, ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) = nullptr;
 };
 
 // One process-lifetime observer. Callbacks and their context must remain alive;

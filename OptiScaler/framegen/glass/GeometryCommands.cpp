@@ -500,6 +500,11 @@ void NotifyGeometryCaptureSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12Co
     if (auto* owner = captureOwner.load(std::memory_order_acquire))
         owner->submitted(queue, count, commands);
 }
+void NotifyGeometryCaptureBeforeSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands) noexcept
+{
+    if (auto* owner = captureOwner.load(std::memory_order_acquire))
+        owner->beforeSubmit(queue, count, commands);
+}
 const GeometryRasterState* ReadGeometryRasterState(ID3D12GraphicsCommandList* command) noexcept
 {
     if (auto* record = find(command))
