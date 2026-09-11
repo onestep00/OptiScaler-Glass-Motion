@@ -36,6 +36,12 @@ A bounded, read-only descriptor observer traced the engine bone SRV through actu
 
 Raw engine memory, shader bytecode and diagnostic DLLs remain local and are not included in this repository. The local evidence is indexed by workspace `docs/glass-engine-object-motion.md` and the corrected skinning, mesh GPU binding and geometry-link probe reports.
 
+## Original shader output reuse
+
+`DxilVertexHistory.cpp` now preserves the original VS output while recording actual current positions and reading prior positions with generation/frame guards. The separate material rewriter preserves original material discard/alpha and emits geometry MV. Independent GPU checks passed for deformation, camera motion, perspective, changing generations, and stale frames; original position/color/coverage are preserved. See [the detailed test contract](tests/GeometryShaders.md).
+
+This avoids reimplementing skinning/wind/material deformation math for an admitted shader, but stable object/vertex identity and live frame ordering are still required. It does not make particle indices stable or infer an invisible object's prior vertices. The rewriter has been added to the module build; no production host call or game deployment of this path exists yet.
+
 ## Remaining runtime contract
 
 1. Resolve each draw instance to a live engine object/generation and mesh chunk, including several chunks per object and several instances per draw.

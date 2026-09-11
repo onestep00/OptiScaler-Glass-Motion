@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)DxilVertexHistory.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)DxilVertexHistory.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)MaterialCaptureBlend.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassSurfaceGpu.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassRegionGpu.h" />
