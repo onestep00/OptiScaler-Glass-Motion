@@ -249,6 +249,39 @@ Local evidence: `work/glass-instance-updates-live-v2/capture-{2,3}/analysis.json
 and `work/glass-engine-identity-probe-v2/function-{3cbca8,579ab8,57b114,3a2038,a040c0,3c8508,2276c30}.txt`.
 All RVAs describe the audited binary only; no production hook or signature was added.
 
+### Upstream wrapper diagnostic
+
+`ExperimentInstanceUpdates.cpp` also builds with `GLASS_ARRAY_WRAPPER`. This
+separate diagnostic observes the audited three-argument wrapper before enqueue,
+so the recorded caller distinguishes its upstream producers. It forwards all
+three original arguments and the byte result unchanged. It reads only the
+handle's owner field (8 bytes), begin/end span (16 bytes), and bounds (32 bytes).
+It does not follow the span or infer original element identity from the wrapper.
+
+The CSV uses normalized fields in this mode: q0 is the handle owner, q8--q11
+are bounds, q12/q13 are span endpoints, context is the handle, and input is the
+span-header address. These are not a copied 144-byte enqueue request. A distinct
+profile magic `0x49555032` rejects ordinary enqueue profiles; full target-body
+bytes still guard installation. The original mode retains `0x49555031` and its
+two-argument ABI. Both modes stop recording and remain pinned until process exit.
+
+`ArrayWrapper.cpp` passed argument/result forwarding, upstream return capture,
+normalized fields, unreadable inputs, 5,000 empty-span skips, malformed spans,
+capacity stop and an intentionally unmapped pointed-to span. The original
+`InstanceUpdates.cpp` fixture also passed after the shared-source changes.
+Both fixtures and the wrapper DLL compiled with MSVC `/W4 /WX`. These checks
+establish diagnostic behavior, not engine source identity or production MV.
+
+The wrapper DLL was then loaded by exact path into the still-running PID 62100,
+with SHA-256 `83079a5e39c95965aaf62f69a33d8369b2d547cc0ace88765c1dab3014737847`.
+Its full 149-byte wrapper profile passed installation; StartArrays48 and Save
+returned zero. The saved observation interval contained no wrapper calls, empty
+or nonempty. Recording is disabled and the process remained responding. This
+proves installation/control only, not live argument capture; a later array supply
+event is still required. Local output: `work/glass-array-wrapper-live-v1/capture/`.
+The older enqueue observer remains separately pinned with recording disabled.
+Neither diagnostic changes geometry, render commands or FG input resources.
+
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input
 address and 144-byte input header. It copies no pointed-to transform arrays or
