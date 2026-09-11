@@ -16,6 +16,22 @@ struct CyberpunkInstanceSelection
     static_assert(sizeof(Descriptor) == 32);
     std::uint64_t sourceIndices = 0;
     std::uint32_t count = 0, sourceCount = 0;
+    bool linear = false;
+
+    // Only at the audited whole-array call site. Zero span is its explicit
+    // descriptor form, not permission to guess missing grouped indices.
+    bool resolveLinear(const Descriptor& descriptor, std::uint32_t originalCount,
+                       std::uint32_t ownerGlobalStart)
+    {
+        *this = {};
+        if (!originalCount || originalCount > 65536 || descriptor.count != originalCount ||
+            descriptor.first || descriptor.begin || descriptor.end ||
+            ownerGlobalStart == UINT32_MAX || descriptor.globalStart != ownerGlobalStart ||
+            std::uint64_t(ownerGlobalStart) + originalCount > (std::uint64_t {1} << 32))
+            return false;
+        count = sourceCount = originalCount; linear = true;
+        return true;
+    }
 
     template <typename Read>
     bool resolve(std::uint64_t group, const Descriptor& descriptor,
@@ -42,6 +58,12 @@ struct CyberpunkInstanceSelection
     bool originalIndex(std::uint32_t ordinal, std::uint32_t& output, Read read) const
     {
         output = UINT32_MAX;
+        if (linear)
+        {
+            if (ordinal >= count) return false;
+            output = ordinal;
+            return true;
+        }
         if (!sourceIndices || ordinal >= count) return false;
         std::uint16_t index = 0;
         if (!read(sourceIndices + std::uint64_t(ordinal) * 2, &index, 2) || index >= sourceCount)

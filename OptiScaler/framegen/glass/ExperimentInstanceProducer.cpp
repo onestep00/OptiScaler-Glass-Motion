@@ -19,7 +19,7 @@ Outer originalOuter = nullptr;
 Select originalSelect = nullptr;
 Packet originalPacket = nullptr;
 HMODULE self = nullptr;
-std::uint64_t image = 0, groupReturn = 0, packetReturn = 0;
+std::uint64_t image = 0, groupReturn = 0, packetReturn = 0, linearReturn = 0;
 const volatile unsigned* tick = nullptr;
 std::atomic<bool> enabled = false;
 std::atomic<unsigned> active = 0, used = 0, dropped = 0;
@@ -42,6 +42,7 @@ struct Row
     std::uint64_t outerContext = 0, producerContext = 0;
     std::array<std::uint64_t, 3> producerHeader {};
     bool producerHeaderValid = false;
+    bool linear = false;
     std::array<unsigned, 64> indices {};
 };
 std::array<Row, 4096> rows;
@@ -84,12 +85,13 @@ void select(void* a, void* b, unsigned c, void* d, void* e)
     observeGroup(a, reinterpret_cast<std::uint64_t>(_ReturnAddress()));
     originalSelect(a, b, c, d, e);
 }
-void observe(void* owner, void* descriptor)
+void observe(void* owner, void* descriptor, bool linear = false)
 {
     if (!current || current->proxy != reinterpret_cast<std::uint64_t>(owner) ||
-        !current->group || current->frame != *tick) return;
+        (!linear && !current->group) || current->frame != *tick) return;
     Row row;
-    row.proxy = current->proxy; row.group = current->group; row.frame = current->frame;
+    row.proxy = current->proxy; row.group = linear ? 0 : current->group; row.frame = current->frame;
+    row.linear = linear;
     row.outerContext = current->outerContext; row.producerContext = current->producerContext;
     // Three scalar fields: renderer, destination family and scene context in
     // the audited callers. Do not retain a borrowed stack header for later use.
@@ -102,7 +104,13 @@ void observe(void* owner, void* descriptor)
         !read(row.proxy + 0x98, &row.ownerSlot, 4) || !read(row.proxy + 0xd8, &row.mesh, 8) ||
         !read(row.proxy + 0x108, &row.sourceArray, 8) || !read(row.proxy + 0x110, &row.originalCount, 4)) return;
     Selection selection;
-    if (!selection.resolve(row.group, row.descriptor, row.originalCount, read)) return;
+    if (linear)
+    {
+        unsigned globalStart = UINT32_MAX;
+        if (!read(row.proxy + 0x114, &globalStart, 4) ||
+            !selection.resolveLinear(row.descriptor, row.originalCount, globalStart)) return;
+    }
+    else if (!selection.resolve(row.group, row.descriptor, row.originalCount, read)) return;
     row.sourceIndices = selection.sourceIndices;
     row.valid = 1;
     for (unsigned i = 0; i < row.descriptor.count; ++i)
@@ -113,7 +121,9 @@ void observe(void* owner, void* descriptor)
 }
 unsigned char packet(void* a, void* b, void* c, std::uint64_t d, void* e, void* f, void* g)
 {
-    if (reinterpret_cast<std::uint64_t>(_ReturnAddress()) == packetReturn) observe(a, g);
+    const auto caller = reinterpret_cast<std::uint64_t>(_ReturnAddress());
+    if (caller == packetReturn) observe(a, g);
+    else if (linearReturn && caller == linearReturn) observe(a, g, true);
     return originalPacket(a, b, c, d, e, f, g);
 }
 bool install()
@@ -127,7 +137,8 @@ bool install()
     // Diagnostic profile stores the three complete audited function bodies.
     // Absolute addresses never cross processes; unknown live bytes reject install.
     std::array<unsigned, 7> header {};
-    if (!file.read(reinterpret_cast<char*>(header.data()), sizeof(header)) || header[0] != 0x49535031)
+    if (!file.read(reinterpret_cast<char*>(header.data()), sizeof(header)) ||
+        (header[0] != 0x49535031 && header[0] != 0x49535032))
         return false;
     image = reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
@@ -135,6 +146,10 @@ bool install()
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
     const auto imageBytes = nt->OptionalHeader.SizeOfImage;
     if (header[4] > imageBytes - 4 || header[5] >= imageBytes || header[6] >= imageBytes) return false;
+    unsigned linearRva = 0;
+    if (header[0] == 0x49535032 &&
+        (!file.read(reinterpret_cast<char*>(&linearRva), 4) || !linearRva || linearRva >= imageBytes ||
+         linearRva == header[6])) return false;
     for (unsigned i = 0; i < 3; ++i)
     {
         unsigned bytes = 0;
@@ -153,6 +168,7 @@ bool install()
     originalPacket = reinterpret_cast<Packet>(image + header[3]);
     tick = reinterpret_cast<const volatile unsigned*>(image + header[4]);
     groupReturn = image + header[5]; packetReturn = image + header[6];
+    linearReturn = linearRva ? image + linearRva : 0;
     GlassFg::DetourThreads threads;
     if (!threads.gather() || DetourTransactionBegin() != NO_ERROR) return false;
     if (DetourAttach(reinterpret_cast<PVOID*>(&originalOuter), outer) != NO_ERROR ||
@@ -187,7 +203,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
         while (active.load(std::memory_order_acquire) && GetTickCount64() < deadline) Sleep(1);
         if (active || output.empty()) return 1;
         std::ofstream file(output / "source-indices.csv");
-        file << "frame,proxy,mesh,owner_slot,group,source_array,source_indices,original_count,global_start,first,count,valid,ordinal,source_index,outer_context,producer_context,producer_0,producer_8,producer_16,producer_header_valid\n";
+        file << "frame,proxy,mesh,owner_slot,group,source_array,source_indices,original_count,global_start,first,count,valid,ordinal,source_index,outer_context,producer_context,producer_0,producer_8,producer_16,producer_header_valid,linear_source\n";
         const auto count = (std::min)(used.load(), unsigned(rows.size()));
         for (unsigned i = 0; i < count; ++i)
         {
@@ -198,7 +214,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
                      << row.descriptor.globalStart << ',' << row.descriptor.first << ',' << row.descriptor.count << ','
                      << row.valid << ',' << j << ',' << row.indices[j] << ',' << row.outerContext << ','
                      << row.producerContext << ',' << row.producerHeader[0] << ',' << row.producerHeader[1] << ','
-                     << row.producerHeader[2] << ',' << row.producerHeaderValid << '\n';
+                     << row.producerHeader[2] << ',' << row.producerHeaderValid << ',' << row.linear << '\n';
         }
         file.close(); if (!file) return 2;
         std::ofstream(output / "status.txt") << "rows=" << count << "\ndropped=" << dropped.load()

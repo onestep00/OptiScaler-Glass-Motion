@@ -57,7 +57,24 @@ int main()
                   reinterpret_cast<std::uint64_t>(groupData.data()), testTick };
     current = &scope; ++testTick;
     observe(proxyData.data(), &testDescriptor); require(used == 2);
+    scope.frame = testTick; scope.group = 0;
+    writeValue(proxyData, 0x114, start);
+    Selection::Descriptor linearDescriptor {start, count, 0, 0, 0, 0};
+    observe(proxyData.data(), &linearDescriptor, true);
+    require(used == 3 && rows[2].linear && !rows[2].group && !rows[2].sourceIndices);
+    require(rows[2].indices[0] == 0 && rows[2].indices[39] == 39);
+    // An absent group must never silently select the whole-array convention.
+    observe(proxyData.data(), &linearDescriptor); require(used == 3);
+    ++linearDescriptor.first;
+    observe(proxyData.data(), &linearDescriptor, true); require(used == 3);
+    linearDescriptor.first = 0; --linearDescriptor.count;
+    observe(proxyData.data(), &linearDescriptor, true); require(used == 3);
+    linearDescriptor.count = count; ++linearDescriptor.globalStart;
+    observe(proxyData.data(), &linearDescriptor, true); require(used == 3);
+    linearDescriptor.globalStart = start; linearDescriptor.begin = 0x10000;
+    observe(proxyData.data(), &linearDescriptor, true); require(used == 3);
     current = nullptr; enabled = false;
     std::cout << "PASS current_group_direct=1 wrong_caller_rejected=1 nested_scope=1 consumed_once=1 "
-                 "frame_mismatch_rejected=1 original_return_preserved=1 game_hooks_installed=0\n";
+                 "frame_mismatch_rejected=1 original_return_preserved=1 linear_source=1 "
+                 "no_missing_group_fallback=1 malformed_linear_rejected=1 game_hooks_installed=0\n";
 }

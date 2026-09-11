@@ -16,7 +16,7 @@
 
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
-- [tests/SourceSlots.md](tests/SourceSlots.md): Creation/destruction cache adapter passes independent checks; not deployed. Live lifecycle/view/MV/FG hookup remains incomplete.
+- [tests/SourceSlots.md](tests/SourceSlots.md): Same-process census confirms remaining anonymous arrays. Explicit whole-array producer decoding and lifetime adapter pass independent checks; new source not deployed, MV/FG incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
 

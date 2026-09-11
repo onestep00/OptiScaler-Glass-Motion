@@ -73,6 +73,37 @@ No new destructor hook has been installed. Local function disassemblies are unde
 
 ## Producer/consumer investigation
 
+### Same-process follow-up and whole-array route
+
+PID 70152 remained responding during a new census-only generation-2 load and
+unload, with zero GPU captures pending or recorded. The new census has 32,768
+draw rows, including 29,806 rows across seven known engine frames. Its 37,685
+object entries contain 33,535 nonzero proxy/generation pairs and 4,038 anonymous
+global-array entries. These are general draw observations, not verified transparent
+object counts or complete-frame coverage; contention/overflow still truncate the
+sample. The concurrent node-creation recording captured zero calls. Existing
+objects therefore need an explicit live acquisition route as well as future
+creation observation. No new MV or FG input was produced. Local evidence:
+`work/glass-node-draw-census-v2/capture/analysis.json` and
+`work/glass-node-groups-live-v1/capture-3/status.txt`.
+
+Further inspection of the original producer 0x1E9B88 found a distinct call at
+0x1EA1C9 (return 0x1EA1CE): its descriptor copies global start/count from
+proxy+0x114/+0x110, uses first=0, and explicitly clears the span. This is separate
+from the grouped/reordered call returning at 0x1E9DC1. The diagnostic now accepts
+an optional profile version 0x49535032 with an additional explicit linear return
+RVA after the seven-word header. Old version 0x49535031 retains grouped-only
+behavior. Both still verify the three complete target bodies before installation.
+
+`resolveLinear` requires this explicit route, exact owner global start/count,
+zero first/span, and a valid endpoint. It maps ordinal to the original array
+index without reading an index list. A missing grouped index never falls back to
+linear order. CSV adds `linear_source`; group/source_indices are zero in this
+mode. The producer fixture passed reversed grouped order, exact linear order,
+missing-group rejection and malformed linear descriptors with `/O2 /W4 /WX`.
+This source change is not deployed and does not establish element lifetime or
+view/frame-to-FG ownership. No additional game hook was installed in this turn.
+
 ### Connected lifetime diagnostic (not deployed)
 
 `GLASS_NODE_LIFETIME` connects the actual node-creation adapter to the bounded
