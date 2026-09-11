@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: input investigation; runtime geometry producer incomplete
+- Status: shader/creation and CPU lifetime components implemented; live geometry producer incomplete
 - Deployment: none; the installed b59aa86 correction still uses static-world depth projection
 - Deprecated: no
 - Scope: all in-world transparent rendering in Cyberpunk 2077; HUD excluded by verified rendering provenance
@@ -43,6 +43,8 @@ Raw engine memory, shader bytecode and diagnostic DLLs remain local and are not 
 This avoids reimplementing skinning/wind/material deformation math for an admitted shader, but stable object/vertex identity and live frame ordering are still required. It does not make particle indices stable or infer an invisible object's prior vertices. The rewriter has been added to the module build; no production host call or game deployment of this path exists yet.
 
 ## Remaining runtime contract
+
+The [object-lifetime implementation](tests/GeometryObjects.md) now records registration/removal generations and bounded recent pose candidates. Its production callbacks preserve original return values and pass independent layout/lifetime tests. A source startup call installs the audited observation paths after executable checks; this has not been deployed. A matching mesh/pose is not sufficient draw ownership proof. The transform-only virtual-slot `0x90` path and procedural/particle families remain outside the current updater observation. Direct render-instance provenance is still required before this index can supply shader history identities.
 
 1. Resolve each draw instance to a live engine object/generation and mesh chunk, including several chunks per object and several instances per draw.
 2. Associate its current/previous transforms and deformation data with the exact color/MV frame consumed by FG. Reject missing history, reused slots, camera cuts, topology changes and ambiguous associations.

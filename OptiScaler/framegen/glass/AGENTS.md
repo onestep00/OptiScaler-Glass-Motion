@@ -13,7 +13,8 @@
 ## Document index
 
 - [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
-- [EngineGeometry.md](EngineGeometry.md): All in-world transparency scope, 32 geometry-route inventory, verified rigid history and skinning offset/binding observations. Actual per-instance/FG frame association, procedural/particle coverage and runtime producer remain incomplete; no new correction deployed.
+- [EngineGeometry.md](EngineGeometry.md): All-world 32-route inventory and engine evidence. CPU lifetime/index and startup observer now implemented, but unique pose candidates do not prove draw ownership. Live frame/instance linkage, missing mutation routes and procedural/particle coverage remain incomplete.
+- [tests/GeometryObjects.md](tests/GeometryObjects.md): Generation/lifetime index and production callbacks pass independent tests; source startup hook compiles. No game deployment, verified draw ownership or new FG input replacement.
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Original shader history, separate instance masks and public PSO/root acquisition verified on an independent GPU. Worker/cache leases and mapped 54-DWORD linkage pass. Startup adapter added; engine identity, draw replacement, deployment and FG application remain incomplete.
 
 - [tests/AGENTS.md](tests/AGENTS.md): Standalone GPU ownership/timing and headless settings test boundaries.
