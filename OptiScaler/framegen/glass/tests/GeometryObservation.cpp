@@ -7,20 +7,28 @@
 #include "../GeometryCommands.h"
 #include "../ExperimentCensusBridge.h"
 static ID3D12PipelineState* observedOriginal = nullptr;
+static uint64_t expectedAddress = 0;
 static bool censusOkay = false;
 static const GlassFg::ExperimentCensusObserver census {
     nullptr, [](void*) noexcept { return true; },
     [](void*, const GlassExperimentEvent& event) noexcept
     {
-        if (event.kind != GlassExperimentCensus || event.payloadBytes != sizeof(GlassExperimentCensusInput)) return;
+        if (event.kind != GlassExperimentCensus || event.payloadVersion != GLASS_EXPERIMENT_CENSUS_VERSION ||
+            event.payloadBytes != sizeof(GlassExperimentCensusInput)) return;
         const auto& input = *static_cast<const GlassExperimentCensusInput*>(event.payload);
         if (input.draw.originalPipeline != observedOriginal) return;
         const auto& draw = input.draw;
-        const auto* bindings = GlassFg::ReadGeometryBindings(static_cast<ID3D12GraphicsCommandList*>(draw.command));
-        GlassFg::GraphicsRootBindings::BorrowedSlot slot;
-        censusOkay = draw.descriptor && draw.pipelineIdentity && !draw.rootReplayable && bindings &&
-            !bindings->observe(0, static_cast<ID3D12RootSignature*>(draw.originalRoot), slot) &&
+        GlassExperimentBinding slot {}; slot.size = sizeof(slot);
+        GlassExperimentPipelineView view {}; view.size = sizeof(view);
+        void* token = draw.pipelineAccess.retain ? draw.pipelineAccess.retain(draw.pipelineAccess.source) : nullptr;
+        const bool layout = token && draw.pipelineAccess.view(token, &view) && view.rootParameterCount == 2 &&
+            view.rootParameterBytes == sizeof(D3D12_ROOT_PARAMETER1) && view.rootParameters &&
+            static_cast<const D3D12_ROOT_PARAMETER1*>(view.rootParameters)[0].Descriptor.ShaderRegister == 7;
+        censusOkay = layout && draw.descriptor && draw.pipelineIdentity && !draw.rootReplayable && draw.bindingAt &&
+            draw.bindingAt(draw.bindingSource, 0, &slot) && slot.type == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+            slot.address == expectedAddress && !slot.knownConstants &&
             !GlassFg::FindGeometryPipeline(observedOriginal) && GlassFg::FindObservedGeometryPipeline(observedOriginal);
+        if (token) draw.pipelineAccess.release(token);
     }
 };
 #endif
@@ -74,8 +82,11 @@ int main()
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&second)));
 #ifdef GLASS_OBSERVATION_HOST
         observedOriginal = original.Get();
+        auto constantBuffer = device.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        expectedAddress = constantBuffer->GetGPUVirtualAddress();
         device.begin();
         device.c->SetGraphicsRootSignature(root.Get());
+        device.c->SetGraphicsRootConstantBufferView(0, expectedAddress);
         device.c->SetPipelineState(original.Get());
         device.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         device.c->DrawInstanced(0, 0, 0, 0); // Exercise forwarding; no raster work or submission.

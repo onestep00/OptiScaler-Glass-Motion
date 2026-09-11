@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/GeometryObservation.md](tests/GeometryObservation.md): Original-only depth-writing census, root-layout ownership and slot observation pass independent checks. No module export/live native MV inputs yet.
+- [tests/GeometryObservation.md](tests/GeometryObservation.md): Module-facing root layout/slot callbacks pass real independent CBV binding checks. ABI draw 4/census 2/capture 3; live native MV inputs remain incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native MV-target extraction validates on two recorded glass velocity PS variants and preserves arithmetic/discard. Native engine input binding, boundary selection and GPU/live rendering remain incomplete.
 

@@ -1,7 +1,7 @@
 #pragma once
 #include "ExperimentDrawAbi.h"
 
-#define GLASS_EXPERIMENT_CENSUS_VERSION 1u
+#define GLASS_EXPERIMENT_CENSUS_VERSION 2u
 enum GlassExperimentDrawOperation
 {
     GlassCensusIndexed = 1, GlassCensusInstanced = 2, GlassCensusIndirect = 3

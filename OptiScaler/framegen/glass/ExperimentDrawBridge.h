@@ -64,6 +64,27 @@ inline int32_t ExperimentTargetAt(const void* source, uint32_t index, GlassExper
     }
     return 1;
 }
+inline int32_t ExperimentBindingAt(const void* source, uint32_t index, GlassExperimentBinding* out)
+{
+    if (!out || out->size != sizeof(*out)) return 0;
+    *out = {}; out->size = sizeof(*out);
+    if (!source) return 0;
+    const auto& bindings = *static_cast<const GraphicsRootBindings*>(source);
+    GraphicsRootBindings::BorrowedSlot slot;
+    if (!bindings.observe(index, bindings.root, slot)) return 0;
+    out->type = static_cast<uint32_t>(slot.type);
+    out->address = slot.address;
+    if (slot.constants)
+    {
+        out->knownConstants = slot.known;
+        for (auto remaining = slot.known; remaining; remaining &= remaining - 1)
+        {
+            const auto i = std::countr_zero(remaining);
+            out->constants[i] = slot.constants[i];
+        }
+    }
+    return 1;
+}
 inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandList* command, uint64_t recording,
                                   const GeometryDrawView& draw, const GeometryIndexedArguments& args,
                                   const GeometryRasterState& raster, const GraphicsRootBindings& bindings,
@@ -103,6 +124,7 @@ inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandLis
     }
     input.source = &draw; input.objectAt = ExperimentObjectAt; input.meshShape = ExperimentMeshShape;
     input.targetSource = &raster; input.targetAt = ExperimentTargetAt;
+    input.bindingSource = &bindings; input.bindingAt = ExperimentBindingAt;
     return input;
 }
 inline void ObserveExperimentDraw(ID3D12GraphicsCommandList* command, uint64_t recording,

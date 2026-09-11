@@ -50,6 +50,7 @@ class ExperimentCensusLog
         saved.descriptor = nullptr; saved.descriptorBytes = 0; saved.pipelineAccess = {};
         saved.source = nullptr; saved.objectAt = nullptr; saved.meshShape = nullptr;
         saved.targetSource = nullptr; saved.targetAt = nullptr;
+        saved.bindingSource = nullptr; saved.bindingAt = nullptr;
         // command/PSO/root fields are numeric observations, not retained objects.
         return 1;
     }

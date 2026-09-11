@@ -1,7 +1,14 @@
 #pragma once
 #include "ExperimentAbi.h"
 #include "ExperimentPipelineAbi.h"
-inline constexpr uint32_t GLASS_EXPERIMENT_DRAW_VERSION = 3;
+inline constexpr uint32_t GLASS_EXPERIMENT_DRAW_VERSION = 4;
+
+struct GlassExperimentBinding
+{
+    uint32_t size, type;
+    uint64_t address, knownConstants;
+    uint32_t constants[64]; // Only knownConstants bits are valid; other words are zero.
+};
 
 struct GlassExperimentTarget
 {
@@ -48,4 +55,7 @@ struct GlassExperimentDrawInput
     const void* targetSource;
     // Callback-scoped OM binding snapshots: 0..7 RTV, 8 DSV. Unknown returns 0.
     int32_t (*targetAt)(const void*, uint32_t, GlassExperimentTarget*);
+    const void* bindingSource;
+    // Synchronous CPU metadata only. Addresses are not retained GPU resources.
+    int32_t (*bindingAt)(const void*, uint32_t, GlassExperimentBinding*);
 };

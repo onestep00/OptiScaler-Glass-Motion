@@ -12,6 +12,8 @@ struct GlassExperimentPipelineView
     void* extendedRoot;
     uint32_t layout, dwords;
     uint32_t constantsSlot, previousSlot, currentSlot, materialSlot, captureSlot, instanceSlot;
+    uint32_t rootParameterBytes, rootParameterCount;
+    const void* rootParameters; // Owned D3D12_ROOT_PARAMETER1 array, token lifetime.
 };
 struct GlassExperimentPipelineAccess
 {

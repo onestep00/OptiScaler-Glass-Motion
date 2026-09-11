@@ -29,7 +29,7 @@ metadata path. See Microsoft's [deserializer contract](https://learn.microsoft.c
 The census uses `FindObservedGeometryPipeline`; correction still uses only
 `FindGeometryPipeline`. Original-only entries have no instrumented PSO or extended
 root and report `rootReplayable=0`. The existing retained-token view exposes the
-original descriptor with a null extended root. No experiment ABI size changed.
+original descriptor with a null extended root.
 Capture modules must continue to require their actual extended layout.
 
 `GeometryObservation.cpp` creates real independent D3D12 roots/PSOs and verifies
@@ -59,8 +59,23 @@ allocation or buffer copying. Tests cover unset slots, CBV address, heap-change
 invalidation of tables only, partial constant masks, invalidation and Reset.
 The returned GPU address cannot be dereferenced as a CPU pointer and establishes
 neither a live resource lease nor its execution-time contents. Constants are
-borrowed only for the synchronous callback. Module ABI export and live native
-previous-transform capture remain incomplete.
+borrowed only for the synchronous callback. Live native previous-transform
+capture remains incomplete.
+
+The module-facing draw input exposes a callback-scoped `bindingAt` accessor.
+It copies only one requested root-slot metadata record; unset constant words are
+zero and their known-bit mask is explicit. Retained pipeline views expose owned
+original parameter/range layouts. The host test binds a real upload buffer to
+root slot 0 and verifies its exact GPU address and original register mapping b7.
+No buffer contents are copied or inferred.
+
+Nested ABI versions are draw 4, census 2 and capture 3. Pipeline-view size also
+changes; old exact-size/version readers reject these payloads. Rebuild experiment
+modules for this host. Saved census/capture snapshots clear the borrowed binding
+source and function pointer along with their other callback-only pointers.
+The final versioned source passed the host observation test and full Release
+solution build. The updated coverage experiment DLL also compiled with /W4 /WX;
+it was not loaded into the older running host.
 
 Next: verify census delivery from the deployed host, identify native velocity
 outputs from shader dataflow, and obtain actual current/previous bound transforms

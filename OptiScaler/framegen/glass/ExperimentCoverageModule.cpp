@@ -463,6 +463,7 @@ class Coverage
                     }
                 slot.draw.source = nullptr; slot.draw.objectAt = nullptr; slot.draw.meshShape = nullptr;
                 slot.draw.targetSource = nullptr; slot.draw.targetAt = nullptr;
+                slot.draw.bindingSource = nullptr; slot.draw.bindingAt = nullptr;
                 slot.draw.pipelineAccess = {}; slot.draw.descriptor = nullptr;
                 const unsigned reference = (d->instances * slot.words + 1) * 32;
                 const MaterialCaptureConstants constants { float(left), float(top), 1.f / width, 1.f / height,
