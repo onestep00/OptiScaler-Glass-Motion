@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryDraws.md](GeometryDraws.md): Production packet/append/flush callbacks and Release build pass. Public draw consumer, live deployment and FG substitution remain incomplete; internal multi-instance arrays and non-mesh routes remain unverified.
+
 - [GeometryObjects.md](GeometryObjects.md): Mesh lifetime generations, bounded pose candidates and callback layout/return tests. Synthetic owned memory only; no game hooks. Read the direct-provenance and unobserved-mutation limitations before using a candidate for a draw.
 
 - [GeometryShaders.md](GeometryShaders.md): Original DXIL motion, mapped overlapping contours, camera/bounds, compiler-worker leases and actual public creation hooks tested independently. The observer test hooks only its own device/process. Engine identity, draw ordering, boundary composition and game deployment remain incomplete.

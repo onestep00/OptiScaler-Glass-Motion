@@ -12,6 +12,7 @@
 
 ## Document index
 
+- [tests/GeometryDraws.md](tests/GeometryDraws.md): Production engine packet/append/upload/flush callbacks and full build pass. Public draw consumer, live game validation and FG application remain incomplete.
 - [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
 - [EngineGeometry.md](EngineGeometry.md): All-world 32-route inventory and engine evidence. CPU lifetime/index and startup observer now implemented, but unique pose candidates do not prove draw ownership. Live frame/instance linkage, missing mutation routes and procedural/particle coverage remain incomplete.
 - [tests/GeometryObjects.md](tests/GeometryObjects.md): Generation/lifetime index and production callbacks pass independent tests; source startup hook compiles. No game deployment, verified draw ownership or new FG input replacement.

@@ -14,6 +14,8 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 
 [The shader-history implementation](tests/GeometryShaders.md) reuses actual original VS positions and material coverage. Independent GPU checks preserve original color/position outputs, object masks through batch reordering, and perspective-correct motion with frame/generation rejection. A bounded compiler worker and public PSO/root creation observer also pass the GPU checks. The upstream device hook now starts acquisition and forwards final root bytes after sampler overrides; packaged DXC files stay in `Glass/`. Live engine identity, draw insertion, ordering and per-object boundary composition remain incomplete. This source has not replaced the installed correction.
 
+[The engine packet adapter](tests/GeometryDraws.md) now obtains direct proxy-slot provenance through the original rigid/skinned instance append and flush paths. Independent production-callback tests and the full Release build pass. Internal multi-instance arrays keep their intervals without inferred identities. The public draw consumer, live game validation and FG connection remain incomplete; this does not establish support for every transparent rendering route.
+
 ## Boundaries
 
 Verification sections below retain earlier investigation results. The fresh-process deployment section records the current installation state.

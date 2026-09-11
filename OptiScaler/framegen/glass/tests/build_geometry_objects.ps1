@@ -15,3 +15,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Object registry test failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Object callback test build failed' }
 & "$build/CyberpunkObjectCallbacks.exe"
 if ($LASTEXITCODE -ne 0) { throw 'Object callback test failed' }
+& cl.exe @common (Join-Path $PSScriptRoot 'CyberpunkDrawCallbacks.cpp') "/Fe$build/CyberpunkDrawCallbacks.exe" `
+    /link (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
+if ($LASTEXITCODE -ne 0) { throw 'Draw callback test build failed' }
+& "$build/CyberpunkDrawCallbacks.exe"
+if ($LASTEXITCODE -ne 0) { throw 'Draw callback test failed' }
