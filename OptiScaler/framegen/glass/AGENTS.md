@@ -12,7 +12,10 @@
 
 ## Document index
 
-- [tests/GeometryShaders.md](tests/GeometryShaders.md): One-shot engine-mapped coverage recorder now implemented and independently tested with completion/discard gating. Fresh game capture is pending; no new object MV or FG substitution.
+- [tests/GeometryDraws.md](tests/GeometryDraws.md): Actual mesh chunk range decoder added. Diagnostic draw metadata records counts/bindings, without claiming topology or view identity. New metadata is not deployed.
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Resampling source reuses completed slots for up to 64 candidate shapes under the existing budget, with draw provenance sidecars. Independent recorder GPU check passes; game resampling pending.
+
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Live recorder saved seven nearly empty captures (four pixels total). Readback works; usable target coverage, object MV and FG substitution remain unverified/incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Latest source adds object bit coverage and single-draw hook insertion, independently GPU verified. Live capture owner, lifetime/frame linkage and FG substitution are still absent.
 

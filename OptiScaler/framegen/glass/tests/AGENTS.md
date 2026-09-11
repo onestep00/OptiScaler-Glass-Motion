@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryDraws.md](GeometryDraws.md): Mesh range decoder rejects malformed/stale callback inputs; owned-memory fixture only. Coverage sidecar preserves original draw/raster evidence without claiming engine history in the GPU fixture.
+
 - [GeometryShaders.md](GeometryShaders.md): `--recorder` checks asynchronous coverage allocation, actual submission/Reset gates and saved per-object material bits. It uses a new artifact directory and an independent device.
 
 - [GeometryShaders.md](GeometryShaders.md): `--coverage` verifies per-object material bits without motion; `--capture-command` verifies production draw insertion/restoration with actual shader-history MV on a standalone device. Neither is game integration.

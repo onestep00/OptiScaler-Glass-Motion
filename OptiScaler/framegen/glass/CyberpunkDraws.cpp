@@ -316,6 +316,47 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std:
     ++value->state->draws;
     return { records, value->mesh, value->batch->frame, value->chunk, value->stride, value->origin, value->count };
 }
+CyberpunkMeshShape ReadCyberpunkMeshShape(const GeometryDrawView& draw) noexcept
+{
+    const auto* flush = currentFlush;
+    if (!flush || !flush->consumed || flush->invalid || !currentBatch || draw.objects.empty() ||
+        draw.mesh != flush->mesh || draw.chunk != flush->chunk || draw.frame != currentBatch->frame ||
+        draw.frame != *flush->state->tick || draw.instances != flush->count ||
+        draw.objects.data() != flush->records->view(flush->count).data())
+        return {};
+    // rendChunk layout is also exposed by the game's reflection (RED4ext SDK).
+    // Read only this chunk, twice, instead of scanning meshes or GPU contents.
+    struct Header { std::uint64_t data; std::uint32_t capacity, count; };
+    Header first {}, second {};
+    std::array<std::uint32_t, 2> buffers {}, buffersAfter {};
+    std::array<std::byte, 0xf8> chunk {}, after {};
+    if (!copyAt(draw.mesh + 0xa0, first) || !first.data || first.count > first.capacity ||
+        first.capacity > 4096 || draw.chunk >= first.count || !copyAt(draw.mesh + 0x30, buffers) ||
+        !buffers[0] || !buffers[1] || buffers[0] > 65536 || buffers[1] > 65536)
+        return {};
+    const auto address = first.data + std::uint64_t(draw.chunk) * chunk.size();
+    if (address < first.data || !copyAt(address, chunk) || !copyAt(address, after) || chunk != after ||
+        !copyAt(draw.mesh + 0xa0, second) || memcmp(&first, &second, sizeof(first)) ||
+        !copyAt(draw.mesh + 0x30, buffersAfter) || buffers != buffersAfter)
+        return {};
+    CyberpunkMeshShape result;
+    result.chunkAddress = address;
+    result.vertexBuffer = buffers[0];
+    result.indexBuffer = buffers[1];
+    memcpy(result.streamOffsets.data(), chunk.data() + 0xb8, sizeof(result.streamOffsets));
+    memcpy(&result.streams, chunk.data() + 0xcc, 4);
+    memcpy(&result.indexOffset, chunk.data() + 0xd4, 4);
+    memcpy(&result.indices, chunk.data() + 0xe8, 4);
+    std::uint16_t vertices = 0;
+    memcpy(&vertices, chunk.data() + 0xec, 2);
+    result.vertices = vertices;
+    result.indexType = std::to_integer<std::uint8_t>(chunk[0xd0]);
+    result.vertexFactory = std::to_integer<std::uint8_t>(chunk[0xf4]);
+    if (!result.vertices || result.indices != flush->indexCount || !result.streams || result.streams > 5 ||
+        result.indexType > 1 || result.indexOffset % (result.indexType ? 2 : 4))
+        return {};
+    return result;
+}
 bool InitializeCyberpunkDraws(HMODULE executable) noexcept
 {
     try

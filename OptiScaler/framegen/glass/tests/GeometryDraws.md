@@ -2,10 +2,27 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: live packet/public draw observation verified; active MRT/root joins failed; source fixes independently verified
-- Deployment: installed 32054cc predates compatibility/admission/status fixes; object capture and FG replacement remain absent
+- Status: live packet/public draw observation verified; mesh allocation decoder added; continuous object history incomplete
+- Deployment: 7769d34 coverage diagnostic loaded and saved seven nearly empty captures; see GeometryShaders.md. The mesh allocation decoder below is not deployed
 - Deprecated: no
 - Scope: direct indexed mesh batches in the audited Cyberpunk executable; broader routes remain incomplete
+
+## Actual mesh allocation ranges
+
+`ReadCyberpunkMeshShape` reads the actual chunk selected by the consumed engine
+draw. It is valid only inside that same borrowed callback. It copies the selected
+`rendChunk` twice and rejects changing array headers, buffer IDs or chunk bytes,
+out-of-range chunks, empty vertices, mismatched index counts, unsupported stream
+counts and misaligned index offsets. No scene image or camera estimate is used.
+The result supplies the declared vertex count needed to size actual VS-output
+history. Equal counts and addresses do not prove unchanged topology, stable
+per-vertex identity, GPU binding/lifetime, or frame correspondence.
+
+The callback fixture exercises the production decoder on owned engine-shaped
+memory, including zero vertices, wrong index count, truncated chunk arrays and
+reads outside the borrowed draw scope. It does not inspect a running game.
+The one-shot coverage recorder copies this metadata only for its selected draws;
+there is no mesh scan or per-frame file read.
 
 The renderer writes the proxy registry index into bits 0..17 of the second 64-bit draw-packet word. Bits 33..49 identify a 48-byte packed transform in the renderer's frame array. The inspected packet producer reads these values directly from the proxy and allocation result. The consumer at RVA `1f1208` resolves the same registry slot and transform entry before appending instances. This provides direct provenance that a mesh/pose search cannot establish.
 

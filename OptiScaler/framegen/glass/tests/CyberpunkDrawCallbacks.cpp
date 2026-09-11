@@ -16,6 +16,8 @@ std::vector<std::byte> rendererMemory(0xb80000), rootMemory(0x4630), gpuUpload(6
 std::uint64_t root = reinterpret_cast<std::uint64_t>(rootMemory.data());
 std::array<std::array<std::byte, 0x1c0>, 3> proxies {};
 std::array<std::byte, 512> rigidBytes {}, skinnedBytes {}, target {};
+std::array<std::byte, 0xb0> meshBytes {};
+std::array<std::byte, 8 * 0xf8> chunkBytes {};
 std::array<std::uint64_t, 2> packet {};
 EngineGeometry geometry;
 EngineContext context;
@@ -87,6 +89,23 @@ void draw(std::uint32_t count, std::uint32_t start)
     require(ReadCyberpunkGeometryDraw(callsite, geometry.indexCount, count, 0, 0, start + 1).objects.empty(),
             "Wrong instance offset admitted");
     auto value = ReadCyberpunkGeometryDraw(callsite, geometry.indexCount, count, 0, 0, start);
+    if (!value.objects.empty())
+    {
+        const auto shape = ReadCyberpunkMeshShape(value);
+        require(shape && shape.vertices == 24 && shape.indices == 60 && shape.streams == 2 &&
+                    shape.vertexBuffer == 12 && shape.indexBuffer == 13 && shape.indexOffset == 128 &&
+                    shape.streamOffsets[0] == 256 && shape.streamOffsets[1] == 2048,
+                "Actual mesh chunk allocation range mismatch");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xec, std::uint16_t(0));
+        require(!ReadCyberpunkMeshShape(value), "Empty vertex allocation admitted");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xec, std::uint16_t(24));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xe8, std::uint32_t(59));
+        require(!ReadCyberpunkMeshShape(value), "Unrelated index count admitted");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xe8, std::uint32_t(60));
+        put(meshBytes.data(), 0xac, std::uint32_t(7));
+        require(!ReadCyberpunkMeshShape(value), "Outside chunk array admitted");
+        put(meshBytes.data(), 0xac, std::uint32_t(8));
+    }
     observed.assign(value.objects.begin(), value.objects.end());
     observedHeader = value;
     require(ReadCyberpunkGeometryDraw(callsite, geometry.indexCount, count, 0, 0, start).objects.empty(),
@@ -124,6 +143,7 @@ void flush(bool skin = false, std::uint32_t global = UINT32_MAX)
     }
     require(ReadCyberpunkGeometryDraw(callsite, geometry.indexCount, 1, 0, 0, origin).objects.empty(),
             "Mapping escaped the flush callback");
+    require(!ReadCyberpunkMeshShape(observedHeader), "Chunk read escaped draw scope");
 }
 void fixtureRun(void*, void*, void*)
 {
@@ -190,7 +210,19 @@ int main()
         const auto renderer = reinterpret_cast<std::uint64_t>(rendererMemory.data());
         put(rootMemory.data(), 0x4628, renderer);
         geometry.kind = 0;
-        geometry.mesh = 0xabcdef;
+        geometry.mesh = reinterpret_cast<std::uint64_t>(meshBytes.data());
+        put(meshBytes.data(), 0x30, std::uint32_t(12));
+        put(meshBytes.data(), 0x34, std::uint32_t(13));
+        put(meshBytes.data(), 0xa0, reinterpret_cast<std::uint64_t>(chunkBytes.data()));
+        put(meshBytes.data(), 0xa8, std::uint32_t(8));
+        put(meshBytes.data(), 0xac, std::uint32_t(8));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xb8, std::uint32_t(256));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xbc, std::uint32_t(2048));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xcc, std::uint32_t(2));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xd0, std::uint8_t(1));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xd4, std::uint32_t(128));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xe8, std::uint32_t(60));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xec, std::uint16_t(24));
         geometry.chunk = 7;
         geometry.indexCount = 60;
         context.rigid = reinterpret_cast<std::uint64_t>(rigidBytes.data());

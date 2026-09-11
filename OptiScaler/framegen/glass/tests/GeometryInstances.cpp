@@ -752,6 +752,16 @@ int wmain(int argc, wchar_t** argv)
             while (!std::filesystem::exists(done) && GetTickCount64() < deadline)
                 Sleep(10);
             require(std::filesystem::exists(done), "Diagnostic recorder did not complete");
+            std::ifstream provenanceFile(recorderOutput / "objects-0.draw");
+            const std::string provenance((std::istreambuf_iterator<char>(provenanceFile)), {});
+            require(provenance.find("engine_mesh_shape=0\n") != std::string::npos &&
+                        provenance.find("view_identity_proven=0\n") != std::string::npos &&
+                        provenance.find("topology_history_proven=0\n") != std::string::npos &&
+                        provenance.find("draw_indices=6\n") != std::string::npos &&
+                        provenance.find("draw_instances=3\n") != std::string::npos &&
+                        provenance.find("base_vertex=2\n") != std::string::npos &&
+                        provenance.find("start_instance=7\n") != std::string::npos,
+                    "Draw provenance lost or fixture incorrectly claims engine history");
             std::ifstream metadata(recorderOutput / "objects-0.csv");
             std::string line;
             std::getline(metadata, line);

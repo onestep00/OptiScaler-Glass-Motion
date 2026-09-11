@@ -2,20 +2,48 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: independent GPU and public creation observer verified; engine acquisition/draw integration incomplete
-- Deployment: creation/command acquisition staged in MO2 build 32054cc; no new game draw capture or FG substitution
+- Status: one-shot coverage recorder independently GPU verified; continuous engine object history and FG integration incomplete
+- Deployment: 7769d34 coverage diagnostic observed live; seven captures contain only four covered pixels. Additional draw provenance below is not deployed
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
 
 ## Implemented source
+
+Fresh-process observation of installed DLL SHA-256
+`f025dfbd3512195420504ce8119d66766cc51a96b021a68d00aad02c2cf7e680`
+confirmed concurrent loading of the existing MFG ASI. Seven completed per-object
+captures at 2560x1440 were saved from engine frames 3094 through 3114. Five have
+zero covered pixels; the other two have one and three pixels. The contact sheet
+was inspected and contains no usable cup/railing silhouette. Submission/readback
+works, but this does not verify target selection or complete material coverage.
+The recorder currently consumes each slot on the first matching draw; a tiny,
+occluded or wrong-pass sample is not retried. That sampling limitation and the
+unrecorded target provenance must be resolved before judging the shader path.
+No object MV was produced or substituted into FG. The native substitution counter
+still describes the preceding static-world correction.
+
+The recorder also saves a `.draw` sidecar with original indexed arguments,
+viewport/scissor and observed RTV/DSV descriptor handles. When the actual engine
+chunk decoder succeeds, it includes vertex/index counts, stream offsets and
+buffer IDs. Missing engine metadata is explicit. Descriptor handles are binding
+observations, not retained resource or camera/view identity. The sidecar therefore
+marks view identity and topology history unproven; it must not authorize mask
+merging or motion history on its own. These scalar copies occur only on selected
+one-shot captures and file writes stay on the worker.
 
 `GeometryCoverageRecorder` is a one-shot game diagnostic owner, enabled only by
 `Glass/capture-objects.request` at startup. The file contains an absolute output
 directory. It requests supported pipelines from actual engine-mapped draws, builds
 coverage variants and allocates buffers on a worker, then records each admitted
 draw once with its original material and a separate object bit allocation.
-Eight slots, at most 32 instances per draw and a conservative 256 MiB buffer
-reservation budget bound this diagnostic. It stops accepting after 30 seconds
+Eight concurrent slots, at most 32 instances per draw and a conservative 256 MiB buffer
+reservation budget bound this diagnostic. The resampling revision retires completed,
+discarded captures outside the owner lock and admits up to 64 distinct pipeline,
+viewport-size and instance-count combinations. Output numbers remain unique as
+slots are reused. The fixed 3840x2160 limit is removed; integer dimensions up to
+the mapping's 32768 coordinate limit are checked using 64-bit allocation arithmetic
+and the same memory budget. This is broader diagnostic sampling, not exhaustive
+object coverage or a continuous production allocation strategy. It stops accepting after 30 seconds
 from its first request. Missing completion/discard stops the worker after two
 minutes without authorizing readback or releasing possibly referenced resources.
 PSO/driver allocations are additional; this is not the continuous production cost.
@@ -27,7 +55,7 @@ the recorder mutex, avoiding inversion with the native host's submission lock.
 The independent `--recorder` fixture compared all 53,760 individual material
 samples against original draws and preserved 143,360 original color pixels.
 The fixture supplies test identities, not Cyberpunk objects. This recorder emits
-no MV, makes no FG substitution, and has not yet been verified in a fresh game.
+no MV and makes no FG substitution. The fresh-game limitation is recorded above.
 
 Latest source checkpoint (2026-09-11): `OriginalColorAndCoverage` records separate
 object material coverage as bits, independent of vertex-history availability.

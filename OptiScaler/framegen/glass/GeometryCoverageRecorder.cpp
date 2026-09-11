@@ -2,6 +2,7 @@
 #include "GeometryCoverageRecorder.h"
 #include "GeometryDrawCapture.h"
 #include "GeometryCommands.h"
+#include "CyberpunkDraws.h"
 #include "DxilVertexHistory.h"
 #include <fstream>
 #include <mutex>
@@ -14,6 +15,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr unsigned SlotCount = 8, MaxInstances = 32;
+constexpr unsigned MaxCaptures = 64;
 constexpr UINT64 Budget = 256ull * 1024 * 1024;
 struct Slot
 {
@@ -27,12 +29,15 @@ struct Slot
     ComPtr<ID3D12GraphicsCommandList> initialCommand;
     std::array<GeometryDrawIdentity, MaxInstances> identities {};
     UINT width = 0, height = 0, instances = 0, wordsPerObject = 0, frame = 0, chunk = 0;
-    UINT64 bytes = 0;
+    UINT64 bytes = 0, charge = 0;
+    unsigned captureIndex = 0;
     void* mapped = nullptr;
     void* constantData = nullptr;
     ID3D12GraphicsCommandList* command = nullptr;
     bool submitted = false, discarded = false;
     GeometryRasterState raster;
+    CyberpunkMeshShape meshShape;
+    GeometryIndexedArguments arguments {};
 };
 void checked(HRESULT result)
 {
@@ -53,6 +58,13 @@ struct Recorder final : GeometryDrawCaptureOwner
     std::filesystem::path compiler, output;
     std::mutex mutex;
     std::array<Slot, SlotCount> slots;
+    struct Selection
+    {
+        const GeometryPipelineEntry* pipeline = nullptr;
+        UINT width = 0, height = 0, instances = 0;
+    };
+    std::array<Selection, MaxCaptures> selections {};
+    unsigned selectionCount = 0;
     UINT64 allocated = 0;
     std::atomic<bool> accepting = true;
     UINT64 firstRequest = 0;
@@ -127,7 +139,7 @@ struct Recorder final : GeometryDrawCaptureOwner
         const auto* raster = ReadGeometryRasterState(command);
         if (!raster || !raster->usable() || !raster->depth.ptr || !args.instances || args.instances > MaxInstances ||
             raster->viewport.TopLeftX != 0 || raster->viewport.TopLeftY != 0 ||
-            raster->viewport.Width > 3840 || raster->viewport.Height > 2160 ||
+            raster->viewport.Width > 32768 || raster->viewport.Height > 32768 ||
             raster->viewport.Width < 1 || raster->viewport.Height < 1)
             return false;
         const auto width = UINT(raster->viewport.Width), height = UINT(raster->viewport.Height);
@@ -163,6 +175,10 @@ struct Recorder final : GeometryDrawCaptureOwner
                 slot.frame = draw.frame;
                 slot.chunk = draw.chunk;
                 slot.raster = *raster;
+                // Only for the selected diagnostic draw, not every observed
+                // draw. Copy borrowed engine data before leaving its scope.
+                slot.meshShape = ReadCyberpunkMeshShape(draw);
+                slot.arguments = args;
                 const MaterialCaptureConstants constants { 0, 0, 1.f / width, 1.f / height, 0, 0, draw.frame, 0,
                                                            0, 0, width, height, 0, width, 1, 0 };
                 memcpy(slot.constantData, &constants, sizeof(constants));
@@ -179,15 +195,26 @@ struct Recorder final : GeometryDrawCaptureOwner
             if (slot.phase != Slot::Empty && slot.lease == lease && slot.width == width && slot.height == height &&
                 slot.instances == args.instances)
                 return false;
+        // Sampling only: remember already requested shapes while completed
+        // slots retire. Addresses never authorize object identity or history.
+        for (unsigned i = 0; i < selectionCount; ++i)
+            if (selections[i].pipeline == lease.get() && selections[i].width == width &&
+                selections[i].height == height && selections[i].instances == args.instances)
+                return false;
+        if (selectionCount == MaxCaptures)
+            return false;
         for (auto& slot : slots)
             if (slot.phase == Slot::Empty)
             {
-                const UINT words = 1 + (width * height + 31) / 32;
+                const UINT words = UINT(1 + (UINT64(width) * height + 31) / 32);
                 const UINT64 bytes = UINT64(words) * args.instances * 4;
                 const UINT64 charge = ((bytes + 65535) & ~UINT64(65535)) * 3 + 1024 * 1024;
-                if (allocated + charge > Budget)
+                if (allocated + charge > Budget || bytes * 8 > UINT32_MAX)
                     return false;
                 allocated += charge;
+                slot.charge = charge;
+                slot.captureIndex = selectionCount;
+                selections[selectionCount++] = { lease.get(), width, height, args.instances };
                 if (!firstRequest)
                     firstRequest = GetTickCount64();
                 slot.lease = lease;
@@ -246,12 +273,12 @@ struct Recorder final : GeometryDrawCaptureOwner
             if (slot.command == command && slot.phase == Slot::Recorded)
                 slot.discarded = true;
     }
-    void save(unsigned index, Slot& slot)
+    void save(Slot& slot)
     {
         void* data = nullptr;
         D3D12_RANGE range { 0, SIZE_T(slot.bytes) };
         checked(slot.readback->Map(0, &range, &data));
-        const auto stem = output / ("objects-" + std::to_string(index));
+        const auto stem = output / ("objects-" + std::to_string(slot.captureIndex));
         std::ofstream binary(stem.string() + ".bin", std::ios::binary);
         binary.write(static_cast<const char*>(data), std::streamsize(slot.bytes));
         const bool okay = bool(binary);
@@ -272,6 +299,29 @@ struct Recorder final : GeometryDrawCaptureOwner
             throw std::runtime_error("Coverage metadata write failed");
         meta.close();
         binary.close();
+        std::ofstream draw(stem.string() + ".draw");
+        const auto& r = slot.raster;
+        const auto& m = slot.meshShape;
+        draw << "engine_mesh_shape=" << bool(m) << "\nvertices=" << m.vertices
+             << "\nindices=" << m.indices << "\nchunk_address=" << m.chunkAddress
+             << "\nvertex_buffer=" << m.vertexBuffer << "\nindex_buffer=" << m.indexBuffer
+             << "\nindex_offset=" << m.indexOffset << "\nindex_type=" << unsigned(m.indexType)
+             << "\nvertex_factory=" << unsigned(m.vertexFactory) << "\nstreams=" << m.streams;
+        for (unsigned i = 0; i < m.streamOffsets.size(); ++i)
+            draw << "\nstream_offset_" << i << '=' << m.streamOffsets[i];
+        draw << "\ndraw_indices=" << slot.arguments.indices << "\ndraw_instances=" << slot.arguments.instances
+             << "\nstart_index=" << slot.arguments.startIndex << "\nbase_vertex=" << slot.arguments.baseVertex
+             << "\nstart_instance=" << slot.arguments.startInstance
+             << "\nviewport=" << r.viewport.TopLeftX << ',' << r.viewport.TopLeftY << ','
+             << r.viewport.Width << ',' << r.viewport.Height << ',' << r.viewport.MinDepth << ',' << r.viewport.MaxDepth
+             << "\nscissor=" << r.scissor.left << ',' << r.scissor.top << ',' << r.scissor.right << ',' << r.scissor.bottom
+             << "\ndsv_handle=" << r.depth.ptr << "\nrtv_count=" << r.targetCount;
+        for (unsigned i = 0; i < r.targetCount; ++i)
+            draw << "\nrtv_handle_" << i << '=' << r.targets[i].ptr;
+        draw << "\nview_identity_proven=0\ntopology_history_proven=0\nmotion_produced=0\n";
+        draw.close();
+        if (!draw || !meta || !binary)
+            throw std::runtime_error("Coverage provenance file write failed");
         std::ofstream done(stem.string() + ".done");
         done << "coverage_only=1 motion_produced=0 gpu_complete=1 recording_discarded=1\n";
     }
@@ -327,11 +377,24 @@ struct Recorder final : GeometryDrawCaptureOwner
                         if (buildNow)
                             build(slots[i]);
                         else
-                            save(i, slots[i]);
+                            save(slots[i]);
                         if (buildNow)
                         {
                             std::lock_guard lock(mutex);
                             slots[i].phase = Slot::Ready;
+                        }
+                        else
+                        {
+                            // save was admitted only after submission, GPU
+                            // completion and recording discard. Release outside
+                            // our mutex: COM destruction can enter host hooks.
+                            Slot retired;
+                            {
+                                std::lock_guard lock(mutex);
+                                allocated -= slots[i].charge;
+                                retired = std::move(slots[i]);
+                                slots[i] = Slot {};
+                            }
                         }
                     }
                     catch (const std::exception& error)
