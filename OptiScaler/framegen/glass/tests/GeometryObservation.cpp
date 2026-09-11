@@ -74,6 +74,8 @@ int main()
         rd.NumParameters = 2; rd.pParameters = parameters;
         ComPtr<ID3DBlob> serialized, error, vs, ps;
         check(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &error));
+        const auto* serializedStart = static_cast<const char*>(serialized->GetBufferPointer());
+        const std::vector<char> serializedCopy(serializedStart, serializedStart + serialized->GetBufferSize());
         ComPtr<ID3D12RootSignature> root;
         check(device.d->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
                                            IID_PPV_ARGS(&root)));
@@ -125,6 +127,7 @@ int main()
         std::string completion(done.begin(), done.end()); std::erase(completion, '\r');
         require(completion.find("rows=1\npipelines=1\n") != std::string::npos,
                 "Module count/completion invalid");
+        require(read(outputPath / "9223372036854775809.root.bin") == serializedCopy, "Saved root bytes differ");
         require(FreeLibrary(bindingsModule) != 0, "Binding module unload");
         printf("BINDING_MODULE_OK %s\n", outputPath.string().c_str());
 #endif
@@ -155,6 +158,9 @@ int main()
             retained = cache.find(original.Get());
             require(retained && !retained->instrumented && !retained->root->extended, "Observation became replayable");
             memset(serialized->GetBufferPointer(), 0, serialized->GetBufferSize());
+            require(retained->root->originalSerialized.size() == serializedCopy.size() &&
+                    !memcmp(retained->root->originalSerialized.data(), serializedCopy.data(), serializedCopy.size()),
+                    "Original serialized root not owned");
             require(retained->root->originalParameters.size() == 2 &&
                     retained->root->originalParameters[0].Descriptor.ShaderRegister == 7 &&
                     retained->root->originalParameters[1].DescriptorTable.pDescriptorRanges == retained->root->ranges[1].data() &&

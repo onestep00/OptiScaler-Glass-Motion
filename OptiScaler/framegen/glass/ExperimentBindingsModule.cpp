@@ -95,6 +95,12 @@ class Recorder
         {
             const auto& p = pipelines[i];
             const auto& d = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(p.view.descriptor);
+            if (p.view.serializedRoot && p.view.serializedRootBytes)
+            {
+                std::ofstream file(output / (std::to_string(p.identity) + ".root.bin"), std::ios::binary);
+                file.write(static_cast<const char*>(p.view.serializedRoot), p.view.serializedRootBytes);
+                file.close(); if (!file) throw std::runtime_error("Root write failed");
+            }
             for (unsigned stage = 0; stage < 2; ++stage)
             {
                 const auto code = stage ? d.PS : d.VS;

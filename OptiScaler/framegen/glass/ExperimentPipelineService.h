@@ -23,7 +23,8 @@ inline int32_t ViewExperimentPipeline(const void* token, GlassExperimentPipeline
              root.original.Get(), root.extended.Get(), root.layout == GeometryLayout::PerInstance ? 1u : 0u,
              root.dwords, root.constantsSlot, root.previousSlot, root.currentSlot, root.materialSlot,
              root.captureSlot, root.instanceSlot, sizeof(D3D12_ROOT_PARAMETER1),
-             static_cast<uint32_t>(root.originalParameters.size()), root.originalParameters.data() };
+             static_cast<uint32_t>(root.originalParameters.size()), root.originalParameters.data(),
+             static_cast<uint32_t>(root.originalSerialized.size()), root.originalNodeMask, root.originalSerialized.data() };
     return 1;
 }
 inline void ReleaseExperimentPipeline(void* token)

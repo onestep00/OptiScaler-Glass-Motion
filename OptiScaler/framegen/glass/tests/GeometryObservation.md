@@ -23,8 +23,10 @@ payload budget. The official versioned deserializer converts to the 1.1 layout;
 parameter and descriptor-range arrays are copied before releasing it. No extended
 root is created for this observation. Unobserved roots remain layout-unknown.
 Shader register numbers and spaces come from these original descriptors, not
-assumed fixed root-slot numbers. Static samplers are not retained by this binding
-metadata path. See Microsoft's [deserializer contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-d3d12createversionedrootsignaturedeserializer).
+assumed fixed root-slot numbers. Exact post-override serialized creation bytes
+and the original node mask are also retained. These preserve static samplers,
+flags and version information absent from the parameter-only view. Serialized
+storage is included in the bounded cache accounting. See Microsoft's [deserializer contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-d3d12createversionedrootsignaturedeserializer).
 
 The census uses `FindObservedGeometryPipeline`; correction still uses only
 `FindGeometryPipeline`. Original-only entries have no instrumented PSO or extended
@@ -95,7 +97,8 @@ readbacks or callback file writes. Retained shader/root references add storage
 beyond the fixed rows. This is an on-demand diagnostic, not the runtime algorithm.
 
 After callbacks stop, destroy writes draws/bindings/constants/layout CSV files
-and original VS/PS bytecode. `bindings.done` records counts, drops, CPU ordering,
+and original VS/PS bytecode plus available serialized roots as `.root.bin`.
+`bindings.done` records counts, drops, CPU ordering,
 unknown frame-zero semantics and absence of previous-transform verification.
 GPU virtual addresses and descriptor handles are observations, not retained
 buffer leases. No generated-frame or silhouette correctness follows from them.
@@ -106,3 +109,19 @@ destruction, checks the exact CBV address and completion counts, then unloads.
 It passed. An initial test failure was Windows CRLF comparison in the test;
 normalizing line endings resolved it without changing the recorded address.
 The module compiled with /W4 /WX. No game deployment occurred.
+
+The serialization extension passed the independent module test after rebuilding
+all host translation units: the retained bytes survive mutation of the source
+blob, and the actual DLL saves byte-identical root data after cache shutdown.
+This verifies ownership and transport, not replay or previous-pose validity.
+The appended pipeline-view fields require rebuilding size-checked modules.
+The full Release x64 solution compiled and linked after this extension with exit
+code 0. Existing warnings and post-build missing-file messages remain as above;
+the installed game DLL was not replaced.
+
+The remaining native-pass capture gap is explicit: `GeometryCommands` calls the
+capture owner only for compiler-prepared entries, and `GeometryPreparedDraw`
+binds that entry's extended root/history slots. Original-only observations cannot
+use this path. Census callbacks must not issue GPU commands. A native auxiliary
+draw needs a separately prepared pipeline/root, checked state restoration and
+the existing completion plus recording-discard lifetime gates before admission.

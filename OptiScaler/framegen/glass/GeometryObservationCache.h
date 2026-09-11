@@ -20,7 +20,7 @@ class GeometryObservationCache
     explicit GeometryObservationCache(std::size_t count = 1024, std::size_t bytes = 32 * 1024 * 1024)
         : maxEntries(count), maxBytes(bytes) {}
 
-    bool rootCreated(ID3D12RootSignature* identity, const void* bytes, SIZE_T size) noexcept
+    bool rootCreated(ID3D12RootSignature* identity, const void* bytes, SIZE_T size, UINT node = 0) noexcept
     {
         if (!identity || !bytes || !size || size > 256 * 1024) return false;
         try
@@ -42,12 +42,14 @@ class GeometryObservationCache
                     if (n > 2048 - ranges) return false;
                     ranges += n;
                 }
-            const auto cost = sizeof(GeometryRoot) + d.NumParameters *
+            const auto cost = sizeof(GeometryRoot) + size + d.NumParameters *
                 (sizeof(D3D12_ROOT_PARAMETER1) + sizeof(std::vector<D3D12_DESCRIPTOR_RANGE1>)) +
                 ranges * sizeof(D3D12_DESCRIPTOR_RANGE1);
             if (used > maxBytes || cost > maxBytes - used) return false;
             auto root = std::make_shared<GeometryRoot>();
             root->original = identity;
+            root->originalSerialized.assign(static_cast<const std::byte*>(bytes), static_cast<const std::byte*>(bytes) + size);
+            root->originalNodeMask = node;
             if (d.NumParameters) root->originalParameters.assign(d.pParameters, d.pParameters + d.NumParameters);
             root->ranges.resize(d.NumParameters);
             for (UINT i = 0; i < d.NumParameters; ++i)

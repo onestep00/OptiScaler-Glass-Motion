@@ -14,6 +14,8 @@ struct GlassExperimentPipelineView
     uint32_t constantsSlot, previousSlot, currentSlot, materialSlot, captureSlot, instanceSlot;
     uint32_t rootParameterBytes, rootParameterCount;
     const void* rootParameters; // Owned D3D12_ROOT_PARAMETER1 array, token lifetime.
+    uint32_t serializedRootBytes, originalNodeMask;
+    const void* serializedRoot; // Exact post-override creation bytes, token lifetime.
 };
 struct GlassExperimentPipelineAccess
 {

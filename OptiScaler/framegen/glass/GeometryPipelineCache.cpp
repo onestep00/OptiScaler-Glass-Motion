@@ -184,7 +184,7 @@ bool GeometryPipelineCache::rootCreated(ID3D12RootSignature* identity, UINT node
             return false;
         if (r.roots.contains(identity))
             return true;
-        if (r.roots.size() >= r.limits.roots || !r.budget(size))
+        if (r.roots.size() >= r.limits.roots || !r.budget(size * 2))
             return false;
         auto work = std::make_shared<Impl::RootWork>();
         work->original = identity;
@@ -203,7 +203,7 @@ bool GeometryPipelineCache::rootCreated(ID3D12RootSignature* identity, UINT node
         }
         ++r.counters.roots;
         ++r.counters.pending;
-        r.counters.retainedBytes += size;
+        r.counters.retainedBytes += size * 2; // Worker source plus immutable root serialization.
         r.changed.notify_one();
         return true;
     }

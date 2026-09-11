@@ -56,6 +56,9 @@ HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* identity, 
         return reject(error, "Unsupported root flags or parameter count");
 
     GeometryRoot result;
+    result.originalSerialized.assign(static_cast<const std::byte*>(serialized),
+                                     static_cast<const std::byte*>(serialized) + bytes);
+    result.originalNodeMask = nodeMask;
     result.layout = layout;
     result.ranges.resize(desc.NumParameters);
     if (desc.NumParameters)

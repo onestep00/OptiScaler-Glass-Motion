@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryObservation.md](GeometryObservation.md): Original root serialization ownership and actual recorder file equality pass. Native-pass GPU capture still requires a separate admission path.
+
 - [GeometryObservation.md](GeometryObservation.md): Actual binding recorder DLL passes independent host event/file roundtrip and unload. No GPU buffer contents or game MV captured.
 
 - [GeometryObservation.md](GeometryObservation.md): Module-facing root layout and actual CBV address match in independent draw census. ABI versions advanced; no live game previous-transform capture yet.

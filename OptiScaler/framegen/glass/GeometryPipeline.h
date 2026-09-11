@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cstddef>
 #include "GeometryInstance.h"
 
 namespace GlassFg
@@ -21,6 +22,8 @@ struct GeometryRoot
     GeometryRoot(const GeometryRoot&) = delete;
     GeometryRoot& operator=(const GeometryRoot&) = delete;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> original, extended;
+    std::vector<std::byte> originalSerialized;
+    UINT originalNodeMask = 0;
     std::vector<D3D12_ROOT_PARAMETER1> originalParameters;
     std::vector<std::vector<D3D12_DESCRIPTOR_RANGE1>> ranges;
     UINT constantsSlot = 0, previousSlot = 0, currentSlot = 0, materialSlot = 0, captureSlot = 0;

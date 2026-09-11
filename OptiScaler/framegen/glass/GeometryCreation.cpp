@@ -175,7 +175,7 @@ void ObserveGeometryRoot(ID3D12Device* device, UINT node, const void* bytes, SIZ
     if (SUCCEEDED(created->QueryInterface(IID_PPV_ARGS(&root))))
     {
         capture->cache.rootCreated(root.Get(), node, bytes, size);
-        capture->observations.rootCreated(root.Get(), bytes, size);
+        capture->observations.rootCreated(root.Get(), bytes, size, node);
     }
 }
 std::shared_ptr<const GeometryPipelineEntry> FindGeometryPipeline(ID3D12PipelineState* original) noexcept
