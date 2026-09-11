@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: implemented; standalone CPU checks passed; engine adapter incomplete
+- Status: slot cache implemented; simultaneous live producer/draw candidates verified; lifetime/view adapter incomplete
 - Deployment: none; no motion or FG input changes
 - Deprecated: no
 - Scope: bounded CPU correspondence within one proven producer/consumer domain
@@ -38,6 +38,42 @@ Do not use the prior offline same-frame range matches alone to populate admitted
 vertex history. No production call site has been added yet.
 
 ## Producer/consumer investigation
+
+### Simultaneous live producer and draw checkpoint
+
+In PID 68908, the byte-guarded producer observer recorded 4,096 producer
+calls / 28,249 source-index rows over engine frames 39322--39368. A concurrent
+replaceable draw recorder captured the consumer census. Both recordings stopped;
+the coverage module unloaded with all 133 cumulative jobs retired. The producer
+forwarding module remains resident with recording disabled. No new FG input was
+installed.
+
+Excluding 839 non-global or invalid rows (including the UINT32_MAX global-start
+sentinel), there were 24,428 distinct frame/mesh/global-slot keys with no conflicting
+proxy/source-array/source-index candidates. All 236 consumer draws with any such
+candidate had candidates for every instance. This includes the 40-instance cup
+draw and other pipeline families; it is not an all-scene coverage result. Nine
+observations of the selected cup draw matched its source indices 0--39. Source
+array, owner slot and producer contexts were captured directly, without transform
+matching or GPU buffer copying.
+
+The same owner/source mapping can appear through different producer contexts.
+The offline key deliberately collapses them only to test agreement; it does not
+establish a production view/submission domain. Initial apparent slot conflicts
+came from erroneously including the non-global sentinel and were removed by
+correcting the analysis, not by selecting one of the conflicting owners.
+
+Evidence: workspace `work/glass-producer-join-live-v1/all-source-joins.json`,
+`join.json`, and `work/glass-instance-producer-live-v2/capture/`. The engine binary
+hash matches the previously audited hash below. Local addresses are diagnostic
+observations and must not become production constants.
+
+The resident registry already exposes registration-generation tickets, and the
+single-object draw adapter validates those tickets at consumption. Grouped draws
+still expose only an anonymous global range. Next connect producer provenance to
+that range with the registered owner generation, then establish source-array
+element lifetime and actual view/submission ordering. Unchanged array addresses
+or these successful offline joins alone do not authorize N-1 vertex history.
 
 The current executable (SHA-256
 `a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`)

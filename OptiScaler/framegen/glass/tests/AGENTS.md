@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [SourceSlots.md](SourceSlots.md): Simultaneous live producer/draw capture yields 236 fully mapped candidate draws with no valid-slot conflicts; grouped lifetime/view handoff and MV remain incomplete.
+
 - [GeometryShaders.md](GeometryShaders.md): Mapped native pixel capture preserves color/depth and matches invocation counts. Live 95-pixel partial geometry image exists; complete boundary extraction remains absent.
 
 - [GeometryShaders.md](GeometryShaders.md): NativePairGpu adds analytic native pixel-MV checks; depth remains disabled in that fixture, so live pixel deployment is not approved by this result.

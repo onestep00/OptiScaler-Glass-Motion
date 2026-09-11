@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/SourceSlots.md](tests/SourceSlots.md): Live source-index candidates cover 236 simultaneous draws, including 40 cup instances; grouped lifetime/view handoff and FG motion remain incomplete.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native pixel capture produced 95 pixels/65 raster-edge pixels in a small partial chunk, visualized; original D32/color/occlusion regression passes. No full object silhouette or FG change.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native PS clip-input motion passes independent perspective comparison; depth-writing preservation and live pixel capture still pending.
