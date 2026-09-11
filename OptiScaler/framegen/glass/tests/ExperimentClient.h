@@ -10,7 +10,8 @@
 // Diagnostic client only. The resident host has no dependency on this helper.
 inline std::map<std::string, std::string> ExperimentRequest(const std::filesystem::path& directory, DWORD process,
                                                           const std::string& command,
-                                                          const std::filesystem::path& module = {})
+                                                          const std::filesystem::path& module = {},
+                                                          const std::filesystem::path& responseDirectory = {})
 {
     struct Handle
     {
@@ -46,7 +47,9 @@ inline std::map<std::string, std::string> ExperimentRequest(const std::filesyste
         if (now >= deadline) break;
         const auto remaining = deadline - now;
         if (WaitForSingleObject(response.value, DWORD(remaining)) != WAIT_OBJECT_0) break;
-        std::ifstream input(directory / "experiment.control.response", std::ios::binary);
+        // MO2 can redirect the host's writes into overwrite while reads still
+        // use the physical game directory. Do not require a host restart for it.
+        std::ifstream input((responseDirectory.empty() ? directory : responseDirectory) / "experiment.control.response", std::ios::binary);
         std::map<std::string, std::string> result;
         for (std::string line; std::getline(input, line);)
         {

@@ -20,6 +20,11 @@ using namespace GlassFg;
 HMODULE moduleIdentity = nullptr;
 constexpr unsigned SlotCount = 8, MaxInstances = 32, MaxCaptures = 64;
 constexpr uint64_t Budget = 256ull * 1024 * 1024;
+#ifdef GLASS_CAPTURE_DRAW_INSTANCES
+constexpr bool DrawInstanceDiagnostic = true;
+#else
+constexpr bool DrawInstanceDiagnostic = false;
+#endif
 void check(HRESULT result) { if (FAILED(result)) throw std::runtime_error("Coverage GPU operation failed"); }
 void barrier(ID3D12GraphicsCommandList* command, ID3D12Resource* resource,
              D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
@@ -193,7 +198,8 @@ class Coverage
         }
         csv.close(); if (!csv) throw std::runtime_error("Capture object metadata failed");
         std::ofstream meta(withSuffix(".draw"));
-        meta << "coverage_format=2\nmodule_owned=1\ntarget_binding_observations=" << observedTargets
+        meta << "coverage_format=2\nmodule_owned=1\ndraw_instance_diagnostic=" << DrawInstanceDiagnostic
+             << "\npersistent_instance_identity_proven=0\ntarget_binding_observations=" << observedTargets
              << "\ntarget_observation_point=OMSetRenderTargets\nrecording_epoch=" << slot.recording
              << "\npipeline_identity=" << slot.view.identity << "\nengine_mesh_shape=" << bool(slot.mesh.chunkAddress)
              << "\nvertices=" << slot.mesh.vertices << "\nindices=" << slot.mesh.indices
@@ -351,6 +357,20 @@ class Coverage
                     mapping[index] = { 0, 0, 0, object.generation, left, top, width, height,
                                        (status + 1) * 32, width, unsigned(slot.bytes * 8), status };
                     if (!mapping[index].validCoverage(slot.bytes / 4)) return -1;
+                }
+                if constexpr (DrawInstanceDiagnostic)
+                {
+                    // Same-draw ordinal isolation only. Never invent an engine
+                    // object identity or authorize previous-vertex history.
+                    // Generation 1 is the coverage ABI's local enable sentinel.
+                    // Engine metadata in slot.objects remains unchanged.
+                    for (unsigned index = 0; index < d->instances; ++index)
+                    {
+                        const unsigned status = index * slot.words;
+                        mapping[index] = { 0, 0, 0, 1, left, top, width, height,
+                            (status + 1) * 32, width, unsigned(slot.bytes * 8), status };
+                        if (!mapping[index].validCoverage(slot.bytes / 4)) return -1;
+                    }
                 }
                 slot.frame = event.frame; slot.job = request.job; slot.recording = request.recording; slot.draw = *d;
                 d->meshShape(d->source, &slot.mesh);

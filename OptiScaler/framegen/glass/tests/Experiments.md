@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: independent observer/in-flight checks pass; resident diagnostic host staged in MO2, live validation pending
+- Status: live hot-load/capture/unload verified; same-draw instance coverage matches; persistent multi-instance identity/MV/FG incomplete
 - Deployment: host source fc151fc staged as dxgi.dll; no new object MV correction applied
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -114,6 +114,40 @@ target against the actual saved descriptors. In-game process/view validity must
 still be checked before loading a generated selector.
 
 ## MO2 staging checkpoint
+
+### Live follow-up
+
+Game PID 56340 loaded the staged host hash below together with version.dll and
+mfg-unlock.asi. MO2 redirects response writes to overwrite/bin/x64/Glass while
+request reads use the physical game bin/x64/Glass. The external client now accepts
+`--response-directory absolute-path`; request/PID correlation remains mandatory.
+This client-only fix required no game restart.
+
+Coverage generation 1 saved and retired 29 jobs. Several multi-instance draws
+had nonempty original material coverage but zero mapped coverage. Single-instance
+samples matched. The engine adapter intentionally leaves multi-instance packet
+identities unknown, so this establishes a missing identity route rather than a
+general empty-readback failure. The 32,768-row census overflowed and had contention;
+it is not an exhaustive world-object census.
+
+A separately built `GLASS_CAPTURE_DRAW_INSTANCES` diagnostic generation saved 27
+more jobs in the same game process. It allocates coverage slots by actual draw
+instance ordinal using the original shader; it does not create persistent engine
+IDs or previous-vertex history. Output explicitly records
+`draw_instance_diagnostic=1` and `persistent_instance_identity_proven=0`.
+Engine object fields remain zero when unresolved. Generation 1 in its GPU map is
+only the coverage ABI enable sentinel; zero vertices/history forbid MV access.
+
+All 27 unions match their same-draw surviving references with zero missing/excess
+pixels. A six-instance cup draw contains 5,378 pixels across six isolated slots;
+the two large railing samples contain 45,103 and 45,417 pixels. Actual game-window
+inspection confirms their screen locations. These are per-material draw regions,
+not completed cross-material object contours or proof of stable temporal identity.
+The two DLLs unloaded after all 56 jobs retired; pending and loaded counts are zero.
+Local evidence is in outputs/glass-experiment-live-v1 and
+outputs/glass-experiment-live-instances-v2. No new object MV or FG correction was
+applied. Next work must resolve actual packet sub-instance provenance and history,
+not reuse draw ordinal as a temporal object identifier.
 
 The resident host from fc151fc is staged in MO2 `overwrite/Root/bin/x64/dxgi.dll`,
 SHA-256 `57E7BB11A91D393563156D3DE3CE666B948DD05A3F8868D22004EBC6CF0BC6ED`.

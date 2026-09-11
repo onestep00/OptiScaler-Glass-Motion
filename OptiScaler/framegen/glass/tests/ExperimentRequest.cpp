@@ -4,7 +4,7 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        if (argc < 4 || argc > 5) throw std::runtime_error("Usage: ExperimentRequest.exe PID Glass-directory load|disable|status [absolute-DLL]");
+        if (argc < 4 || argc > 7) throw std::runtime_error("Usage: ExperimentRequest.exe PID request-directory load|disable|status [absolute-DLL] [--response-directory directory]");
         size_t consumed = 0;
         const std::wstring processText = argv[1];
         const auto parsed = std::stoull(processText, &consumed);
@@ -14,8 +14,21 @@ int wmain(int argc, wchar_t** argv)
         const std::string command = wideCommand == L"load" ? "load" : wideCommand == L"disable" ? "disable" :
                                     wideCommand == L"status" ? "status" : "";
         if (command.empty()) throw std::runtime_error("Unknown experiment command");
+        int next = 4;
+        std::filesystem::path module, response;
+        if (command == "load")
+        {
+            if (next >= argc) throw std::runtime_error("Load requires an absolute DLL path");
+            module = argv[next++];
+        }
+        if (next < argc)
+        {
+            if (next + 2 != argc || std::wstring(argv[next]) != L"--response-directory")
+                throw std::runtime_error("Unexpected request arguments");
+            response = std::filesystem::absolute(argv[next + 1]);
+        }
         const auto result = ExperimentRequest(std::filesystem::absolute(argv[2]), DWORD(parsed), command,
-                                              argc == 5 ? std::filesystem::path(argv[4]) : std::filesystem::path {});
+                                              module, response);
         for (const auto& [key, value] : result) std::cout << key << '=' << value << '\n';
         return result.at("ok") == "1" ? 0 : 2;
     }
