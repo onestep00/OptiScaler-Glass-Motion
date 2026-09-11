@@ -18,7 +18,7 @@ namespace
 using Microsoft::WRL::ComPtr;
 using namespace GlassFg;
 HMODULE moduleIdentity = nullptr;
-constexpr unsigned SlotCount = 8, MaxInstances = 32, MaxCaptures = 64;
+constexpr unsigned SlotCount = 8, MaxInstances = 64, MaxCaptures = 64;
 constexpr uint64_t Budget = 256ull * 1024 * 1024;
 #ifdef GLASS_CAPTURE_DRAW_INSTANCES
 constexpr bool DrawInstanceDiagnostic = true;
@@ -342,7 +342,7 @@ class Coverage
                 slot.left = left; slot.top = top; slot.objects = {};
                 auto* mapping = static_cast<GeometryInstance*>(slot.mapping);
                 memset(mapping, 0, MaxInstances * sizeof(GeometryInstance));
-                unsigned seen = 0;
+                uint64_t seen = 0;
                 for (unsigned i = 0; i < d->objectCount; ++i)
                 {
                     GlassExperimentObject object {};
@@ -350,7 +350,7 @@ class Coverage
                         !object.generation || object.count != 1 ||
                         object.first >= d->instances) continue;
                     const auto index = object.first, status = index * slot.words;
-                    const unsigned bit = 1u << index;
+                    const uint64_t bit = uint64_t(1) << index;
                     if (seen & bit) { slot.objects[index] = {}; mapping[index] = {}; continue; }
                     seen |= bit;
                     slot.objects[index] = object;

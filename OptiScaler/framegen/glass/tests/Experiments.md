@@ -245,7 +245,7 @@ The `.done` marker is written last. This module produces no object MV.
 The DLL's same-stem `.config` contains two UTF-8 lines: the absolute DXC DLL path
 and a new absolute output directory whose parent exists. It accepts Unicode paths
 and never overwrites a previous session. Eight slots, 64 pipeline/size/instance
-selections, 32 instances per draw and a conservative 256 MiB private-buffer budget
+selections, 64 instances per draw and a conservative 256 MiB private-buffer budget
 bound this diagnostic. Failed or timed-out private GPU initialization retains
 possibly referenced resources. This is not a global budget across quarantined
 module generations or a production streaming allocation strategy.
@@ -372,3 +372,26 @@ Follow Microsoft's [LoadLibraryExW](https://learn.microsoft.com/en-us/windows/wi
 and [FreeLibrary](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-freelibrary)
 contracts. No load/unload occurs in DllMain. The existing diagnostic injector
 alone does not supply this retirement mechanism.
+
+## Close-angle cluster capture
+
+Same-process generation 3 captured 20 draws but missed the nearby cups: the raw
+census records 40-instance cup draws while the diagnostic limit was 32. Empty
+or nonoverlapping samples therefore did not establish absent scene overlap.
+The coverage DLL now accepts at most 64 instances and uses a 64-bit duplicate
+membership mask. The 256 MiB budget and 32-entry raw census sidecar remain bounded
+and unchanged; the sidecar is not full instance identity evidence.
+
+Generation 4 compiled with /W4 /WX and captured 22 draws in PID 56340 without a
+restart. Its 40-instance objects-20 union has 121,434 pixels, with 31,593 pixels
+covered by multiple instance slots, up to five. The union has zero missing/excess
+against its same-draw surviving reference. Objects-21 has 76,169 union pixels,
+15,183 overlapping pixels and up to four slots. This counts distinct diagnostic
+instance coverage, not sorted depths, persistent identities or material opacity.
+The screenshot and mask place these regions on the foreground cup table.
+Evidence: outputs/glass-experiment-live-instances64-v4/overlap.json and
+objects-20-overlap.png. Green is one slot; yellow/orange/pink/purple are 2/3/4/5.
+All 98 cumulative jobs retired and all four DLL generations unloaded; pending=0.
+No new object MV or FG correction was applied. Preserve overlap ownership before
+union-based boundary optimization; actual original source indices/history remain
+unresolved. Different captures must not be combined as if frame-correlated.

@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [Experiments.md](Experiments.md): Close-angle 40-instance cups captured after raising diagnostic capacity to 64; actual overlap up to five slots. Union/reference exact; no new MV or FG correction.
+
 - [Experiments.md](Experiments.md): Single visible instances of CPU/global clusters reject proxy-only history in production callback fixture. 19 appends/12 flushes remain forwarded; source guard not deployed.
 
 - [Experiments.md](Experiments.md): Live 56 captures across two unloaded DLL generations. MO2 response redirection fixed in external client. Diagnostic ordinal coverage is not persistent object identity or MV.
