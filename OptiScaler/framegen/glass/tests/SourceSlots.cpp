@@ -5,6 +5,29 @@
 void require(bool value) { if (!value) throw std::runtime_error("Source slot provenance failed"); }
 int main()
 {
+    using Span = GlassFg::GeometrySourceSpan;
+    // The first successful renderer is for a later source group. The renderer
+    // ordinal is zero, but its source index must remain 107, not zero or 100.
+    constexpr std::uint64_t allocation = 0x100000;
+    auto later = Span::resolve(allocation, 200 * 48, 100, 40,
+                               allocation + 107 * 48, allocation + 120 * 48, 48);
+    require(later && later.first == 107 && later.count == 13);
+    auto earlier = Span::resolve(allocation, 200 * 48, 100, 40,
+                                 allocation + 100 * 48, allocation + 107 * 48, 48);
+    require(earlier && earlier.first == 100 && earlier.count == 7);
+    require(!Span::resolve(allocation, 200 * 48, 100, 40,
+                           allocation + 99 * 48, allocation + 107 * 48, 48));
+    require(!Span::resolve(allocation, 200 * 48, 100, 40,
+                           allocation + 130 * 48, allocation + 141 * 48, 48));
+    require(!Span::resolve(allocation, 139 * 48, 100, 40,
+                           allocation + 100 * 48, allocation + 107 * 48, 48));
+    require(!Span::resolve(allocation, 200 * 48, 100, 40,
+                           allocation + 100 * 48 + 1, allocation + 107 * 48, 48));
+    require(!Span::resolve(allocation, 200 * 48, 100, 40, allocation, allocation, 48));
+    require(!Span::resolve(allocation, 200 * 48, 100, 40, allocation, allocation + 48, 0));
+    require(!Span::resolve(allocation, UINT64_MAX, UINT32_MAX, 2,
+                           allocation + std::uint64_t(UINT32_MAX) * 48,
+                           allocation + (std::uint64_t(UINT32_MAX) + 1) * 48, 48));
     GlassFg::GeometrySourceSlots<8> slots;
     using Source = decltype(slots)::Source;
     const Source a { 0x10000, 0x20000, 1, 1, 17 }, b { 0x10000, 0x20000, 1, 1, 3 };
@@ -37,6 +60,6 @@ int main()
     require(slots.resolve(fourth, 2) == replaced);
     auto invalid = slots.begin(0, 12);
     require(!slots.publish(invalid, 2, a) && !slots.seal(invalid));
-    std::cout << "PASS reorder=1 stale_submission=1 ambiguity=1 generation_passthrough=1 "
+    std::cout << "PASS skipped_source_groups=1 span_bounds=1 reorder=1 stale_submission=1 ambiguity=1 generation_passthrough=1 "
                  "allocation=0 scans_per_lookup=0 live_engine=0 motion_produced=0\n";
 }

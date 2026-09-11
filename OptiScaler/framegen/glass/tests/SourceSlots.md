@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: slot cache implemented; live array enqueue and differing upstream packing verified; lifetime/view adapter incomplete
+- Status: slot cache and checked source-span decoding implemented; node-to-proxy append path verified in resident code; lifetime/view adapter incomplete
 - Deployment: none; no motion or FG input changes
 - Deprecated: no
 - Scope: bounded CPU correspondence within one proven producer/consumer domain
@@ -38,6 +38,33 @@ Do not use the prior offline same-frame range matches alone to populate admitted
 vertex history. No production call site has been added yet.
 
 ## Producer/consumer investigation
+
+### Node-owned renderer handles and skipped source groups
+
+Red Hot Tools source at b4d341527bce19842d16a757028be901d4a2d6a8
+defines `worldInstancedMeshNodeInstance` mesh at +0xB8 and its render-proxy
+handle array at +0xE8 (`src/Red/WorldNode.hpp`). Its WorldNodeRegistry observes
+Initialize/Attach/Detach and streaming-sector destruction. These are usable
+upstream implementation references, not proof of current lifecycle integration.
+
+The audited creation functions 0x3c8508 and 0x2276c30 append a 16-byte handle to
+instance+0xE8 through 0x3c8f44 only after admission succeeds. Their enclosing
+source loops can therefore skip a group without appending a placeholder.
+Renderer array ordinal must not be used as the original source-group index.
+In PID 70152, all 1,338 bytes of these three functions and their two enclosing
+source loops matched the audited on-disk executable exactly. Read-only evidence:
+workspace `outputs/glass-node-proxy-route-v1/runtime-code-audit.json`. No hook or
+game input changed. This verifies resident code, not observed object instances.
+
+`GeometrySourceSpan::resolve` computes the original element range from the
+actual supplied span and parent allocation metadata in constant work. It never
+scans group counts or copies transforms. It rejects misalignment, empty spans,
+allocation/parent overrun and index overflow. `SourceSlots.cpp` checks a skipped
+leading group retaining source index 107 despite renderer ordinal zero, reversed
+observation order and malformed ranges. This is spatial provenance only: the
+engine caller must still supply live metadata, successful creation correspondence,
+node/buffer lifetime generations, and render-frame ordering. The helper neither
+invents a generation nor admits vertex history. Runtime hookup remains absent.
 
 ### Simultaneous live producer and draw checkpoint
 

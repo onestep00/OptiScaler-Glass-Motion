@@ -5,6 +5,39 @@
 
 namespace GlassFg
 {
+// Spatial provenance only: the caller supplies a live parent allocation/range
+// and the exact span passed to the successful renderer creation. Never infer
+// lifetime, frame identity or source group number from these addresses.
+struct GeometrySourceSpan
+{
+    std::uint32_t first = 0, count = 0;
+    explicit operator bool() const { return count != 0; }
+
+    static GeometrySourceSpan resolve(std::uint64_t allocation, std::uint64_t allocationBytes,
+                                      std::uint32_t parentFirst, std::uint32_t parentCount,
+                                      std::uint64_t begin, std::uint64_t end,
+                                      std::uint32_t stride) noexcept
+    {
+        if (!allocation || allocationBytes > UINT64_MAX - allocation ||
+            !stride || !parentCount || begin < allocation || end <= begin)
+            return {};
+        // Subtraction-based bounds checks avoid wrapping a pointer endpoint.
+        const auto offset = begin - allocation, bytes = end - begin;
+        if (offset > allocationBytes || bytes > allocationBytes - offset ||
+            offset % stride || bytes % stride) return {};
+        const auto first = offset / stride, count = bytes / stride;
+        constexpr std::uint64_t indexLimit = std::uint64_t {1} << 32;
+        if (std::uint64_t(parentFirst) + parentCount > indexLimit ||
+            first < parentFirst || first - parentFirst >= parentCount ||
+            count > parentCount - (first - parentFirst) || count >= indexLimit)
+            return {};
+        // Also validate the complete declared parent range, not just the child.
+        if ((std::uint64_t(parentFirst) + parentCount) * stride > allocationBytes)
+            return {};
+        return {static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(count)};
+    }
+};
+
 // CPU-only handoff for one externally ordered producer/consumer domain.
 // The caller must prove view/submission scope and owner/array generations.
 // This class neither discovers those generations nor makes indices persistent.
