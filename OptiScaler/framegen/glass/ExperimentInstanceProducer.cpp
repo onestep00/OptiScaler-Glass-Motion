@@ -26,13 +26,22 @@ std::atomic<unsigned> active = 0, used = 0, dropped = 0;
 bool installed = false;
 std::mutex control;
 std::filesystem::path output;
-struct Scope { std::uint64_t proxy = 0, group = 0; unsigned frame = 0; };
+struct Scope
+{
+    std::uint64_t proxy = 0, group = 0;
+    unsigned frame = 0;
+    std::uint64_t outerContext = 0, producerContext = 0;
+};
 thread_local Scope* current = nullptr;
 struct Row
 {
     std::uint64_t proxy = 0, mesh = 0, group = 0, sourceArray = 0, sourceIndices = 0;
     Selection::Descriptor descriptor {};
     unsigned frame = 0, ownerSlot = 0, originalCount = 0, valid = 0;
+    // Raw producer provenance, not an admitted view or submission identity.
+    std::uint64_t outerContext = 0, producerContext = 0;
+    std::array<std::uint64_t, 3> producerHeader {};
+    bool producerHeaderValid = false;
     std::array<unsigned, 64> indices {};
 };
 std::array<Row, 4096> rows;
@@ -55,6 +64,8 @@ unsigned char outer(void* a, void* b, void* c, std::uint64_t d)
     }
     active.fetch_add(1, std::memory_order_acq_rel);
     Scope local { reinterpret_cast<std::uint64_t>(a), 0, *tick };
+    local.outerContext = reinterpret_cast<std::uint64_t>(b);
+    local.producerContext = reinterpret_cast<std::uint64_t>(c);
     auto* previous = current;
     current = enabled.load(std::memory_order_acquire) ? &local : nullptr;
     const auto result = originalOuter(a, b, c, d);
@@ -79,6 +90,12 @@ void observe(void* owner, void* descriptor)
         !current->group || current->frame != *tick) return;
     Row row;
     row.proxy = current->proxy; row.group = current->group; row.frame = current->frame;
+    row.outerContext = current->outerContext; row.producerContext = current->producerContext;
+    // Three scalar fields: renderer, destination family and scene context in
+    // the audited callers. Do not retain a borrowed stack header for later use.
+    if (row.producerContext)
+        row.producerHeaderValid = read(row.producerContext, row.producerHeader.data(), sizeof(row.producerHeader));
+    if (!row.producerHeaderValid) row.producerHeader = {};
     current->group = 0; // One producer call consumes one explicitly observed group.
     if (!read(reinterpret_cast<std::uint64_t>(descriptor), &row.descriptor, sizeof(row.descriptor)) ||
         !row.descriptor.count || row.descriptor.count > row.indices.size() ||
@@ -170,7 +187,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
         while (active.load(std::memory_order_acquire) && GetTickCount64() < deadline) Sleep(1);
         if (active || output.empty()) return 1;
         std::ofstream file(output / "source-indices.csv");
-        file << "frame,proxy,mesh,owner_slot,group,source_array,source_indices,original_count,global_start,first,count,valid,ordinal,source_index\n";
+        file << "frame,proxy,mesh,owner_slot,group,source_array,source_indices,original_count,global_start,first,count,valid,ordinal,source_index,outer_context,producer_context,producer_0,producer_8,producer_16,producer_header_valid\n";
         const auto count = (std::min)(used.load(), unsigned(rows.size()));
         for (unsigned i = 0; i < count; ++i)
         {
@@ -179,7 +196,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
                 file << row.frame << ',' << row.proxy << ',' << row.mesh << ',' << row.ownerSlot << ',' << row.group << ','
                      << row.sourceArray << ',' << row.sourceIndices << ',' << row.originalCount << ','
                      << row.descriptor.globalStart << ',' << row.descriptor.first << ',' << row.descriptor.count << ','
-                     << row.valid << ',' << j << ',' << row.indices[j] << '\n';
+                     << row.valid << ',' << j << ',' << row.indices[j] << ',' << row.outerContext << ','
+                     << row.producerContext << ',' << row.producerHeader[0] << ',' << row.producerHeader[1] << ','
+                     << row.producerHeader[2] << ',' << row.producerHeaderValid << '\n';
         }
         file.close(); if (!file) return 2;
         std::ofstream(output / "status.txt") << "rows=" << count << "\ndropped=" << dropped.load()

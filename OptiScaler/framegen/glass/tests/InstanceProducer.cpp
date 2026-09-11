@@ -47,10 +47,16 @@ int main()
     require(outer(proxyData.data(), nullptr, nullptr, 1) == 19);
     require(used == 1 && active == 0 && current == nullptr && forwards == 2);
     require(rows[0].valid == 1 && rows[0].indices[0] == 39 && rows[0].indices[39] == 0);
+    require(!rows[0].producerHeaderValid);
+    std::array<std::uint64_t, 3> header { 0x20000, 0x30000, 0x40000 };
+    require(outer(proxyData.data(), groupData.data(), header.data(), 1) == 19);
+    require(used == 2 && rows[1].producerHeaderValid && rows[1].producerHeader == header);
+    require(rows[1].outerContext == reinterpret_cast<std::uint64_t>(groupData.data()));
+    require(rows[1].producerContext == reinterpret_cast<std::uint64_t>(header.data()));
     Scope scope { reinterpret_cast<std::uint64_t>(proxyData.data()),
                   reinterpret_cast<std::uint64_t>(groupData.data()), testTick };
     current = &scope; ++testTick;
-    observe(proxyData.data(), &testDescriptor); require(used == 1);
+    observe(proxyData.data(), &testDescriptor); require(used == 2);
     current = nullptr; enabled = false;
     std::cout << "PASS current_group_direct=1 wrong_caller_rejected=1 nested_scope=1 consumed_once=1 "
                  "frame_mismatch_rejected=1 original_return_preserved=1 game_hooks_installed=0\n";

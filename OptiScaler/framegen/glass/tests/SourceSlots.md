@@ -36,3 +36,22 @@ Before runtime use, connect actual producer view/submission provenance and
 registered owner lifetime plus verified source-array identity to this handoff.
 Do not use the prior offline same-frame range matches alone to populate admitted
 vertex history. No production call site has been added yet.
+
+## Producer/consumer investigation
+
+The current executable (SHA-256
+`a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`)
+has four statically validated direct callers of the observed draw-run function.
+The run function copies each 16-byte packet to its stack before calling append.
+Consequently the append packet address cannot identify the original producer
+allocation. The caller can also partition a packet array among jobs; neither a
+worker stack address nor a packet ordinal is a persistent object identifier.
+
+The standalone producer diagnostic now records the outer context, the producer
+context address and its first three pointer-sized fields with a read-valid flag.
+The audited constructor in one producer caller supplies renderer, destination
+family and scene context in these fields. Other routes still need corroboration.
+The CPU fixture verifies header capture and missing-header handling. This source
+change has not been loaded into the game: the older observer is pinned and cannot
+be replaced through the coverage-module unload mechanism. No view identity or
+runtime cache admission follows from these raw fields yet.
