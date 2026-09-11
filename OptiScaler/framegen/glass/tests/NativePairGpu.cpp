@@ -135,6 +135,16 @@ int wmain(int argc, wchar_t** argv)
         pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
         pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS;
         pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+        const auto mrtPs=read(std::filesystem::path(argv[1])/"native-mrt-ps.dxil");
+        pd.PS={mrtPs.data(),mrtPs.size()}; pd.NumRenderTargets=3;
+        pd.RTVFormats[1]=pd.RTVFormats[2]=pd.RTVFormats[0];
+        pd.DSVFormat=DXGI_FORMAT_D24_UNORM_S8_UINT;
+        pd.DepthStencilState.StencilEnable=TRUE;
+        pd.DepthStencilState.StencilReadMask=pd.DepthStencilState.StencilWriteMask=255;
+        pd.DepthStencilState.FrontFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_REPLACE,D3D12_COMPARISON_FUNC_ALWAYS};
+        pd.DepthStencilState.BackFace=pd.DepthStencilState.FrontFace;
+#endif
         ComPtr<ID3D12PipelineState> depthOriginal,depthCaptured;
         check(g.d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&depthOriginal)));
         GlassFg::GeometryRoot mappedRoot;
@@ -155,7 +165,7 @@ int wmain(int argc, wchar_t** argv)
             0,0,16,16,288,16,1024,544};
         upload(pixelConstants.Get(),&coverageConstants,sizeof(coverageConstants));
 #endif
-        auto depthDesc=td; depthDesc.Format=DXGI_FORMAT_D32_FLOAT;
+        auto depthDesc=td; depthDesc.Format=pd.DSVFormat;
         depthDesc.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         ComPtr<ID3D12Resource> depth;
         check(g.d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&depthDesc,D3D12_RESOURCE_STATE_DEPTH_WRITE,nullptr,IID_PPV_ARGS(&depth)));
@@ -170,12 +180,36 @@ int wmain(int argc, wchar_t** argv)
         const UINT64 stride=(lengths[0]+511)&~UINT64(511);
         const UINT64 variantBytes=(stride+lengths[1]+511)&~UINT64(511);
         auto comparison=g.buffer(variantBytes*2,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+        ComPtr<ID3D12Resource> extraColor[2]; ComPtr<ID3D12DescriptorHeap> mrtHeap;
+        D3D12_DESCRIPTOR_HEAP_DESC mrtHd{}; mrtHd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV; mrtHd.NumDescriptors=3;
+        check(g.d->CreateDescriptorHeap(&mrtHd,IID_PPV_ARGS(&mrtHeap)));
+        D3D12_CPU_DESCRIPTOR_HANDLE mrtViews[3];
+        const auto increment=g.d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        for(unsigned i=0;i<3;++i) {
+            mrtViews[i]={mrtHeap->GetCPUDescriptorHandleForHeapStart().ptr+i*increment};
+            if(i) check(g.d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&extraColor[i-1])));
+            g.d->CreateRenderTargetView(i?extraColor[i-1].Get():color.Get(),nullptr,mrtViews[i]);
+        }
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT extraFootprints[3]; UINT64 extraLengths[3],extraOffsets[3]; UINT64 extraStride=0;
+        for(unsigned i=0;i<3;++i) {
+            extraOffsets[i]=extraStride;
+            g.d->GetCopyableFootprints(i==2?&depthDesc:&td,i==2?1:0,1,0,&extraFootprints[i],nullptr,nullptr,&extraLengths[i]);
+            extraStride+=(extraLengths[i]+511)&~UINT64(511);
+        }
+        auto extraReadback=g.buffer(extraStride*2,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
+#endif
         for(unsigned variant=0;variant<2;++variant) {
             g.begin();
             const float clearColor[4]{}; const D3D12_RECT occluder{0,0,8,16};
             g.c->ClearRenderTargetView(rtv,clearColor,0,nullptr);
             g.c->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
             g.c->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,.25f,0,1,&occluder);
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+            for(unsigned i=1;i<3;++i) g.c->ClearRenderTargetView(mrtViews[i],clearColor,0,nullptr);
+            g.c->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_STENCIL,0,0x2b,0,nullptr);
+            g.c->OMSetStencilRef(0x5a);
+#endif
             g.c->SetGraphicsRootSignature(variant?mappedRoot.extended.Get():original.Get());
             g.c->SetPipelineState(variant?depthCaptured.Get():depthOriginal.Get());
             if(variant) {
@@ -191,6 +225,9 @@ int wmain(int argc, wchar_t** argv)
             }
             g.c->RSSetViewports(1,&viewport); g.c->RSSetScissorRects(1,&scissor);
             g.c->OMSetRenderTargets(1,&rtv,FALSE,&dsv);
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+            g.c->OMSetRenderTargets(3,mrtViews,FALSE,&dsv);
+#endif
             g.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             g.c->DrawInstanced(3,1,0,0);
             for(unsigned resource=0;resource<2;++resource) {
@@ -203,6 +240,17 @@ int wmain(int argc, wchar_t** argv)
                 g.c->CopyTextureRegion(&to,0,0,0,&from,nullptr);
                 g.barrier(source,D3D12_RESOURCE_STATE_COPY_SOURCE,state);
             }
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+            for(unsigned i=0;i<3;++i) {
+                auto* resource=i==2?depth.Get():extraColor[i].Get();
+                const auto state=i==2?D3D12_RESOURCE_STATE_DEPTH_WRITE:D3D12_RESOURCE_STATE_RENDER_TARGET;
+                g.barrier(resource,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION from{},to{}; from.pResource=resource; from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; from.SubresourceIndex=i==2?1:0;
+                to.pResource=extraReadback.Get(); to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint=extraFootprints[i];
+                to.PlacedFootprint.Offset=variant*extraStride+extraOffsets[i];
+                g.c->CopyTextureRegion(&to,0,0,0,&from,nullptr); g.barrier(resource,D3D12_RESOURCE_STATE_COPY_SOURCE,state);
+            }
+#endif
             if(variant) {
                 g.barrier(pixels.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
                 g.c->CopyBufferRegion(pixelBack.Get(),0,pixels.Get(),0,pixelBytes);
@@ -238,6 +286,23 @@ int wmain(int argc, wchar_t** argv)
             }
         }
         require(visible>0 && visible<count,"Occlusion test did not remove pixels");
+#ifdef GLASS_TEST_DEPTH_COVERAGE
+        void* extraData=nullptr; D3D12_RANGE extraRange{0,SIZE_T(extraStride*2)};
+        check(extraReadback->Map(0,&extraRange,&extraData));
+        const auto* extraBytes=static_cast<const unsigned char*>(extraData);
+        for(unsigned i=0;i<3;++i) for(unsigned y=0;y<16;++y) {
+            const auto offset=extraOffsets[i]+y*extraFootprints[i].Footprint.RowPitch;
+            require(!memcmp(extraBytes+offset,extraBytes+extraStride+offset,16*(i==2?1:16)),"Coverage changed MRT or stencil plane");
+        }
+        require(extraFootprints[2].Footprint.Format==DXGI_FORMAT_R8_TYPELESS,"Unexpected stencil copy format");
+        for(unsigned y=0;y<16;++y) for(unsigned x=0;x<16;++x) {
+            const auto* rgba=reinterpret_cast<const float*>(compared+y*footprints[0].Footprint.RowPitch);
+            const auto stencil=extraBytes[extraOffsets[2]+y*extraFootprints[2].Footprint.RowPitch+x];
+            require(stencil==(rgba[x*4+3]!=0?0x5a:0x2b),"Stencil writes did not follow visible geometry");
+        }
+        extraReadback->Unmap(0,&noWrite);
+        puts("DEPTH_COVERAGE_MRT_STENCIL_OK three_colors_and_stencil_plane");
+#endif
         const auto* auditWords=static_cast<const uint32_t*>(pixelData);
 #ifdef GLASS_TEST_DEPTH_COVERAGE
         require(auditWords[0]==0,"Depth coverage status mismatch");

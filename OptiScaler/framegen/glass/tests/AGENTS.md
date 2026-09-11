@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [SourceBootstrap.md](SourceBootstrap.md): NativePairGpu GLASS_TEST_DEPTH_COVERAGE verifies original color/D32 and exact occluded masks; native-motion regression passes. Stencil/MRT and live new-mode validation pending.
+- [SourceBootstrap.md](SourceBootstrap.md): NativePairGpu depth coverage checks three colors, depth and actual stencil values. Live capture produces exact per-instance/reference union for one partial chunk; full silhouette/FG absent.
 
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 

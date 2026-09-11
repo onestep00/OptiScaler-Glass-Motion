@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Unblended depth-writing coverage preserves original color/D32 and matches three masks on GPU. Stencil/MRT tests and live deployment remain; array history/FG incomplete.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): MRT/depth/stencil GPU checks pass; live depth-writing capture separates two instance masks totaling 2,396 pixels. Full outlines and temporal/FG integration remain incomplete.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 

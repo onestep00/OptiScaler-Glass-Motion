@@ -177,3 +177,32 @@ This test does not yet exercise stencil writes, which the current game pipeline
 uses, or independently verify multi-target preservation for this new mode.
 Those checks remain before live deployment. No running game module was replaced
 by this implementation and no FG input changed.
+
+### MRT/stencil verification and live deployment
+
+The extended depth-coverage fixture now renders three distinct color outputs,
+D24 depth and stencil replacement. All three colors, depth and the separate
+stencil plane match the original draw. Stencil equals 0x5A at visible pixels and
+retains 0x2B elsewhere; all three coverage masks match visible color. The initial
+test assumed a packed stencil copy format; the observed footprint is R8_TYPELESS.
+The corrected test compares only the 16 meaningful stencil bytes per row and
+checks actual stencil values. Build and GPU test pass. Compile
+NativePairPixel.hlsl with GLASS_TEST_MRT to native-mrt-ps.dxil alongside the
+existing fixture files, and compile NativePairGpu with GLASS_TEST_DEPTH_COVERAGE.
+
+The updated combined vertex/coverage module was built and loaded into PID 70152
+without restart. The first selected eight-instance draw recorded 64 GPU jobs;
+all coverage regions and references were zero, although vertex tags were valid.
+This is not successful silhouette acquisition. A second draw on the same prepared
+pipeline, with two instances and 3,492 indices, recorded 64 jobs, 55 nonempty.
+One selected frame has 1,001 and 1,395 pixels in its separate instance masks.
+Their union has 2,396 pixels and exactly matches the contributing reference.
+All instance status words are zero. The displayed raster consists of a small,
+partially visible chunk, not a complete object outline or verified transparent
+material classification. The first draw's empty coverage is still unresolved.
+
+All 128 jobs retired, both modules unloaded, and the game remained responding.
+FG input is unchanged. Evidence and per-instance visualization:
+`work/glass-array-depth-coverage-v{1,2}/`; v2 has `coverage-analysis.json` and
+`actual-instance-coverage.png`. The original shader/state preservation is from
+the independent GPU fixture; no live before/after color comparison was performed.
