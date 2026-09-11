@@ -83,3 +83,24 @@ RTTI locator immediately before it; nearby strings must not be used as a type
 name. The next observation point is this virtual enqueue call and its input
 span producer, not another scan of the destination transform array. The call
 path is static evidence only and has not been hooked or correlated live.
+
+## Bounded live enqueue observation
+
+`ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
+OptiScaler build. It records at most 4,096 calls with the caller, context, input
+address and 144-byte input header. It copies no pointed-to transform arrays or
+GPU buffers. Complete expected enqueue function bytes guard installation from a
+local profile. Stop disables recording and retains the forwarding hook/module
+until game exit. This is not the unloadable coverage experiment ABI.
+
+MSVC `/W4 /WX` DLL build and the owned-memory `InstanceUpdates.cpp` checks passed.
+The fixture covers header capture, missing input, bounded stop and return-value
+preservation. The live DLL hash was
+`f3c24a0cc3cd64c739185057c9173a7714e8bb25cb206732c6472f21b6488939`.
+In game PID 56340, explicit Start and Save returned zero and Save reported
+`recording=0`. All 4,096 captured headers were readable, across 3,196 owner
+pointers. Three actual return sites were observed: 1,016 at RVA 0x1e5f04,
+2,521 at 0x237a1b and 559 at 0x1e5ebe. Their caller bodies were then inspected.
+The sampled input spans contained no 48-byte array updates. This observation
+does not establish array element identity or array-update frequency generally;
+the capture stopped at its bound. No geometry MV or FG inputs were changed.
