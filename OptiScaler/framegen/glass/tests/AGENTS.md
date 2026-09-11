@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Native-pair live capture and N-1 vertex comparison verified for one draw; screen boundary and FG input still absent.
+
 - [GeometryShaders.md](GeometryShaders.md): NativePairGpu verifies selected native outputs, perspective W, jitter distinction, tags and guards; recorder builds. Actual game pair/boundary capture remains incomplete.
 
 - [GeometryObservation.md](GeometryObservation.md): DXIL native-request fixture verifies DLL-worker request, deduplication, prepared indexed-owner dispatch and stopped rejection. Recorded draw is not submitted.

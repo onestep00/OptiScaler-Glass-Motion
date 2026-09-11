@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Live native pair captures 9,536 vertices; 47 consecutive pairs agree within 0.000153 px. No dense boundary raster or FG substitution; module unloaded.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native clip-pair recorder preserves full current/previous W in 64-byte records; independent GPU/old regression pass. Built replaceable DLL is not deployed; no dense game boundary MV.
 
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Replaceable DLL requests selected native vertex preparation on its worker; prepared entry reaches indexed capture owner in an independent test. No game deployment or native MV capture.

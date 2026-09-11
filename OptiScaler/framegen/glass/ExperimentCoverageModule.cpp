@@ -99,6 +99,7 @@ class Coverage
     ExperimentCensusLog census;
     ExperimentCaptureSelection selection;
     VertexClipPair clipPair {};
+    uint64_t nativePipeline = 0;
     uint64_t selectionAccepted = 0, selectionRejected = 0;
     std::array<Slot, SlotCount> slots;
     struct Selection { uint64_t pipeline; unsigned width, height, instances; };
@@ -354,8 +355,8 @@ class Coverage
     }
   public:
     Coverage(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o, ExperimentCaptureSelection select,
-             VertexClipPair pair)
-        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select), clipPair(pair)
+             VertexClipPair pair, uint64_t selectedPipeline)
+        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select), clipPair(pair), nativePipeline(selectedPipeline)
     {
         if (!d || !compiler.is_absolute() || !std::filesystem::is_regular_file(compiler) || !output.is_absolute() ||
             !std::filesystem::create_directory(output)) throw std::runtime_error("Invalid capture module paths");
@@ -414,7 +415,8 @@ class Coverage
             !d->instances || d->instances > MaxInstances || !d->objectAt || !d->meshShape || d->objectCount > 4096 ||
             !d->pipelineIdentity || !d->pipelineAccess.retain || !d->pipelineAccess.view || !d->pipelineAccess.release)
             return 0;
-        if (!selection.matches(*d)) { ++selectionRejected; return 0; }
+        if ((NativePairDiagnostic && d->pipelineIdentity != nativePipeline) || !selection.matches(*d))
+        { ++selectionRejected; return 0; }
         ++selectionAccepted;
         for (unsigned i = 0; i < 4; ++i)
             if (!std::isfinite(d->viewport[i]) || d->viewport[i] < 0 || d->viewport[i] > 32768 ||
@@ -573,12 +575,15 @@ int32_t create(const GlassExperimentHost* host, void** context)
             if (!select.empty() && select.back() == '\r') select.pop_back();
         }
         VertexClipPair pair {};
+        uint64_t selectedPipeline = 0;
         if constexpr (NativePairDiagnostic)
         {
             std::string line, marker, extra;
             if (!std::getline(file, line)) return -1;
             std::istringstream fields(line);
-            if (!(fields >> marker >> pair.currentOutput >> pair.previousOutput) || marker != "clip-pair-v1" ||
+            uint32_t process = 0;
+            if (!(fields >> marker >> process >> selectedPipeline >> pair.currentOutput >> pair.previousOutput) ||
+                marker != "clip-pair-v1" || process != GetCurrentProcessId() || !selectedPipeline ||
                 (fields >> extra) || pair.currentOutput == pair.previousOutput ||
                 pair.currentOutput >= 32 || pair.previousOutput >= 32) return -1;
         }
@@ -586,7 +591,7 @@ int32_t create(const GlassExperimentHost* host, void** context)
         *context = new Coverage(static_cast<ID3D12Device*>(host->device),
             std::filesystem::path(std::u8string(compiler.begin(), compiler.end())),
             std::filesystem::path(std::u8string(output.begin(), output.end())),
-            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()), pair);
+            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()), pair, selectedPipeline);
         return 0;
     }
     catch (...) { return -1; }

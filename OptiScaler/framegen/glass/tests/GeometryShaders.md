@@ -9,6 +9,27 @@
 
 ## Implemented source
 
+Live native-pair checkpoint: host SHA-256
+`31b145045ee78ed31a041b25066bf1737d615100e46eabd8fd4c6b10722c1853`
+was deployed through MO2 and loaded in PID 68908 together with the existing MFG
+ASI. The bindings recorder observed the original native VS `7193f0d2...`; worker
+preparation was accepted and later census exposed its prepared identity 955.
+The replaceable pair recorder then completed 64 captures / 9,536 valid vertices
+over engine frames 8242--8321, with one unchanged recorded proxy/mesh/slot/
+generation/chunk tuple. All full current/previous clips were finite with positive
+W. Forty-seven consecutive capture pairs compared each native previous NDC with
+the preceding captured native current NDC; maximum displacement disagreement was
+0.0001528 render pixels. This supports N-1 correspondence for this observed draw,
+not all transparent objects or FG-frame equivalence.
+
+Evidence is local `work/glass-native-pair-live-v1/analysis.json` and `capture/`.
+Its 149 vertices occupy a small moving screen region. No triangle topology,
+material boundary raster or new FG input was captured by this recorder. It is
+not the requested dense boundary MV image. All 64 jobs retired and generation 4
+unloaded with zero pending. MO2's `overwrite/bin/x64/Glass` request file shadows
+the physical request file in this run; both request and response use that actual
+redirected directory, avoiding a needless game restart.
+
 `VertexClipPair` optionally captures two explicitly audited native VS float4
 outputs, preserving their full clip W. Output IDs come from the selected original
 shader, not a material or driver whitelist. Unpacked float4 signatures and unique
@@ -24,8 +45,9 @@ necessary for subsequent perspective-correct rasterization; vertex NDC XY alone
 is not a sufficient substitute. No boundary raster is implemented by recording.
 
 `GLASS_CAPTURE_NATIVE_PAIR` builds the replaceable recorder with this layout.
-After compiler/output/selection config lines it requires `clip-pair-v1 4 5`,
-where the numbers are the audited output IDs for the selected shader. The example
+After compiler/output/selection config lines it requires
+`clip-pair-v1 CURRENT_PID PREPARED_PIPELINE_ID 4 5`. It rejects other pipelines
+before any capture allocation. The final numbers are audited output IDs. The example
 is specific to the two locally inspected native MeshStatic VS variants, not a
 generic detector. The `.draw` file declares format 3 and both selected IDs/offsets.
 Allocation accounting, history capacity, retirement and saved byte lengths use
