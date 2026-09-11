@@ -133,3 +133,24 @@ retired, the modules unloaded, and PID 70152 remained responding.
 The next missing component is original-material coverage for this depth/blend
 path, then ordered GPU-resident previous geometry. The native-pair route above
 must not be treated as a substitute for the array route.
+
+## Observed array-pipeline rejection
+
+The binding recorder now writes `pipeline-states.csv` from retained original
+PSO descriptors at Save, with no additional per-draw reads or GPU copies.
+Live PID 70152 / pipeline 1376 reports three targets, one sample, triangle
+topology, depth enabled with ALL writes and GREATER_EQUAL comparison, stencil
+enabled with write mask 255, and blending/logic/alpha-to-coverage disabled.
+The eight-target loop respects IndependentBlendEnable when selecting factors.
+
+These states fail both the read-only depth predicate and the blend-equation
+classifier in generic material coverage. Therefore the captured RT values must
+not be interpreted as a final transparent alpha/transmittance equation. This
+does not establish whether the final material appearance is opaque or transparent.
+The original PS contains no discard call. Native capture already has a separate
+no-discard, side-effect-free path preserving original attachments; a general
+coverage-only adaptation still needs depth/stencil and original-output tests.
+No guard was relaxed in this checkpoint. Local evidence:
+`work/glass-array-states-v1/capture/pipeline-states.csv` and the captured PS in
+`work/glass-array-native-bindings-v1/ps.ll`. The recording module unloaded and
+the game remained responding.

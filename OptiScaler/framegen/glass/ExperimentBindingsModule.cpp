@@ -126,10 +126,24 @@ class Recorder
         bindings << "sequence,frame,recording,pipeline,mesh,chunk,draw_count,instances,slot,type,gpu_address,known_constants\n";
         constants << "sequence,slot,word,value\n";
         layouts << "pipeline,slot,type,visibility,range,register,space,count,offset\n";
+        std::ofstream states(output / "pipeline-states.csv");
+        states << "pipeline,targets,samples,topology,depth_enable,depth_write,depth_func,stencil_enable,stencil_write,alpha_to_coverage,independent_blend,target,blend,logic,src,dst,op,src_alpha,dst_alpha,alpha_op,write_mask\n";
         for (unsigned i = 0; i < pipelineCount; ++i)
         {
             const auto& p = pipelines[i];
             const auto& d = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(p.view.descriptor);
+            for (unsigned target = 0; target < d.NumRenderTargets && target < 8; ++target)
+            {
+                const auto& b = d.BlendState.RenderTarget[d.BlendState.IndependentBlendEnable ? target : 0];
+                const auto& z = d.DepthStencilState;
+                states << p.identity << ',' << d.NumRenderTargets << ',' << d.SampleDesc.Count << ','
+                       << d.PrimitiveTopologyType << ',' << z.DepthEnable << ',' << z.DepthWriteMask << ','
+                       << z.DepthFunc << ',' << z.StencilEnable << ',' << unsigned(z.StencilWriteMask) << ','
+                       << d.BlendState.AlphaToCoverageEnable << ',' << d.BlendState.IndependentBlendEnable << ','
+                       << target << ',' << b.BlendEnable << ',' << b.LogicOpEnable << ',' << b.SrcBlend << ','
+                       << b.DestBlend << ',' << b.BlendOp << ',' << b.SrcBlendAlpha << ',' << b.DestBlendAlpha << ','
+                       << b.BlendOpAlpha << ',' << unsigned(b.RenderTargetWriteMask) << '\n';
+            }
             if (p.view.serializedRoot && p.view.serializedRootBytes)
             {
                 std::ofstream file(output / (std::to_string(p.identity) + ".root.bin"), std::ios::binary);
@@ -175,8 +189,8 @@ class Recorder
                     if (b.knownConstants & (uint64_t {1} << word)) constants << r.sequence << ',' << slot << ',' << word << ',' << b.constants[word] << '\n';
             }
         }
-        bindings.close(); constants.close(); layouts.close(); draws.close();
-        if (!bindings || !constants || !layouts || !draws) throw std::runtime_error("Binding write failed");
+        bindings.close(); constants.close(); layouts.close(); draws.close(); states.close();
+        if (!bindings || !constants || !layouts || !draws || !states) throw std::runtime_error("Binding write failed");
         std::ofstream done(output / "bindings.done");
         done << "format=1\nrows=" << count << "\npipelines=" << pipelineCount << "\ndropped=" << dropped.load()
              << "\nrow_storage_bytes=" << Capacity * sizeof(Row)

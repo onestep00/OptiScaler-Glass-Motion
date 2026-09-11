@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [SourceBootstrap.md](SourceBootstrap.md): Recorded source indices join actual array VS output; sparse motion plotted from 16 consecutive instance pairs. View/mutation admission and complete material coverage remain incomplete.
+- [SourceBootstrap.md](SourceBootstrap.md): Recorded source indices join actual array VS output. Pipeline-state export identifies both depth and blend admission failures; view/mutation and complete material coverage remain incomplete.
 
 - [CoverageLayout.md](CoverageLayout.md): Packed mask layout passes CPU and original-material GPU checks, including inactive entries and escaped bounds. Runtime bounds/MV integration remains absent.
 

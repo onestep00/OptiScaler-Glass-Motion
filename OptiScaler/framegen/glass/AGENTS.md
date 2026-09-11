@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Array source indices join actual eight-instance VS captures across three frames; 16 consecutive instance pairs. Material coverage guard rejects this path; production history/FG remain absent.
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Array VS/source correspondence observed. Live PSO metadata identifies depth/stencil writes and disabled blending as coverage rejection causes; coverage adaptation and production history/FG remain absent.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.
 
