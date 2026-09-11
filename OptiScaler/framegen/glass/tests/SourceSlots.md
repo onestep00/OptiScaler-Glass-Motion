@@ -104,3 +104,16 @@ pointers. Three actual return sites were observed: 1,016 at RVA 0x1e5f04,
 The sampled input spans contained no 48-byte array updates. This observation
 does not establish array element identity or array-update frequency generally;
 the capture stopped at its bound. No geometry MV or FG inputs were changed.
+
+An exploratory comparison with the earlier draw census found 548 overlapping
+owner addresses across 318 meshes. Only 148 entries had known prepared pipeline
+identities (854, 859, 931). These are different-time address overlaps without
+lifetime verification, not admitted object correspondences. The earlier captured
+VS for each of those three pipelines was disassembled: all use skinning inputs;
+931 has two sets of blend indices/weights. Existing `GeometryShaderTool`
+`rewrite-mapped` successfully assembled and DXIL-validated all three recorded VS
+with the actual-position history instrumentation. This establishes shader-format
+compatibility only. It does not prove same-frame ownership, GPU history ordering,
+complete material coverage or FG input substitution. The next runtime capture
+must connect registered single-object identities and consecutive original VS
+outputs, while grouped-array identity work remains in scope.

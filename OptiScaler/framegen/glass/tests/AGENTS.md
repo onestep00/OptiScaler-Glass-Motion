@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [SourceSlots.md](SourceSlots.md): Live enqueue probe captured 4,096 updates and three caller sites, then stopped. No array updates in that sample. Direct slot handoff is CPU-tested; view/lifetime and MV/FG integration remain absent.
+- [SourceSlots.md](SourceSlots.md): Live enqueue probe stopped after 4,096 updates; three associated recorded skinning VS accept history instrumentation. Cross-time owner overlaps are not admitted identity; live MV/FG integration remains absent.
 
 - [Experiments.md](Experiments.md): Actual array setter identified; same pointer/count does not prove unchanged content. Secondary +0x158 array absent in 1,214 live owner snapshots and not admitted as previous history.
 
