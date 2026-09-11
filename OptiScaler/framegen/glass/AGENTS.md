@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Bounded two-slot shape sampling yielded two exact consecutive original-VS pairs. No continuous history, dense boundary MV or FG substitution.
+
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Bounded observation and failed-material to vertex-only recovery pass independent checks without duplicate shader storage. Missing live mesh-chunk pipeline, host deployment and FG remain incomplete.
 
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped slots no longer all fill from the first chunk. Both chunks captured in 32 live frames; differing proxy identities remain separate. Complete outlines and temporal/FG remain incomplete.

@@ -580,10 +580,14 @@ class Coverage
                     (!NativePixelDiagnostic || (selected[i].mesh == d->mesh && selected[i].chunk == d->chunk))) return 0;
         if (selections == MaxCaptures) return 0;
         if (selection.meshOnly)
+        {
+            unsigned shapeSlots = 0;
             for (const auto& slot : slots)
                 if (slot.state != Slot::Empty && slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk &&
                     slot.width == width && slot.height == height && slot.instances == d->instances &&
-                    selected[slot.index].pipeline == d->pipelineIdentity) return 0;
+                    selected[slot.index].pipeline == d->pipelineIdentity) ++shapeSlots;
+            if (shapeSlots >= 2) return 0; // Two prepared samples permit exact N-1 comparison.
+        }
         for (auto& slot : slots) if (slot.state == Slot::Empty)
         {
             const unsigned words = unsigned(1 + (uint64_t(width) * height + 31) / 32);

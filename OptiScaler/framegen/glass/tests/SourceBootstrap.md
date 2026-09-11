@@ -250,3 +250,16 @@ visualization has 705 pixels for one proxy and two pixels for the other. It is
 original-material coverage, not complete object contours or motion. No new MV or
 FG substitution occurred. Evidence: `work/glass-multichunk-p72636-v{1,2}/`;
 v2 `analysis.json` and `separate-object-chunks.png` preserve the separate identities.
+
+### Consecutive diagnostic samples
+
+The selected original VS uses skinning-data X/Y, with no demonstrated previous
+bone input. Mesh-scoped diagnostics now allow two slots per shape within the
+unchanged eight-slot budget. A subsequent 64-job live run yielded two exact N-1
+pairs for one proxy/chunk, with 155 valid original-VS vertices each. Identity,
+generation, chunk, buffer layout and viewport agree; maximum normalized-to-pixel
+displacements are 3.0322 and 1.2120 pixels. Other gaps are excluded rather than
+substituting older frames. Actual view identity, continuous GPU history and dense
+boundary MV remain unverified. Two samples do not establish sustained recording.
+All jobs retired and the module unloaded. Evidence:
+`work/glass-multichunk-p72636-v3/motion-analysis.json`. FG input is unchanged.
