@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry-rectangle mask layout reduces reserved area without deriving masks from images; standalone checks pass, runtime producer not connected.
+
 - [tests/Experiments.md](tests/Experiments.md): Explicit diagnostic selection accepts up to 64 instances, matching recorder capacity and enabling selected array-vertex capture.
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Live source-index candidates cover 236 simultaneous draws, including 40 cup instances; grouped lifetime/view handoff and FG motion remain incomplete.
