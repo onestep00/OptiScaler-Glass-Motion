@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: one-shot coverage recorder independently GPU verified; continuous engine object history and FG integration incomplete
+- Status: repeatable coverage recorder independently GPU verified; continuous engine object history and FG integration incomplete
 - Deployment: 7769d34 coverage diagnostic observed live; seven captures contain only four covered pixels. Additional draw provenance below is not deployed
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
@@ -31,7 +31,7 @@ marks view identity and topology history unproven; it must not authorize mask
 merging or motion history on its own. These scalar copies occur only on selected
 one-shot captures and file writes stay on the worker.
 
-`GeometryCoverageRecorder` is a one-shot game diagnostic owner, enabled only by
+`GeometryCoverageRecorder` is a request-driven game diagnostic owner, enabled only by
 `Glass/capture-objects.request` at startup. The file contains an absolute output
 directory. It requests supported pipelines from actual engine-mapped draws, builds
 coverage variants and allocates buffers on a worker, then records each admitted
@@ -43,17 +43,26 @@ viewport-size and instance-count combinations. Output numbers remain unique as
 slots are reused. The fixed 3840x2160 limit is removed; integer dimensions up to
 the mapping's 32768 coordinate limit are checked using 64-bit allocation arithmetic
 and the same memory budget. This is broader diagnostic sampling, not exhaustive
-object coverage or a continuous production allocation strategy. It stops accepting after 30 seconds
-from its first request. Missing completion/discard stops the worker after two
-minutes without authorizing readback or releasing possibly referenced resources.
+object coverage or a continuous production allocation strategy. Each session stops
+accepting after 30 seconds or a Stop request. Missing completion/discard ends the
+drain after two minutes without authorizing readback or releasing possibly referenced resources.
 PSO/driver allocations are additional; this is not the continuous production cost.
+
+The worker then waits on `Local\OptiScaler.Glass.Capture.<PID>.Start`; the matching
+`.Stop` event ends admission. Idle waits perform no polling, GPU work or file
+reads. Each accepted later request uses a new `request-N` subdirectory, preserving
+earlier results. Unresolved recordings reject restart. Requests during an active
+session report busy. This permits new captures with the same compiled code; it
+does not replace shaders or the diagnostic DLL. General DLL replacement remains
+the separate [experiment-host](Experiments.md) integration task.
 
 The native submission observer forwards actual submissions; successful command
 Reset marks old recordings discarded. Readback and CSV identity metadata are
 written only after both events and the actual GPU fence. Copy calls run without
 the recorder mutex, avoiding inversion with the native host's submission lock.
-The independent `--recorder` fixture compared all 53,760 individual material
-samples against original draws and preserved 143,360 original color pixels.
+The independent `--recorder` fixture stops and restarts capture within one
+process, compares 107,520 individual material samples across both requests with
+original draws, and preserves 143,360 original color pixels.
 The fixture supplies test identities, not Cyberpunk objects. This recorder emits
 no MV and makes no FG substitution. The fresh-game limitation is recorded above.
 

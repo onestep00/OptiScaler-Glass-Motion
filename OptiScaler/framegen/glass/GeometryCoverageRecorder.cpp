@@ -68,8 +68,27 @@ struct Recorder final : GeometryDrawCaptureOwner
     UINT64 allocated = 0;
     std::atomic<bool> accepting = true;
     UINT64 firstRequest = 0;
+    HANDLE startEvent = nullptr, stopEvent = nullptr;
+    std::filesystem::path baseOutput;
     Recorder(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o)
-        : device(d), compiler(std::move(c)), output(std::move(o)) {}
+        : device(d), compiler(std::move(c)), output(std::move(o)), baseOutput(output)
+    {
+        const auto prefix = L"Local\\OptiScaler.Glass.Capture." + std::to_wstring(GetCurrentProcessId());
+        startEvent = CreateEventW(nullptr, FALSE, FALSE, (prefix + L".Start").c_str());
+        stopEvent = CreateEventW(nullptr, FALSE, FALSE, (prefix + L".Stop").c_str());
+        if (!startEvent || !stopEvent)
+        {
+            if (startEvent) CloseHandle(startEvent);
+            if (stopEvent) CloseHandle(stopEvent);
+            startEvent = stopEvent = nullptr;
+            throw std::runtime_error("Coverage request events unavailable");
+        }
+    }
+    ~Recorder()
+    {
+        if (startEvent) CloseHandle(startEvent);
+        if (stopEvent) CloseHandle(stopEvent);
+    }
     ComPtr<ID3D12Resource> buffer(UINT64 bytes, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state, bool uav = false)
     {
         D3D12_HEAP_PROPERTIES heap {};
@@ -325,26 +344,40 @@ struct Recorder final : GeometryDrawCaptureOwner
         std::ofstream done(stem.string() + ".done");
         done << "coverage_only=1 motion_produced=0 gpu_complete=1 recording_discarded=1\n";
     }
-    void run() noexcept
+    void runSession()
     {
+        const auto began = GetTickCount64();
+        UINT64 stopped = 0;
         for (;;)
         {
+            if (WaitForSingleObject(startEvent, 0) == WAIT_OBJECT_0)
+                std::ofstream(output / "request-busy.txt") << "capture_active=1\n";
+            if (!stopped && (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0 ||
+                             GetTickCount64() - began > 30000))
+                stopped = GetTickCount64();
+            // Never release COM resources while holding the owner mutex.
+            std::array<Slot, SlotCount> unused;
             {
                 std::lock_guard lock(mutex);
-                if (firstRequest && GetTickCount64() - firstRequest > 30000)
+                if (stopped)
                 {
                     accepting.store(false, std::memory_order_relaxed);
                     bool outstanding = false;
-                    for (auto& slot : slots)
+                    for (unsigned i = 0; i < slots.size(); ++i)
                     {
+                        auto& slot = slots[i];
                         if (slot.phase == Slot::Requested || slot.phase == Slot::Ready)
-                            slot.phase = Slot::Failed;
+                        {
+                            allocated -= slot.charge;
+                            unused[i] = std::move(slot);
+                            slot = Slot {};
+                        }
                         outstanding |= slot.phase == Slot::Building || slot.phase == Slot::Reserved ||
                                        slot.phase == Slot::Recording || slot.phase == Slot::Recorded;
                     }
                     // Failure to observe completion/discard never licenses a
                     // readback or release. End diagnostics but retain resources.
-                    if (!outstanding || GetTickCount64() - firstRequest > 120000)
+                    if (!outstanding || GetTickCount64() - stopped > 120000)
                         return;
                 }
             }
@@ -406,6 +439,57 @@ struct Recorder final : GeometryDrawCaptureOwner
                     }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    void run() noexcept
+    {
+        try
+        {
+            unsigned request = 1;
+            for (;;)
+            {
+                std::ofstream(output / "active.txt") << "request=" << request << '\n';
+                runSession();
+                std::ofstream(output / "idle.txt") << "request=" << request << " accepting=0\n";
+                // Idle diagnostics perform no polling, GPU work or file reads.
+                for (;;)
+                {
+                    if (WaitForSingleObject(startEvent, INFINITE) != WAIT_OBJECT_0)
+                        return;
+                    bool pending = false;
+                    {
+                        std::lock_guard lock(mutex);
+                        for (const auto& slot : slots)
+                            pending |= slot.phase == Slot::Building || slot.phase == Slot::Reserved ||
+                                       slot.phase == Slot::Recording || slot.phase == Slot::Recorded;
+                    }
+                    if (pending)
+                    {
+                        std::ofstream(output / "request-blocked.txt") << "previous_recording_unresolved=1\n";
+                        continue;
+                    }
+                    const auto next = baseOutput / ("request-" + std::to_string(request + 1));
+                    if (!std::filesystem::create_directory(next))
+                    {
+                        std::ofstream(output / "request-blocked.txt") << "output_already_exists=1\n";
+                        continue;
+                    }
+                    output = next;
+                    ++request;
+                    ResetEvent(stopEvent);
+                    {
+                        std::lock_guard lock(mutex);
+                        selectionCount = 0;
+                        firstRequest = 0;
+                        accepting.store(true, std::memory_order_relaxed);
+                    }
+                    break;
+                }
+            }
+        }
+        catch (...)
+        {
+            accepting.store(false, std::memory_order_relaxed);
         }
     }
 };

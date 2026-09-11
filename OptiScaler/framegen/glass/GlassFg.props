@@ -14,6 +14,11 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryHost.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCommands.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryDrawCapture.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentAbi.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentRuntime.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentRecording.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentDrawAbi.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ExperimentDrawBridge.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryRasterState.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.cpp" />

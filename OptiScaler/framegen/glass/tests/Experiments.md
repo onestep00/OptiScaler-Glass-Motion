@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: loader, CPU frame lifetime and independent D3D12 retirement checks pass; game integration incomplete
+- Status: loader, GPU retirement and borrowed draw DLL bridge pass independent checks; game integration incomplete
 - Deployment: none
 - Deprecated: no
 - Scope: capture, engine geometry/MV and FG experiments through a resident host
@@ -10,7 +10,28 @@
 `ExperimentAbi.h` defines a sized/versioned C boundary with the exported
 `GlassExperimentQuery`. Its table creates a private context, handles versioned
 borrowed events and destroys the context. No STL or allocator ownership crosses
-the boundary. Actual engine/FG event payloads are not yet defined.
+the boundary. The draw observation payload is now defined; FG payload and GPU
+capture preparation across the DLL boundary remain incomplete.
+
+`ExperimentDrawAbi.h` and `ExperimentDrawBridge.h` pass borrowed original draw,
+pipeline/root, shader descriptor, viewport/scissor and target handles to a
+resident observer. Object entries and the mesh range decoder are accessed on
+demand inside the callback. No vertex/bone/image buffer is copied by this bridge.
+The payload does not authorize retained pointers or GPU recording. Missing mesh
+or compiled pipeline data stays explicit; descriptor handles do not establish
+resource lifetime, view identity or FG correlation. The observer is invoked only
+for direct indexed draws with an engine packet and tracked command recording;
+it does not yet census missing packets or all rendering families.
+
+`GeometryInstances --experiment` loads `experiment-draw.dll` through the real
+runtime and production command bridge on an independent D3D12 device. It checks
+32 callbacks / 48 object entries, bounds rejection, absent engine mesh metadata,
+actual DLL unload, 143,360 unchanged original color pixels and the existing 3,563
+geometry MV reference samples. The fixture supplies synthetic object identities;
+its read-only module allocates no GPU resources and invokes no FG. No production
+startup observer registration has been added yet. Build the fixture DLL from
+`ExperimentDrawFixture.cpp` beside GeometryInstances; `build_geometry_shader.ps1`
+includes this check.
 
 `ExperimentRuntime.h` loads absolute paths on its control thread. Invalid ABI,
 capabilities or failed preparation leaves the active module unchanged. Up to

@@ -2,6 +2,7 @@
 #include "GeometryCommands.h"
 #include "GeometryCreation.h"
 #include "GeometryDrawCapture.h"
+#include "ExperimentDrawBridge.h"
 #include "CyberpunkDraws.h"
 #include "CommandLifetime.h"
 #include "IndirectBindings.h"
@@ -35,6 +36,7 @@ struct Record
     std::array<ID3D12DescriptorHeap*, 2> heapArguments {};
     UINT heapCount = 0;
     bool open = false;
+    uint64_t epoch = 0;
     void reset(ID3D12PipelineState* initial)
     {
         bindings.reset(initial);
@@ -143,7 +145,7 @@ void begin(Command* command, ID3D12PipelineState* initial) noexcept
             if (key == command && !r.lifetime.wasDestroyed())
             {
                 r.reset(initial);
-                ++state->recordings;
+                r.epoch = ++state->recordings;
                 return;
             }
             if (!available && (!key || r.lifetime.wasDestroyed()))
@@ -164,8 +166,8 @@ void begin(Command* command, ID3D12PipelineState* initial) noexcept
         if (!available->lifetime.attach(command))
             return;
         available->reset(initial);
+        available->epoch = ++state->recordings;
         available->key.store(command, std::memory_order_release);
-        ++state->recordings;
     }
     catch (...)
     {
@@ -371,7 +373,11 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
                     if (object.identity)
                         state->identities += object.count;
                 if (auto* r = find(command))
-                    if (auto pipeline = FindGeometryPipeline(r->bindings.pipeline))
+                {
+                    auto pipeline = FindGeometryPipeline(r->bindings.pipeline);
+                    const GeometryIndexedArguments arguments { indices, instances, startIndex, baseVertex, startInstance };
+                    ObserveExperimentDraw(command, r->epoch, draw, arguments, r->raster, r->bindings, pipeline.get());
+                    if (pipeline)
                     {
                         ++state->pipelinesReady;
                         if (r->bindings.canReplay(*pipeline->root, pipeline->original.Get()))
@@ -405,6 +411,7 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
                             }
                         }
                     }
+                }
             }
         }
     originalIndexed(command, indices, instances, startIndex, baseVertex, startInstance);

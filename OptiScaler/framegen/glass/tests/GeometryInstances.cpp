@@ -4,6 +4,7 @@
 #include "../GeometryCommands.h"
 #include "../GeometryDrawCapture.h"
 #include "../GeometryCoverageRecorder.h"
+#include "ExperimentDrawCheck.h"
 extern bool geometryFixturePacket;
 extern std::uint32_t geometryFixtureFrame;
 struct CaptureOwner final : GlassFg::GeometryDrawCaptureOwner
@@ -186,11 +187,13 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0 ||
                                             wcscmp(argv[3], L"--coverage") == 0 ||
                                             wcscmp(argv[3], L"--capture-command") == 0 ||
-                                            wcscmp(argv[3], L"--recorder") == 0)),
+                                            wcscmp(argv[3], L"--recorder") == 0 ||
+                                            wcscmp(argv[3], L"--experiment") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
         const bool recorder = argc == 4 && wcscmp(argv[3], L"--recorder") == 0;
-        const bool captureCommand = recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
+        const bool experiment = argc == 4 && wcscmp(argv[3], L"--experiment") == 0;
+        const bool captureCommand = experiment || recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
         static CaptureOwner captureOwner;
         const bool observed = argc == 4 && !coverageOnly;
         const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
@@ -202,6 +205,8 @@ int wmain(int argc, wchar_t** argv)
         auto vs = read(dir / "instances.dxil");
         auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
         Device g;
+        ExperimentDrawCheck experimentCheck;
+        if (experiment) experimentCheck.start(g.d.Get(), dir);
         const auto recorderOutput = std::filesystem::absolute(dir / ("recorder-" + std::to_string(GetTickCount64())));
         if (recorder)
         {
@@ -393,6 +398,30 @@ int wmain(int argc, wchar_t** argv)
         double maximum = 0;
         for (UINT frame = 1; frame <= 8; ++frame)
         {
+            if (recorder && frame == 5)
+            {
+                g.begin(); // Discard the preceding recording before stopping.
+                g.finish();
+                const auto prefix = L"Local\\OptiScaler.Glass.Capture." + std::to_wstring(GetCurrentProcessId());
+                const auto signal = [&](const wchar_t* suffix)
+                {
+                    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, (prefix + suffix).c_str());
+                    require(event != nullptr, "Capture control event missing");
+                    const bool sent = SetEvent(event) != FALSE;
+                    CloseHandle(event);
+                    require(sent, "Capture request failed");
+                };
+                const auto waitFile = [&](const std::filesystem::path& file)
+                {
+                    const auto until = GetTickCount64() + 10000;
+                    while (!std::filesystem::exists(file) && GetTickCount64() < until) Sleep(10);
+                    require(std::filesystem::exists(file), "Capture state transition timed out");
+                };
+                signal(L".Stop");
+                waitFile(recorderOutput / "idle.txt");
+                signal(L".Start");
+                waitFile(recorderOutput / "request-2" / "active.txt");
+            }
             if (recorder)
                 geometryFixtureFrame = frame;
             UINT order[10] {};
@@ -747,12 +776,14 @@ int wmain(int argc, wchar_t** argv)
         {
             g.begin(); // Discard the last recording as well as waiting for execution.
             g.finish();
-            const auto done = recorderOutput / "objects-0.done";
+            for (const auto& captureDirectory : { recorderOutput, recorderOutput / "request-2" })
+            {
+            const auto done = captureDirectory / "objects-0.done";
             const auto deadline = GetTickCount64() + 10000;
             while (!std::filesystem::exists(done) && GetTickCount64() < deadline)
                 Sleep(10);
             require(std::filesystem::exists(done), "Diagnostic recorder did not complete");
-            std::ifstream provenanceFile(recorderOutput / "objects-0.draw");
+            std::ifstream provenanceFile(captureDirectory / "objects-0.draw");
             const std::string provenance((std::istreambuf_iterator<char>(provenanceFile)), {});
             require(provenance.find("engine_mesh_shape=0\n") != std::string::npos &&
                         provenance.find("view_identity_proven=0\n") != std::string::npos &&
@@ -762,13 +793,15 @@ int wmain(int argc, wchar_t** argv)
                         provenance.find("base_vertex=2\n") != std::string::npos &&
                         provenance.find("start_instance=7\n") != std::string::npos,
                     "Draw provenance lost or fixture incorrectly claims engine history");
-            std::ifstream metadata(recorderOutput / "objects-0.csv");
+            std::ifstream metadata(captureDirectory / "objects-0.csv");
             std::string line;
             std::getline(metadata, line);
             std::getline(metadata, line);
             const auto frame = std::stoul(line);
             require(frame >= 1 && frame <= 8, "Recorder frame not from fixture");
-            const auto data = read(recorderOutput / "objects-0.bin");
+            require(captureDirectory == recorderOutput ? frame <= 4 : frame >= 5,
+                    "Capture request reused an earlier session's recording");
+            const auto data = read(captureDirectory / "objects-0.bin");
             constexpr UINT words = 1 + (W * H + 31) / 32;
             require(data.size() == 3 * words * 4, "Recorder allocation size");
             for (UINT i = 0; i < 3; ++i)
@@ -779,8 +812,9 @@ int wmain(int argc, wchar_t** argv)
                     require(((word >> (p % 32)) & 1) == expectedCoverage[(frame * 3 + i) * W * H + p],
                             "Recorded engine-mapped material coverage differs from original draw");
                 }
-            printf("PASS recorder_worker=1 completion_and_discard=1 original_material_samples=%u original_pixels=%llu "
-                   "motion_produced=0 game_hooks=0\n", 3 * W * H, exact);
+            }
+            printf("PASS recorder_worker=1 completion_and_discard=1 requests_same_process=2 original_material_samples=%u original_pixels=%llu "
+                   "motion_produced=0 game_hooks=0\n", 2 * 3 * W * H, exact);
             return 0;
         }
         if (coverageOnly)
@@ -816,6 +850,7 @@ int wmain(int argc, wchar_t** argv)
                    "bindings_ready=%llu game_hooks=0\n",
                    exact, stats.indexed, stats.packets, stats.bindingsReady);
         }
+        if (experiment) experimentCheck.verify();
         printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u instance_rebatch=1 "
                "isolated_contours=1 inactive_instances=1 inactive_recovery=1 opaque_depth_rejection=1 "
                "partial_history_flag=1 "

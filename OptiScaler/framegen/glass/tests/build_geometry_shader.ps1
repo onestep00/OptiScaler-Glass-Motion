@@ -25,6 +25,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
     (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
+& cl.exe @common /LD (Join-Path $PSScriptRoot 'ExperimentDrawFixture.cpp') `
+    "/Fe$build/experiment-draw.dll" /link "/IMPLIB:$build/experiment-draw.lib"
+if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryIndirect.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
@@ -60,6 +63,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Actual creation observer GPU test failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Actual graphics command observer GPU test failed' }
 & $instances $build $dxc --capture-command
 if ($LASTEXITCODE -ne 0) { throw 'Single-draw capture insertion or root restoration failed' }
+& $instances $build $dxc --experiment
+if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL bridge failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $instances $build $dxc --recorder
