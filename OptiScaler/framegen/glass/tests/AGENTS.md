@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryObservation.md](GeometryObservation.md): Separate original-only depth-writing PSO census; independent descriptor ownership/budget test passed. No live native MV binding or FG integration.
+
 - [GeometryShaders.md](GeometryShaders.md): Native target-3 extraction validates and preserves two recorded velocity PS instruction streams; absent target rejected. Assembly audit only, no native-pass GPU execution.
 
 - [GeometryShaders.md](GeometryShaders.md): ObservedSession verifies paired pre/post submit queue/list identities with sticky failure state; independent GPU passed. No game history integration follows from this hook test.

@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryObservation.md](tests/GeometryObservation.md): Bounded original-only depth-writing pipeline observation is separate from replay admission. Independent descriptor test passed; deployment/native MV inputs remain incomplete.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Native MV-target extraction validates on two recorded glass velocity PS variants and preserves arithmetic/discard. Native engine input binding, boundary selection and GPU/live rendering remain incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Pre-submit host seam forwards to geometry owner and passed 13 independent GPU callback pairs. Not deployed; GPU-resident N-1 history owner and dense MV remain incomplete.

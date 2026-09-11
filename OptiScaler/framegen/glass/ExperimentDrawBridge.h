@@ -82,7 +82,8 @@ inline GlassExperimentDrawInput MakeExperimentDrawInput(ID3D12GraphicsCommandLis
         input.pipelineAccess = BorrowExperimentPipeline(pipeline);
         input.pipelineIdentity = pipeline->identity;
         input.descriptor = &pipeline->description; input.descriptorBytes = sizeof(pipeline->description);
-        input.rootReplayable = bindings.canReplay(*pipeline->root, pipeline->original.Get());
+        input.rootReplayable = pipeline->root && pipeline->root->extended && pipeline->instrumented &&
+                               bindings.canReplay(*pipeline->root, pipeline->original.Get());
     }
     if (raster.viewportKnown)
     {

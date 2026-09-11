@@ -24,6 +24,8 @@ void StopGeometryCreation();
 GeometryCreationStats GetGeometryCreationStats();
 bool TryGeometryCreationCounters(GeometryCreationStats& result);
 std::shared_ptr<const GeometryPipelineEntry> FindGeometryPipeline(ID3D12PipelineState* original) noexcept;
+// Census only. May return an original-only descriptor with no extended root/PSO.
+std::shared_ptr<const GeometryPipelineEntry> FindObservedGeometryPipeline(ID3D12PipelineState* original) noexcept;
 void ObserveGeometryRoot(ID3D12Device* device, UINT node, const void* bytes, SIZE_T size, IUnknown* created) noexcept;
 
 // Use at the final upstream creation call, after any sampler override and

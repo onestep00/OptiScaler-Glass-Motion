@@ -268,7 +268,7 @@ void WINAPI instanced(Command* command, UINT vertices, UINT instances, UINT star
             GlassExperimentCensusInput input {}; input.operation = GlassCensusInstanced;
             input.callsite = reinterpret_cast<uint64_t>(source);
             censusDraw(*observer, command, r, input, {}, { vertices, instances, startVertex, 0, startInstance },
-                       r ? FindGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+                       r ? FindObservedGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
         }
     originalInstanced(command, vertices, instances, startVertex, startInstance);
 }
@@ -288,7 +288,7 @@ void WINAPI hookExecuteIndirect(Command* command, ID3D12CommandSignature* signat
             input.arguments = reinterpret_cast<uint64_t>(args); input.argumentOffset = offset;
             input.counter = reinterpret_cast<uint64_t>(counter); input.counterOffset = counterOffset;
             censusDraw(*observer, command, r, input, {}, {},
-                       r ? FindGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+                       r ? FindObservedGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
         }
         if (r)
         {
@@ -428,7 +428,9 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
             {
                 GlassExperimentCensusInput input {}; input.operation = GlassCensusIndexed;
                 input.callsite = reinterpret_cast<uint64_t>(source);
-                censusDraw(*census, command, r, input, draw, arguments, pipeline);
+                const auto observed = pipeline ? pipeline :
+                    (r ? FindObservedGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+                censusDraw(*census, command, r, input, draw, arguments, observed);
             }
             if (!draw.objects.empty())
             {

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GeometryCreation.h"
+#include "GeometryObservationCache.h"
 #include "DetourThreads.h"
 #include <hooks/Hook_Utils.h>
 #include <atomic>
@@ -20,6 +21,7 @@ struct Capture
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12Device2> device2;
     GeometryPipelineCache cache;
+    GeometryObservationCache observations;
     std::atomic<std::uint64_t> roots = 0, graphics = 0, streams = 0;
     Capture(ID3D12Device* d, const std::filesystem::path& path, GeometryCacheLimits limits)
         : device(d), cache(d, path, limits)
@@ -66,7 +68,10 @@ HRESULT WINAPI graphics(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STAT
             ++capture->graphics;
             ComPtr<ID3D12PipelineState> pipeline;
             if (SUCCEEDED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&pipeline))))
+            {
                 capture->cache.pipelineCreated(pipeline.Get(), *desc);
+                capture->observations.observe(pipeline.Get(), *desc);
+            }
         }
     }
     return status;
@@ -184,6 +189,19 @@ std::shared_ptr<const GeometryPipelineEntry> FindGeometryPipeline(ID3D12Pipeline
     {
         return {};
     }
+}
+std::shared_ptr<const GeometryPipelineEntry> FindObservedGeometryPipeline(ID3D12PipelineState* original) noexcept
+{
+    try
+    {
+        auto* state = publishedControl.load(std::memory_order_acquire);
+        if (!state) return {};
+        auto capture = state->active.load(std::memory_order_acquire);
+        if (!capture) return {};
+        auto prepared = capture->cache.find(original);
+        return prepared ? prepared : capture->observations.find(original);
+    }
+    catch (...) { return {}; }
 }
 GeometryCreationStats GetGeometryCreationStats()
 {
