@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [GeometryShaders.md](GeometryShaders.md): Production DXIL rewriter, paired shader/root factory, root restoration and camera/bounds checks. Includes unequal VS/PS signature extents. Runtime identity, ordering, boundary composition, and deployment remain incomplete. `build_geometry_shader.ps1` uses only synthetic fixtures and an independent device.
+- [GeometryShaders.md](GeometryShaders.md): Original DXIL motion, mapped overlapping contours, camera/bounds, compiler-worker leases and actual public creation hooks tested independently. The observer test hooks only its own device/process. Engine identity, draw ordering, boundary composition and game deployment remain incomplete.
 
 - [../README.md](../README.md): Active module design, validation limits and standalone test instructions.
 - [replay/README.md](replay/README.md): Standalone manifest-based FG replay, identity/input/output validation and recorded-input comparisons. Requires user-supplied local recordings and binaries; not part of the synthetic-only default suite.

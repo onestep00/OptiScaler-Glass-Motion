@@ -3,6 +3,7 @@
 #include <string_view>
 #include <cstdint>
 #include <cmath>
+#include "GeometryInstance.h"
 
 namespace GlassFg
 {
@@ -39,7 +40,8 @@ struct VertexHistoryShader
 // Neither varying is an object-identity estimator.
 // Validate VertexHistoryConstants against BOTH bound history buffers first.
 // Unsupported shaders return an error and must keep their original pipeline.
-VertexHistoryShader RewriteVertexHistory(std::string_view disassembly);
+VertexHistoryShader RewriteVertexHistory(std::string_view disassembly,
+                                         GeometryLayout layout = GeometryLayout::Contiguous);
 
 enum class MaterialSource
 {
@@ -88,7 +90,8 @@ static_assert(sizeof(MaterialCaptureConstants) == 64);
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource source,
                                           MaterialDestination destination,
                                           MaterialMotionTarget target = MaterialMotionTarget::SeparateTarget,
-                                          unsigned firstHistoryRegister = UINT32_MAX);
+                                          unsigned firstHistoryRegister = UINT32_MAX,
+                                          GeometryLayout layout = GeometryLayout::Contiguous);
 // A paired pipeline must pass the rewritten VS's previousRegister. The original
 // PS can omit VS-only outputs (for example SV_ClipDistance), so independently
 // appending to each stage's first free register does not produce a linked pair.

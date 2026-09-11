@@ -30,10 +30,11 @@ bool readOnly(const D3D12_DEPTH_STENCIL_DESC& state)
 } // namespace
 
 HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* identity, UINT nodeMask, const void* serialized,
-                           SIZE_T bytes, GeometryRoot& output, std::string& error)
+                           SIZE_T bytes, GeometryRoot& output, std::string& error, GeometryLayout layout)
 {
     error.clear();
-    if (!device || !identity || !serialized || !bytes || bytes > 1024 * 1024)
+    if (!device || !identity || !serialized || !bytes || bytes > 1024 * 1024 ||
+        (layout != GeometryLayout::Contiguous && layout != GeometryLayout::PerInstance))
         return reject(error, "Missing or oversized original root signature");
     ComPtr<ID3D12VersionedRootSignatureDeserializer> deserializer;
     HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(serialized, bytes, IID_PPV_ARGS(&deserializer));
@@ -50,10 +51,12 @@ HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* identity, 
     constexpr UINT blocked = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE |
                              D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
                              D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
-    if ((desc.Flags & blocked) || desc.NumParameters > 59 || desc.NumStaticSamplers > 2048)
+    if ((desc.Flags & blocked) || desc.NumParameters > (layout == GeometryLayout::PerInstance ? 58u : 59u) ||
+        desc.NumStaticSamplers > 2048)
         return reject(error, "Unsupported root flags or parameter count");
 
     GeometryRoot result;
+    result.layout = layout;
     result.ranges.resize(desc.NumParameters);
     if (desc.NumParameters)
         result.originalParameters.assign(desc.pParameters, desc.pParameters + desc.NumParameters);
@@ -93,7 +96,8 @@ HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* identity, 
     for (UINT i = 0; i < desc.NumStaticSamplers; ++i)
         if (desc.pStaticSamplers[i].RegisterSpace == 31)
             return reject(error, "Original static sampler uses reserved space");
-    if (cost > 48)
+    const UINT extraCost = layout == GeometryLayout::PerInstance ? 18 : 16;
+    if (cost > 64 - extraCost)
         return reject(error, "Capture would exceed 64 DWORD root limit");
     auto parameters = result.originalParameters;
     D3D12_ROOT_PARAMETER1 extra {};
@@ -116,7 +120,9 @@ HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* identity, 
     result.currentSlot = append(D3D12_ROOT_PARAMETER_TYPE_UAV, 0, D3D12_SHADER_VISIBILITY_VERTEX);
     result.materialSlot = append(D3D12_ROOT_PARAMETER_TYPE_CBV, 1, D3D12_SHADER_VISIBILITY_PIXEL);
     result.captureSlot = append(D3D12_ROOT_PARAMETER_TYPE_UAV, 1, D3D12_SHADER_VISIBILITY_PIXEL);
-    result.dwords = cost + 16;
+    if (layout == GeometryLayout::PerInstance)
+        result.instanceSlot = append(D3D12_ROOT_PARAMETER_TYPE_SRV, 1, D3D12_SHADER_VISIBILITY_ALL);
+    result.dwords = cost + extraCost;
     desc.NumParameters = static_cast<UINT>(parameters.size());
     desc.pParameters = parameters.data();
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned {};
@@ -191,7 +197,7 @@ struct GeometryCompiler::Impl
         return op->GetResult(&output);
     }
     HRESULT rewrite(D3D12_SHADER_BYTECODE input, bool vertex, MaterialSource source, MaterialDestination destination,
-                    ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister)
+                    ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -202,9 +208,10 @@ struct GeometryCompiler::Impl
             return reject(error, "Cannot disassemble shader", hr);
         const std::string_view text(static_cast<const char*>(disassembly->GetBufferPointer()),
                                     disassembly->GetBufferSize());
-        auto rewritten = vertex ? RewriteVertexHistory(text)
-                                : RewriteMaterialMotion(text, source, destination,
-                                                        MaterialMotionTarget::OriginalColorAndCapture, historyRegister);
+        auto rewritten =
+            vertex ? RewriteVertexHistory(text, layout)
+                   : RewriteMaterialMotion(text, source, destination, MaterialMotionTarget::OriginalColorAndCapture,
+                                           historyRegister, layout);
         if (!rewritten)
         {
             error = rewritten.error;
@@ -258,8 +265,10 @@ HRESULT GeometryCompiler::create(ID3D12Device* device, const GeometryRoot& root,
                                                                             : MaterialDestination::SecondSourceRgb;
     ComPtr<IDxcBlob> vs, ps;
     unsigned historyRegister = UINT32_MAX;
-    if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister)) ||
-        FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister)))
+    if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
+                                            root.layout)) ||
+        FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
+                                            root.layout)))
         return hr;
     auto modified = original;
     modified.pRootSignature = root.extended.Get();

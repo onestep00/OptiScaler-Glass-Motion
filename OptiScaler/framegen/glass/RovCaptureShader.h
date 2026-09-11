@@ -6,7 +6,7 @@ namespace GlassFg::Detail
 {
 // Only appended instrumentation is changed here, never the original PS body.
 // Its original exports are retained by RewriteMaterialMotion.
-inline std::string CaptureOriginalColor(std::string instrumentation)
+inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped = false, unsigned instanceMapId = 0)
 {
     for (const auto* condition : { "bad", "empty", "nonfinite" })
     {
@@ -17,17 +17,42 @@ inline std::string CaptureOriginalColor(std::string instrumentation)
     }
     instrumentation.erase(instrumentation.find("  call void @dx.op.storeOutput.f32"));
     std::ostringstream code;
-    code << R"(  %glass.recordok0 = and i1 %glass.ok, %glass.finite
+    if (mapped)
+        code << R"(  %glass.mapok = icmp ne i32 %glass.mapindex, -1
+  %glass.recordok = and i1 %glass.mapok, %glass.hasall
+)";
+    else
+        code << R"(  %glass.recordok0 = and i1 %glass.ok, %glass.finite
   %glass.recordok = and i1 %glass.recordok0, %glass.hasall
+)";
+    code << R"(
   br i1 %glass.recordok, label %glass.roibounds, label %glass.captureend
 glass.roibounds:
+)";
+    if (mapped)
+    {
+        code << "  %glass.map = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 " << instanceMapId
+             << ", i32 1, i1 false)\n";
+        code << R"(  %glass.mapaddress = shl i32 %glass.mapindex, 6
+  %glass.roiaddress = or i32 %glass.mapaddress, 16
+  %glass.destaddress = or i32 %glass.mapaddress, 32
+  %glass.roi = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.map, i32 %glass.roiaddress, i32 undef)
+  %glass.dest = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.map, i32 %glass.destaddress, i32 undef)
+  %glass.capturebuffer = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 1, i1 false)
+)";
+    }
+    else
+        code << R"(
   %glass.roi = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 2)
   %glass.dest = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 3)
+)";
+    code << R"(
   %glass.stamp = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 1)
 )";
+    const char* recordType = mapped ? "%dx.types.ResRet.i32" : "%dx.types.CBufRet.i32";
     for (unsigned c = 0; c < 4; ++c)
-        code << "  %glass.roi" << c << " = extractvalue %dx.types.CBufRet.i32 %glass.roi, " << c << "\n"
-             << "  %glass.dest" << c << " = extractvalue %dx.types.CBufRet.i32 %glass.dest, " << c << "\n";
+        code << "  %glass.roi" << c << " = extractvalue " << recordType << " %glass.roi, " << c << "\n"
+             << "  %glass.dest" << c << " = extractvalue " << recordType << " %glass.dest, " << c << "\n";
     code << R"(  %glass.frame = extractvalue %dx.types.CBufRet.i32 %glass.stamp, 2
   %glass.reverse = extractvalue %dx.types.CBufRet.i32 %glass.stamp, 3
   %glass.x = fptoui float %glass.s0 to i32
@@ -37,7 +62,25 @@ glass.roibounds:
   %glass.xok = icmp ult i32 %glass.rx, %glass.roi2
   %glass.yok = icmp ult i32 %glass.ry, %glass.roi3
   %glass.xyok = and i1 %glass.xok, %glass.yok
+)";
+    if (mapped)
+        code << R"(  %glass.flagmissing = select i1 %glass.ok, i32 0, i32 2
+  %glass.flagfinite = select i1 %glass.finite, i32 0, i32 4
+  %glass.flagescape = select i1 %glass.xyok, i32 0, i32 1
+  %glass.flags0 = or i32 %glass.flagmissing, %glass.flagfinite
+  %glass.flags = or i32 %glass.flags0, %glass.flagescape
+  %glass.anyflag = icmp ne i32 %glass.flags, 0
+  br i1 %glass.anyflag, label %glass.flag, label %glass.addresscheck
+glass.flag:
+  %glass.statusaddress = shl i32 %glass.dest3, 5
+  %glass.ignored = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %glass.capturebuffer, i32 2, i32 %glass.statusaddress, i32 undef, i32 undef, i32 %glass.flags)
+  br label %glass.captureend
+)";
+    else
+        code << R"(
   br i1 %glass.xyok, label %glass.addresscheck, label %glass.captureend
+)";
+    code << R"(
 glass.addresscheck:
   %glass.rowoffset = mul i32 %glass.ry, %glass.dest1
   %glass.pixeloffset = add i32 %glass.rowoffset, %glass.rx
@@ -45,7 +88,11 @@ glass.addresscheck:
   %glass.addressok = icmp ult i32 %glass.pixelindex, %glass.dest2
   br i1 %glass.addressok, label %glass.capture, label %glass.captureend
 glass.capture:
-  %glass.capturebuffer = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 1, i1 false)
+)";
+    if (!mapped)
+        code << "  %glass.capturebuffer = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 1, i1 "
+                "false)\n";
+    code << R"(
   %glass.address = shl i32 %glass.pixelindex, 5
   %glass.transaddress = or i32 %glass.address, 16
   %glass.old = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.capturebuffer, i32 %glass.address, i32 undef)

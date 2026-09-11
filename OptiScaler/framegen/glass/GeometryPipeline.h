@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "GeometryInstance.h"
 
 namespace GlassFg
 {
@@ -22,9 +23,12 @@ struct GeometryRoot
     std::vector<std::vector<D3D12_DESCRIPTOR_RANGE1>> ranges;
     UINT constantsSlot = 0, previousSlot = 0, currentSlot = 0, materialSlot = 0, captureSlot = 0;
     UINT dwords = 0;
+    UINT instanceSlot = UINT32_MAX;
+    GeometryLayout layout = GeometryLayout::Contiguous;
 };
 HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* originalIdentity, UINT nodeMask,
-                           const void* serialized, SIZE_T bytes, GeometryRoot& output, std::string& error);
+                           const void* serialized, SIZE_T bytes, GeometryRoot& output, std::string& error,
+                           GeometryLayout layout = GeometryLayout::Contiguous);
 
 // Instantiate on a worker, reuse for PSOs, and retain the compiler through all
 // calls. No compilation, file I/O or PSO creation belongs in a draw callback.

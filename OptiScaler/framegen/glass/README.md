@@ -12,7 +12,7 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 
 [EngineGeometry.md](EngineGeometry.md) records the broader geometry scope and latest engine-input evidence. Cups/railings are test samples. Vehicle glass, eyewear, moving world icons, holograms, skinning, deformation and particles remain in scope. A 32-route inventory guides missing-input work; it is not a list of completed support. Verified rigid history and the newly correlated skinning-buffer binding have not yet been connected to the production correction.
 
-[The shader-history implementation](tests/GeometryShaders.md) now reuses actual original VS positions and material coverage in an independent GPU test. It preserves original color/position outputs and produces perspective-correct motion with frame/generation rejection. The source is included in the module build, but live identity/ordering, per-object boundary composition, and host integration remain incomplete. It has not replaced the installed correction.
+[The shader-history implementation](tests/GeometryShaders.md) reuses actual original VS positions and material coverage. Independent GPU checks preserve original color/position outputs, object masks through batch reordering, and perspective-correct motion with frame/generation rejection. A bounded compiler worker and public PSO/root creation observer also pass the GPU checks. The upstream device hook now starts acquisition and forwards final root bytes after sampler overrides; packaged DXC files stay in `Glass/`. Live engine identity, draw insertion, ordering and per-object boundary composition remain incomplete. This source has not replaced the installed correction.
 
 ## Boundaries
 

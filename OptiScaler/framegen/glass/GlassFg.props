@@ -5,6 +5,13 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)RovCaptureShader.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)DxilVertexHistory.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryPipeline.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryInstance.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryPipelineCache.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GeometryPipelineCache.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)DetourThreads.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCreation.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCreation.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GeometryHost.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GraphicsRootBindings.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkCamera.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryPipeline.cpp">
@@ -39,9 +46,14 @@
     <MakeDir Directories="$(TargetDir)Glass" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
+          DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <!-- Upstream moves the Release DLL into a/ before packaging. -->
     <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl"
+          DestinationFolder="$(SolutionDir)x64\Release\a\Glass" SkipUnchangedFiles="true"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
           DestinationFolder="$(SolutionDir)x64\Release\a\Glass" SkipUnchangedFiles="true"
           Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
   </Target>

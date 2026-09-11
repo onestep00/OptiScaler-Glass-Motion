@@ -2,8 +2,8 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: independent GPU implementation verified; runtime acquisition/integration incomplete
-- Deployment: none; this is not yet called by the game host
+- Status: independent GPU and public creation observer verified; engine acquisition/draw integration incomplete
+- Deployment: none; startup creation adapter added to source, with no new game draw or FG substitution
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
 
@@ -13,7 +13,7 @@
 
 `RewriteMaterialMotion` preserves the original material computation/discard and emits normalized previous-minus-current motion, mean RGB attenuation, and current device depth into a separate target. Material opacity is derived from the verified destination blend factor; colored transmission becomes `1 - mean(saturate(T.rgb))`. A scalar coefficient cannot fully represent colored/refraction layers. Pixels contributing neither source color nor attenuation are excluded. Invalid history and nonfinite motion are rejected. Original color-output stores are replaced only in this separate diagnostic/capture PSO; this shader must never replace the game's color pixel shader as-is.
 
-All changes are confined to this module. `GlassFg.props` compiles the rewriter, but no production call site currently invokes it. The original static-world correction remains installed.
+The algorithm and creation observer remain in this module. The upstream D3D12 device hook has explicit startup and final-root-creation integration calls. The original static-world correction remains installed; the new source has not been deployed.
 
 `OriginalColorAndCapture` preserves the original color exports and appends a rasterizer-ordered raw-buffer capture in the same draw. A bounded per-object rectangle stores surface motion/depth and RGB transmission without a second material evaluation. Original discard still executes. Missing history or an out-of-range capture address skips only the added storage. The host must validate `MaterialCaptureConstants` against the actual allocation and prove the original pass has read-only depth/stencil before using its early-depth variant.
 
@@ -22,6 +22,14 @@ All changes are confined to this module. `GlassFg.props` compiles the rewriter, 
 VS and PS signature extents can differ. The recorded VS-only `SV_ClipDistance` made independently appended history varyings occupy different registers; all 68 original shader/input/root combinations initially failed modified PSO creation despite passing individual DXIL validation. `GeometryCompiler` now passes the actual rewritten VS register to the PS rewriter. All 68 combinations then passed creation on an independent NVIDIA device. Missing rasterizer/alpha-blend fields in that local audit used neutral values, so this is shader/root linkage evidence rather than a complete original-game PSO replay. The public fixture now includes an unused VS-only clip-distance output to cover this failure.
 
 `CyberpunkCamera.h` decodes an already identified 848-byte camera constant block and projects engine bounds to a storage rectangle. Bounds never define material coverage or motion. The adapter still has to prove b1 binding, executable layout, recording/frame identity, stable upload bytes and conservative bounds. The producer must detect coverage escaping the rectangle and reject that object. An eye-plane crossing uses a budget-dependent full-viewport fallback.
+
+`GeometryInstance.h` adds an immutable per-instance mapping from a draw to independently owned object history and coverage allocations. `PerInstance` shaders carry an uninterpolated map index into the PS, so reordering a batch does not move an object's history or merge its mask with another object. This layout adds one shared root SRV: 18 additional DWORDs, or 54 for the recorded 36-table layout. The original draw is not split. The adapter must supply verified engine identities and nonaliasing allocations; the map does not discover those identities.
+
+Mapped capture atomically marks the object's status if contributing material pixels escape its rectangle, use incomplete history, or have nonfinite motion. A consumer must reject the entire flagged object, including any valid-looking pixels already captured. Status records must be cleared once before that frame's material draws. Atomic OR is required because different screen pixels can update the same object status; ordinary ROV ordering alone is insufficient. These atomics are on rejection paths. Invalid previous vertex tags select the current position as a finite placeholder while retaining the missing-history flag.
+
+`GeometryPipelineCache` owns copied root/shader/input-layout data and original COM identities. A single worker compiles modified pipelines; draw-side lookup returns an immutable shared lease and performs no compilation or driver call. Default limits are 128 roots, 2,048 pipelines and 128 MiB of copied CPU data. The byte limit is not a bound on driver PSO memory. The lease retains all pipeline/root data after the cache stops; a renderer must retain it until GPU completion **and** recording discard.
+
+`GeometryCreation` observes successful public graphics PSO creation on the actual selected device. Root bytes come from each final upstream creation branch, including sampler reserialization. Compiler-generated calls are excluded. Pipeline-stream calls are counted and forwarded, but are currently unsupported by the rewriter. Unknown or over-budget pipelines keep the original rendering path. Callback code remains resident for process lifetime; an owning control thread can stop and join the cache. No static destructor joins a worker under the loader lock. `GeometryHost` admits the inspected executable and packaged DXC pair before starting this observer. It records no draw or FG replacement.
 
 ## GPU validation
 
@@ -46,6 +54,10 @@ The nonzero draw start offsets also exposed an incorrect initial test assumption
 
 Local, unpublished game shader inputs were also processed: 17 vertex shaders (including 11 observed transparent variants) and four material pixel shaders assembled and passed DXIL validation. Pixel output initialization followed by an unconditional final overwrite is supported; branch-local exports are rejected. Validation of those shaders is not proof that their complete live root bindings or frame histories have been acquired.
 
+`GeometryInstances.cpp` changes the order of three overlapping instances across five frames. It compares each object's stored coverage against a separate original material draw and its motion against independent perspective correspondence using original VS stream output. All 89,600 original color pixels remain exact; 2,399 admitted motion pixels pass with maximum error 0.001688 pixels. The comparison includes 810 overlapping object samples, opaque depth rejection, generation replacement, one missing vertex, escaped bounds and recovery after clearing status. Test identities come from synthetic instance data. These checks do not establish the engine adapter or FG quality.
+
+The same test obtains its modified pipeline through the production compiler worker, overwrites the caller's copied shader bytes, stops/destroys the cache, and then renders through the retained lease. Its `--observe` run installs the real public D3D12 creation hooks on the independent device and uses the final-root wrapper. The original color/MV checks still pass. The run also verifies recursive compiler exclusion, unchanged failed creation, forwarding/counting a real pipeline-stream creation, rejecting an over-budget PSO and stopping further admission. It never attaches these hooks to a game. A Release x64 OptiScaler solution build including this adapter passed. The recorded 68 shader/root combinations also pass the mapped 54-DWORD root audit; the same incomplete-original-descriptor limitation applies.
+
 ## Runtime contract still required
 
 - Stable live object/generation/chunk/vertex identity. A changing instance batch, reused resource address, particle birth/death, or topology change must not inherit another element's history.
@@ -54,4 +66,4 @@ Local, unpublished game shader inputs were also processed: 17 vertex shaders (in
 - Separate per-object coverage before detecting boundaries. A union mask loses outlines behind other transparent objects.
 - Correct FG frame, jitter convention, viewports, and resource-scale mapping, then actual FG input replacement.
 
-The same-draw capture implementation is independently tested but has no production caller yet. ROV ordering applies within one draw; overlapping writes from different draws require a UAV barrier or another proven dependency. The current fixture does not verify overlapping fragments or depth-occluded capture. Per-object allocation, engine identity, live ordering and FG consumption remain incomplete. See [Microsoft's ROV ordering contract](https://microsoft.github.io/DirectX-Specs/d3d/RasterOrderViews.html) and [early depth/stencil semantics](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-attributes-earlydepthstencil). No live performance or ghosting-improvement claim follows from this independent test.
+The same-draw capture implementation is independently tested but has no production caller yet. ROV ordering applies within one draw; overlapping writes from different draws require a UAV barrier or another proven dependency. The instance fixture verifies separate overlapping objects and opaque depth rejection. It does not test several material fragments accumulating in one object's pixel or overlapping writes from different draw calls. Runtime allocation, engine identity, live ordering and FG consumption remain incomplete. See [Microsoft's ROV ordering contract](https://microsoft.github.io/DirectX-Specs/d3d/RasterOrderViews.html) and [early depth/stencil semantics](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-attributes-earlydepthstencil). No live performance or ghosting-improvement claim follows from this independent test.

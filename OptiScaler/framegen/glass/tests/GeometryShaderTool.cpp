@@ -47,7 +47,11 @@ int wmain(int argc, wchar_t** argv)
         UINT32 codepage = CP_UTF8;
         check(library->CreateBlobFromFile(argv[3], &codepage, &input));
         ComPtr<IDxcBlob> output;
-        const std::wstring mode(argv[2]);
+        std::wstring mode(argv[2]);
+        const bool mapped = mode.ends_with(L"-mapped");
+        if (mapped)
+            mode.resize(mode.size() - 7);
+        const auto layout = mapped ? GlassFg::GeometryLayout::PerInstance : GlassFg::GeometryLayout::Contiguous;
         if (mode == L"disassemble")
         {
             ComPtr<IDxcCompiler> compiler;
@@ -72,22 +76,24 @@ int wmain(int argc, wchar_t** argv)
                     ComPtr<IDxcBlobEncoding> vertexBytes, vertexText;
                     check(library->CreateBlobFromFile(argv[6], &codepage, &vertexBytes));
                     check(compiler->Disassemble(vertexBytes.Get(), &vertexText));
-                    auto vertex = GlassFg::RewriteVertexHistory(std::string_view(
-                        static_cast<const char*>(vertexText->GetBufferPointer()), vertexText->GetBufferSize()));
+                    auto vertex = GlassFg::RewriteVertexHistory(
+                        std::string_view(static_cast<const char*>(vertexText->GetBufferPointer()),
+                                         vertexText->GetBufferSize()),
+                        layout);
                     if (!vertex)
                         throw std::runtime_error(vertex.error);
                     historyRegister = vertex.previousRegister;
                 }
                 auto patched =
                     mode == L"rewrite"
-                        ? GlassFg::RewriteVertexHistory(assembly)
+                        ? GlassFg::RewriteVertexHistory(assembly, layout)
                         : GlassFg::RewriteMaterialMotion(
                               assembly, GlassFg::MaterialSource::One,
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb
                                                                : GlassFg::MaterialDestination::OneMinusAlpha,
                               mode == L"capture" ? GlassFg::MaterialMotionTarget::OriginalColorAndCapture
                                                  : GlassFg::MaterialMotionTarget::SeparateTarget,
-                              historyRegister);
+                              historyRegister, layout);
                 if (!patched)
                     throw std::runtime_error(patched.error);
                 check(library->CreateBlobWithEncodingOnHeapCopy(patched.assembly.data(),

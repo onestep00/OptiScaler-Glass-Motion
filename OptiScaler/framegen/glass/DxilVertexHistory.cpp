@@ -132,11 +132,13 @@ std::string single(const std::string& source, const std::regex& pattern, size_t 
 }
 } // namespace
 
-VertexHistoryShader RewriteVertexHistory(std::string_view disassembly)
+VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryLayout layout)
 {
     VertexHistoryShader result;
     try
     {
+        need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
+        const bool mapped = layout == GeometryLayout::PerInstance;
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
         while (!source.empty() && source.back() == '\0')
@@ -242,12 +244,16 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly)
                                           ", i32 0, i8 " + std::to_string(c) + ", float ([^\\)]+)\\)"),
                                1, "Position must have one scalar store per component");
         const auto row = extent(metadata, outputs), output = nextId(metadata, outputs);
-        need(row + 2 <= 32, "No history varying registers available");
+        need(row + (mapped ? 3 : 2) <= 32, "No history varying registers available");
         outputs.push_back(metadata.add("i32 " + std::to_string(output) + ", !\"GLASS_PREVIOUS\", i8 9, i8 0, " + zero +
                                        ", i8 2, i32 1, i8 4, i32 " + std::to_string(row) + ", i8 0, " + mask15));
         outputs.push_back(metadata.add("i32 " + std::to_string(output + 1) +
                                        ", !\"GLASS_HISTORY_MISSING\", i8 9, i8 0, " + zero +
                                        ", i8 2, i32 1, i8 1, i32 " + std::to_string(row + 1) + ", i8 0, " + mask1));
+        if (mapped)
+            outputs.push_back(metadata.add("i32 " + std::to_string(output + 2) +
+                                           ", !\"GLASS_OBJECT_INDEX\", i8 5, i8 0, " + zero +
+                                           ", i8 1, i32 1, i8 1, i32 " + std::to_string(row + 2) + ", i8 0, " + mask1));
         metadata.get(signatures[1]) = join(outputs);
         unsigned ids[3] {};
         for (unsigned cls = 0; cls < 3; ++cls)
@@ -269,6 +275,12 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly)
                 description += ", %Glass.Constants* undef, !\"GlassConstants\", i32 31, i32 0, i32 1, i32 32, null";
             metadata.append(resources[cls], metadata.add(description));
         }
+        if (mapped)
+            metadata.append(
+                resources[0],
+                metadata.add(
+                    "i32 " + std::to_string(ids[0] + 1) +
+                    ", %Glass.RawRead* undef, !\"GlassInstances\", i32 31, i32 1, i32 1, i32 11, i32 0, null"));
         if (entry[3] == "null")
         {
             entry[3] = metadata.add(join(resources));
@@ -312,20 +324,54 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly)
                 << " = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 "
                 << i << ")\n";
         const char* constants[] = { "base", "count", "originv", "origini", "instances", "gen", "frame", "prevframe" };
+        const char* mappedConstants[] = { "mapbase",   "mapcapacity", "historycapacity", "origini",
+                                          "instances", "reserved",    "frame",           "prevframe" };
         for (unsigned i = 0; i < 8; ++i)
-            code << "  %glass." << constants[i] << " = extractvalue %dx.types.CBufRet.i32 %glass.c" << i / 4 << ", "
-                 << i % 4 << "\n";
-        code << R"(
+            code << "  %glass." << (mapped ? mappedConstants[i] : constants[i])
+                 << " = extractvalue %dx.types.CBufRet.i32 %glass.c" << i / 4 << ", " << i % 4 << "\n";
+        if (mapped)
+        {
+            code << "  %glass.map = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 " << ids[0] + 1
+                 << ", i32 1, i1 false)\n";
+            code << R"(  %glass.li = sub i32 %glass.i, %glass.origini
+  %glass.mi = add i32 %glass.li, %glass.mapbase
+  %glass.iok = icmp ult i32 %glass.li, %glass.instances
+  %glass.miok = icmp ult i32 %glass.mi, %glass.mapcapacity
+  %glass.mapok = and i1 %glass.iok, %glass.miok
+  %glass.mapindex = select i1 %glass.mapok, i32 %glass.mi, i32 -1
+  br i1 %glass.mapok, label %glass.mapread, label %glass.reject
+glass.mapread:
+  %glass.ma = shl i32 %glass.mi, 6
+  %glass.object = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.map, i32 %glass.ma, i32 undef)
+  %glass.base = extractvalue %dx.types.ResRet.i32 %glass.object, 0
+  %glass.count = extractvalue %dx.types.ResRet.i32 %glass.object, 1
+  %glass.originv = extractvalue %dx.types.ResRet.i32 %glass.object, 2
+  %glass.gen = extractvalue %dx.types.ResRet.i32 %glass.object, 3
+  %glass.lv = sub i32 %glass.v, %glass.originv
+  %glass.index = add i32 %glass.base, %glass.lv
+  %glass.vok = icmp ult i32 %glass.lv, %glass.count
+  %glass.indexok = icmp ult i32 %glass.index, %glass.historycapacity
+  %glass.livegeneration = icmp ne i32 %glass.gen, 0
+  %glass.allocationok = and i1 %glass.indexok, %glass.livegeneration
+  %glass.ok = and i1 %glass.vok, %glass.allocationok
+  br i1 %glass.ok, label %glass.read, label %glass.reject
+glass.read:
+)";
+        }
+        else
+            code << R"(
   %glass.lv = sub i32 %glass.v, %glass.originv
   %glass.li = sub i32 %glass.i, %glass.origini
   %glass.vok = icmp ult i32 %glass.lv, %glass.count
   %glass.iok = icmp ult i32 %glass.li, %glass.instances
   %glass.ok = and i1 %glass.vok, %glass.iok
-  br i1 %glass.ok, label %glass.read, label %glass.end
+  br i1 %glass.ok, label %glass.read, label %glass.reject
 glass.read:
   %glass.offset = mul i32 %glass.li, %glass.count
   %glass.index0 = add i32 %glass.offset, %glass.lv
   %glass.index = add i32 %glass.index0, %glass.base
+)";
+        code << R"(
   %glass.address = shl i32 %glass.index, 5
   %glass.tagaddress = or i32 %glass.address, 16
   %glass.p = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %glass.srv, i32 %glass.address, i32 undef)
@@ -339,23 +385,30 @@ glass.read:
 )";
         for (unsigned c = 0; c < 4; ++c)
             code << "  %glass.p" << c << "i = extractvalue %dx.types.ResRet.i32 %glass.p, " << c << "\n"
-                 << "  %glass.p" << c << " = bitcast i32 %glass.p" << c << "i to float\n"
+                 << "  %glass.oldp" << c << " = bitcast i32 %glass.p" << c << "i to float\n"
+                 << "  %glass.p" << c << " = select i1 %glass.validbool, float %glass.oldp" << c << ", float "
+                 << values[c] << "\n"
                  << "  %glass.c" << c << "i = bitcast float " << values[c] << " to i32\n";
         code
             << R"(  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.address, i32 undef, i32 %glass.c0i, i32 %glass.c1i, i32 %glass.c2i, i32 %glass.c3i, i8 15)
   call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, i32 undef, i32 undef, i8 3)
   br label %glass.end
+glass.reject:
+  br label %glass.end
 glass.end:
 )";
         for (unsigned c = 0; c < 4; ++c)
             code << "  %glass.o" << c << " = phi float [ %glass.p" << c << ", %glass.read ], [ " << values[c]
-                 << ", %glass.entry ]\n";
-        code << "  %glass.ov = phi float [ %glass.valid, %glass.read ], [ 1.000000e+00, %glass.entry ]\n";
+                 << ", %glass.reject ]\n";
+        code << "  %glass.ov = phi float [ %glass.valid, %glass.read ], [ 1.000000e+00, %glass.reject ]\n";
         for (unsigned c = 0; c < 4; ++c)
             code << "  call void @dx.op.storeOutput.f32(i32 5, i32 " << output << ", i32 0, i8 " << c
                  << ", float %glass.o" << c << ")\n";
-        code << "  call void @dx.op.storeOutput.f32(i32 5, i32 " << output + 1
-             << ", i32 0, i8 0, float %glass.ov)\n  ret void";
+        code << "  call void @dx.op.storeOutput.f32(i32 5, i32 " << output + 1 << ", i32 0, i8 0, float %glass.ov)\n";
+        if (mapped)
+            code << "  call void @dx.op.storeOutput.i32(i32 5, i32 " << output + 2
+                 << ", i32 0, i8 0, i32 %glass.mapindex)\n";
+        code << "  ret void";
         body.replace(body.find("  ret void"), 10, code.str());
         const std::pair<const char*, const char*> types[] = { { "dx.types.Handle", "{ i8* }" },
                                                               { "dx.types.CBufRet.i32", "{ i32, i32, i32, i32 }" },
@@ -380,6 +433,8 @@ glass.end:
         }
         for (const auto& [id, value] : metadata.nodes)
             body += "!" + std::to_string(id) + " = !{" + value + "}\n";
+        if (mapped && body.find("declare void @dx.op.storeOutput.i32") == std::string::npos)
+            body += "declare void @dx.op.storeOutput.i32(i32, i32, i32, i8, i32)\n";
         result.assembly = std::move(body);
         result.previousRegister = row;
         result.missingRegister = row + 1;
@@ -392,7 +447,7 @@ glass.end:
 }
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
                                           MaterialDestination destinationFactor, MaterialMotionTarget target,
-                                          unsigned firstHistoryRegister)
+                                          unsigned firstHistoryRegister, GeometryLayout layout)
 {
     VertexHistoryShader result;
     try
@@ -400,6 +455,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture,
              "Unsupported material target");
         const bool retainColor = target == MaterialMotionTarget::OriginalColorAndCapture;
+        need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
+        const bool mapped = layout == GeometryLayout::PerInstance;
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
         while (!source.empty() && source.back() == '\0')
@@ -463,12 +520,16 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         }
         const auto previous = nextId(metadata, inputs), usedRows = extent(metadata, inputs);
         const auto row = firstHistoryRegister == UINT32_MAX ? usedRows : firstHistoryRegister;
-        need(row >= usedRows && row <= 30, "Pixel history register collision or overflow");
+        need(row >= usedRows && row <= (mapped ? 29u : 30u), "Pixel history register collision or overflow");
         inputs.push_back(metadata.add("i32 " + std::to_string(previous) + ", !\"GLASS_PREVIOUS\", i8 9, i8 0, " + zero +
                                       ", i8 2, i32 1, i8 4, i32 " + std::to_string(row) + ", i8 0, " + mask15));
         inputs.push_back(metadata.add("i32 " + std::to_string(previous + 1) +
                                       ", !\"GLASS_HISTORY_MISSING\", i8 9, i8 0, " + zero +
                                       ", i8 2, i32 1, i8 1, i32 " + std::to_string(row + 1) + ", i8 0, " + mask1));
+        if (mapped)
+            inputs.push_back(metadata.add("i32 " + std::to_string(previous + 2) +
+                                          ", !\"GLASS_OBJECT_INDEX\", i8 5, i8 0, " + zero +
+                                          ", i8 1, i32 1, i8 1, i32 " + std::to_string(row + 2) + ", i8 0, " + mask1));
         metadata.get(signatures[0]) = join(inputs);
         std::array<std::array<std::string, 4>, 2> color;
         for (const auto& node : outputs)
@@ -510,7 +571,22 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  "Required material output missing");
             return color[target][column];
         };
-        unsigned constantId = 0;
+        unsigned constantId = 0, instanceMapId = 0;
+        if (mapped && retainColor)
+        {
+            if (resources[0] != "null")
+                for (const auto& node : split(metadata.get(resources[0])))
+                {
+                    const auto fields = split(metadata.get(node));
+                    need(fields.size() >= 7 && fields[3] != "i32 31", "Reserved instance map space collision");
+                    instanceMapId = std::max(instanceMapId, number(fields[0], "i32 ") + 1);
+                }
+            metadata.append(
+                resources[0],
+                metadata.add(
+                    "i32 " + std::to_string(instanceMapId) +
+                    ", %Glass.InstanceRead* undef, !\"GlassInstances\", i32 31, i32 1, i32 1, i32 11, i32 0, null"));
+        }
         if (resources[2] != "null")
             for (const auto& node : split(metadata.get(resources[2])))
             {
@@ -580,6 +656,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << c << ", i32 undef)\n";
         code << "  %glass.valid = call float @dx.op.loadInput.f32(i32 4, i32 " << previous + 1
              << ", i32 0, i8 0, i32 undef)\n";
+        if (mapped)
+            code << "  %glass.mapindex = call i32 @dx.op.loadInput.i32(i32 4, i32 " << previous + 2
+                 << ", i32 0, i8 0, i32 undef)\n";
         code << R"(  %glass.vok = fcmp oeq float %glass.valid, 0.000000e+00
   %glass.wok = fcmp ogt float %glass.p3, 0.000000e+00
   %glass.ok = and i1 %glass.vok, %glass.wok
@@ -657,7 +736,18 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float %glass.alpha)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
-        body.replace(body.find("  ret void"), 10, retainColor ? Detail::CaptureOriginalColor(code.str()) : code.str());
+        body.replace(body.find("  ret void"), 10,
+                     retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId) : code.str());
+        if (mapped)
+        {
+            if (retainColor)
+            {
+                body.insert(body.find("define void "), "%Glass.InstanceRead = type { i32 }\n\n");
+                body += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+            }
+            if (body.find("declare i32 @dx.op.loadInput.i32") == std::string::npos)
+                body += "declare i32 @dx.op.loadInput.i32(i32, i32, i32, i8, i32)\n";
+        }
         if (retainColor)
         {
             for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "D3D12_Hooks.h"
+#include <framegen/glass/GeometryCreation.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include <Util.h>
@@ -1951,8 +1952,8 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     if (!Config::Instance()->MipmapBiasOverride.has_value() && !Config::Instance()->AnisotropyOverride.has_value() &&
         !Config::Instance()->ExtendedStateRestore.value_or_default())
     {
-        return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
-                                     ppvRootSignature);
+        return GlassFg::CreateObservedGeometryRoot(o_CreateRootSignature, device, nodeMask, pBlobWithRootSignature,
+                                                    blobLengthInBytes, riid, ppvRootSignature);
     }
 
     ID3D12VersionedRootSignatureDeserializer* deserializer = nullptr;
@@ -1963,8 +1964,8 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     if (FAILED(result))
     {
         LOG_ERROR("Failed to create deserializer, error: {:X}", (UINT) result);
-        return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
-                                     ppvRootSignature);
+        return GlassFg::CreateObservedGeometryRoot(o_CreateRootSignature, device, nodeMask, pBlobWithRootSignature,
+                                                    blobLengthInBytes, riid, ppvRootSignature);
     }
 
     const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc = deserializer->GetUnconvertedRootSignatureDesc();
@@ -1973,7 +1974,8 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     if (!Config::Instance()->MipmapBiasOverride.has_value() && !Config::Instance()->AnisotropyOverride.has_value())
     {
         auto result =
-            o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid, ppvRootSignature);
+            GlassFg::CreateObservedGeometryRoot(o_CreateRootSignature, device, nodeMask, pBlobWithRootSignature,
+                                                 blobLengthInBytes, riid, ppvRootSignature);
 
         if (SUCCEEDED(result))
         {
@@ -2074,8 +2076,8 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
 
     if (SUCCEEDED(result))
     {
-        result = o_CreateRootSignature(device, nodeMask, newBlob->GetBufferPointer(), newBlob->GetBufferSize(), riid,
-                                       ppvRootSignature);
+        result = GlassFg::CreateObservedGeometryRoot(o_CreateRootSignature, device, nodeMask, newBlob->GetBufferPointer(),
+                                                      newBlob->GetBufferSize(), riid, ppvRootSignature);
         newBlob->Release();
 
         if (errorBlob)
@@ -2093,7 +2095,8 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
 
         // Fallback to original blob
         result =
-            o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid, ppvRootSignature);
+            GlassFg::CreateObservedGeometryRoot(o_CreateRootSignature, device, nodeMask, pBlobWithRootSignature,
+                                                 blobLengthInBytes, riid, ppvRootSignature);
     }
 
     deserializer->Release();
@@ -2238,6 +2241,8 @@ static void HookToDevice(ID3D12Device* InDevice)
         }
     }
 
+    if (o_CreateRootSignature)
+        GlassFg::InitializeGeometryHost(realDevice ? realDevice : InDevice);
     HookToCommandList(InDevice);
 
     if (State::Instance().activeFgInput == FGInput::Upscaler &&

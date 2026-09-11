@@ -1,0 +1,481 @@
+#include "GeometryTestDevice.h"
+#include "../GeometryPipelineCache.h"
+#include "../GeometryCreation.h"
+#pragma warning(push, 0)
+#include <d3dx/d3dx12.h>
+#pragma warning(pop)
+
+static std::shared_ptr<const GlassFg::GeometryPipelineEntry>
+observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc)
+{
+    auto extra = desc;
+    extra.SampleMask = 0x7fffffff;
+    ComPtr<ID3D12Device2> device2;
+    check(device->QueryInterface(IID_PPV_ARGS(&device2)));
+    CD3DX12_PIPELINE_STATE_STREAM state(extra);
+    D3D12_PIPELINE_STATE_STREAM_DESC stream { sizeof(state), &state };
+    ComPtr<ID3D12PipelineState> streamPso, excessPso, invalidPso;
+    check(device2->CreatePipelineState(&stream, IID_PPV_ARGS(&streamPso)));
+    extra.SampleMask = 1;
+    check(device->CreateGraphicsPipelineState(&extra, IID_PPV_ARGS(&excessPso)));
+    extra.NumRenderTargets = 9;
+    require(FAILED(device->CreateGraphicsPipelineState(&extra, IID_PPV_ARGS(&invalidPso))) && !invalidPso,
+            "Invalid original PSO creation result was changed");
+    require(!GlassFg::FindGeometryPipeline(streamPso.Get()) && !GlassFg::FindGeometryPipeline(excessPso.Get()),
+            "Stream or over-budget PSO unexpectedly admitted");
+    const auto deadline = GetTickCount64() + 10000;
+    while (GlassFg::GetGeometryCreationStats().cache.pending && GetTickCount64() < deadline)
+        Sleep(1);
+    const auto stats = GlassFg::GetGeometryCreationStats();
+    auto lease = GlassFg::FindGeometryPipeline(original);
+    if (!lease)
+        throw std::runtime_error(stats.cache.lastError.empty() ? "Creation observer did not build pipeline"
+                                                               : stats.cache.lastError);
+    require(stats.active && stats.roots == 1 && stats.graphics == 2 && stats.streams == 1 && stats.cache.roots == 1 &&
+                stats.cache.pipelines == 1 && stats.cache.ready == 1 && !stats.cache.rejected && !stats.cache.pending,
+            "Creation observer missed or recursively captured a call");
+    GlassFg::StopGeometryCreation();
+    require(!GlassFg::FindGeometryPipeline(original) && !GlassFg::GetGeometryCreationStats().active,
+            "Stopped creation observer remained active");
+    return lease;
+}
+
+static std::shared_ptr<const GlassFg::GeometryPipelineEntry>
+cachedPipeline(ID3D12Device* device, ID3D12RootSignature* root, ID3DBlob* serialized, ID3D12PipelineState* original,
+               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc, const std::filesystem::path& compiler)
+{
+    GlassFg::GeometryPipelineCache cache(device, compiler, { 1, 1, 4 * 1024 * 1024 });
+    require(cache.rootCreated(root, 0, serialized->GetBufferPointer(), serialized->GetBufferSize()), "Cache root");
+    require(cache.rootCreated(root, 0, serialized->GetBufferPointer(), serialized->GetBufferSize()),
+            "Duplicate cache root");
+    std::vector<std::byte> vs(desc.VS.BytecodeLength), ps(desc.PS.BytecodeLength);
+    memcpy(vs.data(), desc.VS.pShaderBytecode, vs.size());
+    memcpy(ps.data(), desc.PS.pShaderBytecode, ps.size());
+    auto supplied = desc;
+    supplied.VS = { vs.data(), vs.size() };
+    supplied.PS = { ps.data(), ps.size() };
+    require(cache.pipelineCreated(original, supplied), "Cache pipeline");
+    require(cache.pipelineCreated(original, supplied), "Duplicate cache pipeline");
+    std::fill(vs.begin(), vs.end(), std::byte {});
+    std::fill(ps.begin(), ps.end(), std::byte {});
+    const auto deadline = GetTickCount64() + 10000;
+    while (cache.stats().pending && GetTickCount64() < deadline)
+        Sleep(1); // Test-only wait.
+    auto lease = cache.find(original);
+    const auto stats = cache.stats();
+    if (!lease)
+        throw std::runtime_error(stats.lastError.empty() ? "Compiler worker did not complete" : stats.lastError);
+    require(stats.roots == 1 && stats.pipelines == 1 && stats.ready == 1 && !stats.rejected && !stats.pending,
+            "Cache accounting or duplicate compilation");
+    require(lease->original.Get() == original && lease->description.VS.pShaderBytecode == lease->vertexBytes.data(),
+            "Pipeline bytes not owned");
+    cache.stop();
+    require(!cache.find(original), "Stopped cache admitted a new draw");
+    return lease; // Render after the cache and its worker have been destroyed.
+}
+
+// Original VS stream output supplies the reference geometry. Object order is
+// deliberately changed every frame; original per-instance vertex input carries
+// the synthetic identity. This fixture is not an engine identity provider.
+static std::array<double, 2> referenceMotion(const Clip* now, const Clip* before, UINT x, UINT y, UINT w, UINT h)
+{
+    double best = -1e30, weights[3] {}, selectedW[3] {};
+    UINT selected = 0;
+    for (UINT triangle = 0; triangle < 2; ++triangle)
+    {
+        double sx[3], sy[3], cw[3];
+        for (UINT k = 0; k < 3; ++k)
+        {
+            const auto& v = now[triangle * 3 + k].xyzw;
+            cw[k] = v[3];
+            sx[k] = (v[0] / cw[k] * .5 + .5) * w;
+            sy[k] = (-v[1] / cw[k] * .5 + .5) * h;
+        }
+        const double ax = sx[1] - sx[0], ay = sy[1] - sy[0], bx = sx[2] - sx[0], by = sy[2] - sy[0];
+        const double px = x + .5 - sx[0], py = y + .5 - sy[0], den = ax * by - ay * bx;
+        double b[3];
+        b[1] = (px * by - py * bx) / den;
+        b[2] = (ax * py - ay * px) / den;
+        b[0] = 1 - b[1] - b[2];
+        const double score = std::min(b[0], std::min(b[1], b[2]));
+        if (score > best)
+        {
+            best = score;
+            selected = triangle * 3;
+            memcpy(weights, b, sizeof(b));
+            memcpy(selectedW, cw, sizeof(cw));
+        }
+    }
+    require(best > -.002, "Reference outside original object");
+    double previous[4] {};
+    for (UINT k = 0; k < 3; ++k)
+        for (UINT c = 0; c < 4; ++c)
+            previous[c] += weights[k] / selectedW[k] * before[selected + k].xyzw[c];
+    return { previous[0] / previous[3] * .5 + .5 - (x + .5) / w, -previous[1] / previous[3] * .5 + .5 - (y + .5) / h };
+}
+
+int wmain(int argc, wchar_t** argv)
+{
+    try
+    {
+        require(argc == 3 || (argc == 4 && wcscmp(argv[3], L"--observe") == 0),
+                "GeometryInstances artifact-directory dxcompiler.dll [--observe]");
+        const bool observed = argc == 4;
+        const std::filesystem::path dir(argv[1]);
+        auto vs = read(dir / "instances.dxil"), ps = read(dir / "fixture-pixel.dxil");
+        Device g;
+        struct Stop
+        {
+            ~Stop() { GlassFg::StopGeometryCreation(); }
+        } stop;
+        if (observed)
+            require(GlassFg::StartGeometryCreation(g.d.Get(), std::filesystem::absolute(argv[2]),
+                                                   { 1, 1, 4 * 1024 * 1024 }),
+                    "Install real creation observer");
+        D3D12_ROOT_PARAMETER parameter {};
+        parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameter.Constants = { 0, 0, 4 };
+        parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_ROOT_SIGNATURE_DESC rootDesc { 1, &parameter, 0, nullptr,
+                                             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                                                 D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT };
+        ComPtr<ID3DBlob> serialized, errors;
+        check(D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+        ComPtr<ID3D12RootSignature> originalRoot;
+        auto createRoot = [](ID3D12Device* device, UINT node, const void* data, SIZE_T bytes, REFIID iid, void** output)
+        { return device->CreateRootSignature(node, data, bytes, iid, output); };
+        check(GlassFg::CreateObservedGeometryRoot(createRoot, g.d.Get(), 0, serialized->GetBufferPointer(),
+                                                  serialized->GetBufferSize(), IID_PPV_ARGS(&originalRoot)));
+        constexpr UINT W = 160, H = 112, SOBytes = 4096, Slots = 64, HistoryBytes = Slots * sizeof(History);
+        constexpr UINT RoiLeft = 12, RoiTop = 10, RoiWidth = W - 24, RoiHeight = H - 20, RoiStride = RoiWidth + 4;
+        constexpr UINT Segment = RoiStride * RoiHeight + 32, CapturePixels = 3 * Segment + 32,
+                       CaptureBytes = CapturePixels * 32;
+        constexpr UINT historyBase[] = { 9, 31, 49 };
+        D3D12_DESCRIPTOR_HEAP_DESC hd { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 5, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
+        ComPtr<ID3D12DescriptorHeap> heap, depthHeap;
+        check(g.d->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)));
+        hd = { D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
+        check(g.d->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&depthHeap)));
+        const auto dsv = depthHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_RESOURCE_DESC texture {};
+        texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture.Width = W;
+        texture.Height = H;
+        texture.DepthOrArraySize = texture.MipLevels = 1;
+        texture.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        texture.SampleDesc.Count = 1;
+        texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_HEAP_PROPERTIES hp {};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        std::array<ComPtr<ID3D12Resource>, 5> colors;
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 5> rtvs;
+        const UINT increment = g.d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        for (UINT i = 0; i < colors.size(); ++i)
+        {
+            check(g.d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                               nullptr, IID_PPV_ARGS(&colors[i])));
+            rtvs[i] = { heap->GetCPUDescriptorHandleForHeapStart().ptr + i * increment };
+            g.d->CreateRenderTargetView(colors[i].Get(), nullptr, rtvs[i]);
+        }
+        auto depthDesc = texture;
+        depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        ComPtr<ID3D12Resource> depth;
+        check(g.d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &depthDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                           nullptr, IID_PPV_ARGS(&depth)));
+        g.d->CreateDepthStencilView(depth.Get(), nullptr, dsv);
+        D3D12_INPUT_ELEMENT_DESC layout[] {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "OBJECT_ID", 0, DXGI_FORMAT_R32_UINT, 1, 0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 }
+        };
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd {};
+        pd.pRootSignature = originalRoot.Get();
+        pd.VS = { vs.data(), vs.size() };
+        pd.PS = { ps.data(), ps.size() };
+        auto& blend = pd.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.SampleMask = UINT_MAX;
+        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.DepthStencilState.DepthEnable = TRUE;
+        pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        pd.InputLayout = { layout, 3 };
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1;
+        pd.RTVFormats[0] = texture.Format;
+        pd.DSVFormat = depthDesc.Format;
+        pd.SampleDesc.Count = 1;
+        ComPtr<ID3D12PipelineState> original, capturePso, streamPso;
+        check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&original)));
+        auto lease = observed ? observedPipeline(g.d.Get(), original.Get(), pd)
+                              : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
+                                               std::filesystem::absolute(argv[2]));
+        const auto& root = *lease->root;
+        capturePso = lease->instrumented;
+        require(root.dwords == 22 && root.instanceSlot == 6, "Mapped root extension");
+        D3D12_SO_DECLARATION_ENTRY so { 0, "SV_Position", 0, 0, 4, 0 };
+        UINT soStride = sizeof(Clip);
+        pd.StreamOutput = { &so, 1, &soStride, 1, 0 };
+        check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&streamPso)));
+        const Vertex vertices[] = {
+            {}, {}, { -.35f, -.5f, 0, 0, 1 }, { -.35f, .5f, 0, 0, 0 }, { .35f, .5f, 0, 1, 0 }, { .35f, -.5f, 0, 1, 1 }
+        };
+        const uint16_t indices[] = { 0, 1, 2, 0, 2, 3 };
+        auto vb = g.buffer(sizeof(vertices), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto ib = g.buffer(sizeof(indices), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto objects = g.buffer(10 * sizeof(UINT), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto mappingBuffer =
+            g.buffer(10 * sizeof(GlassFg::GeometryInstance), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto pixelConstants = g.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        upload(vb.Get(), vertices, sizeof(vertices));
+        upload(ib.Get(), indices, sizeof(indices));
+        D3D12_VERTEX_BUFFER_VIEW views[] { { vb->GetGPUVirtualAddress(), sizeof(vertices), sizeof(Vertex) },
+                                           { objects->GetGPUVirtualAddress(), 40, 4 } };
+        D3D12_INDEX_BUFFER_VIEW indexView { ib->GetGPUVirtualAddress(), sizeof(indices), DXGI_FORMAT_R16_UINT };
+        auto capture = g.buffer(CaptureBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
+                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto stream = g.buffer(SOBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+        std::array<ComPtr<ID3D12Resource>, 2> history;
+        for (auto& h : history)
+            h = g.buffer(HistoryBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST,
+                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto zeros = g.buffer(CaptureBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        std::vector<char> zero(CaptureBytes);
+        upload(zeros.Get(), zero.data(), zero.size());
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+        UINT64 imageBytes;
+        g.d->GetCopyableFootprints(&texture, 0, 1, 0, &footprint, nullptr, nullptr, &imageBytes);
+        const UINT64 readBytes = imageBytes * 5 + SOBytes + HistoryBytes + CaptureBytes;
+        auto readback = g.buffer(readBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        g.begin();
+        for (auto& h : history)
+        {
+            g.c->CopyBufferRegion(h.Get(), 0, zeros.Get(), 0, HistoryBytes);
+            g.barrier(h.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, CaptureBytes);
+        g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        g.c->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+        D3D12_RECT blocked { 0, 0, W / 2, H };
+        g.c->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, .3f, 0, 1, &blocked);
+        g.finish();
+        std::array<Clip, 18> last {};
+        UINT64 checked = 0, overlaps = 0, exact = 0;
+        double maximum = 0;
+        for (UINT frame = 1; frame <= 5; ++frame)
+        {
+            UINT order[10] {};
+            std::array<GlassFg::GeometryInstance, 10> mapping {};
+            for (UINT i = 0; i < 3; ++i)
+            {
+                const UINT object = (i + frame) % 3;
+                order[7 + i] = object;
+                const UINT status = 8 + object * Segment;
+                mapping[5 + i] = { historyBase[object],
+                                   4,
+                                   0,
+                                   42 + object + (object == 2 && frame >= 3 ? 9u : 0u),
+                                   RoiLeft,
+                                   RoiTop,
+                                   frame == 4 && object == 1 ? 1u : RoiWidth,
+                                   RoiHeight,
+                                   status + 1,
+                                   RoiStride,
+                                   CapturePixels,
+                                   status };
+            }
+            GlassFg::InstanceHistoryConstants hc { 5, 10, Slots, 0, 3, 0, frame, frame - 1 };
+            require(hc.valid(mapping, Slots, CapturePixels), "Instance allocation validation");
+            auto invalid = hc;
+            invalid.mappingBase = 9;
+            require(!invalid.valid(mapping, Slots, CapturePixels), "Out-of-range mapping admitted");
+            auto badMap = mapping;
+            badMap[5].statusIndex = badMap[5].pixelBase;
+            require(!hc.valid(badMap, Slots, CapturePixels), "Status/pixel overlap admitted");
+            upload(objects.Get(), order, sizeof(order));
+            upload(mappingBuffer.Get(), mapping.data(), sizeof(mapping));
+            GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame,         0,
+                                                   0, 0, W,       H,       0, W, CapturePixels, 0 };
+            upload(pixelConstants.Get(), &pc, sizeof(pc));
+            const float fc[] { frame * .31f, frame * .023f, frame * -.017f, 0 };
+            const UINT current = frame & 1, previous = current ^ 1;
+            g.begin();
+            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+            for (UINT object = 0; object < 3; ++object)
+                g.c->CopyBufferRegion(capture.Get(), (8 + object * Segment) * 32, zeros.Get(), 0, 32);
+            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            if (frame == 3)
+            {
+                g.barrier(history[previous].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                          D3D12_RESOURCE_STATE_COPY_DEST);
+                g.c->CopyBufferRegion(history[previous].Get(), (historyBase[0] + 3) * 32 + 16, zeros.Get(), 0, 4);
+                g.barrier(history[previous].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+            g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            g.c->CopyBufferRegion(stream.Get(), 0, zeros.Get(), 0, SOBytes);
+            g.barrier(stream.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_STREAM_OUT);
+            D3D12_VIEWPORT viewport { 0, 0, float(W), float(H), 0, 1 };
+            D3D12_RECT scissor { 0, 0, W, H };
+            g.c->RSSetViewports(1, &viewport);
+            g.c->RSSetScissorRects(1, &scissor);
+            g.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            g.c->IASetVertexBuffers(0, 2, views);
+            g.c->IASetIndexBuffer(&indexView);
+            for (UINT pass = 0; pass < 5; ++pass)
+            {
+                const bool instrument = pass == 1;
+                g.c->SetGraphicsRootSignature(instrument ? root.extended.Get() : originalRoot.Get());
+                g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
+                g.c->SetPipelineState(instrument ? capturePso.Get() : pass == 0 ? streamPso.Get() : original.Get());
+                if (instrument)
+                {
+                    g.c->SetGraphicsRoot32BitConstants(root.constantsSlot, 8, &hc, 0);
+                    g.c->SetGraphicsRootShaderResourceView(root.previousSlot,
+                                                           history[previous]->GetGPUVirtualAddress());
+                    g.c->SetGraphicsRootUnorderedAccessView(root.currentSlot, history[current]->GetGPUVirtualAddress());
+                    g.c->SetGraphicsRootConstantBufferView(root.materialSlot, pixelConstants->GetGPUVirtualAddress());
+                    g.c->SetGraphicsRootUnorderedAccessView(root.captureSlot, capture->GetGPUVirtualAddress());
+                    g.c->SetGraphicsRootShaderResourceView(root.instanceSlot, mappingBuffer->GetGPUVirtualAddress());
+                }
+                D3D12_STREAM_OUTPUT_BUFFER_VIEW streamView {};
+                if (!pass)
+                    streamView = { stream->GetGPUVirtualAddress() + 256, SOBytes - 256,
+                                   stream->GetGPUVirtualAddress() };
+                g.c->SOSetTargets(0, 1, &streamView);
+                g.c->OMSetRenderTargets(1, &rtvs[pass], FALSE, &dsv);
+                const float clear[4] {};
+                g.c->ClearRenderTargetView(rtvs[pass], clear, 0, nullptr);
+                if (pass < 2)
+                    g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+                else
+                {
+                    UINT index = 0;
+                    while (order[7 + index] != pass - 2)
+                        ++index;
+                    g.c->DrawIndexedInstanced(6, 1, 0, 2, 7 + index);
+                }
+                g.barrier(colors[pass].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION src {}, dst {};
+                src.pResource = colors[pass].Get();
+                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dst.pResource = readback.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint = footprint;
+                dst.PlacedFootprint.Offset = pass * imageBytes;
+                g.c->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                g.barrier(colors[pass].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            }
+            g.barrier(stream.Get(), D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.c->CopyBufferRegion(readback.Get(), 5 * imageBytes, stream.Get(), 0, SOBytes);
+            g.barrier(stream.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.c->CopyBufferRegion(readback.Get(), 5 * imageBytes + SOBytes, history[current].Get(), 0, HistoryBytes);
+            g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.c->CopyBufferRegion(readback.Get(), 5 * imageBytes + SOBytes + HistoryBytes, capture.Get(), 0,
+                                  CaptureBytes);
+            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            g.finish();
+            void* data;
+            D3D12_RANGE readRange { 0, SIZE_T(readBytes) };
+            check(readback->Map(0, &readRange, &data));
+            const auto* bytes = static_cast<const char*>(data);
+            require(!memcmp(bytes, bytes + imageBytes, size_t(imageBytes)),
+                    "Per-instance capture changed original color/depth/discard");
+            exact += W * H;
+            require(*reinterpret_cast<const UINT64*>(bytes + 5 * imageBytes) == 18 * sizeof(Clip),
+                    "Original SO byte count");
+            const auto* emitted = reinterpret_cast<const Clip*>(bytes + 5 * imageBytes + 256);
+            const auto* hist = reinterpret_cast<const History*>(bytes + 5 * imageBytes + SOBytes);
+            const auto* pixels =
+                reinterpret_cast<const CaptureRecord*>(bytes + 5 * imageBytes + SOBytes + HistoryBytes);
+            std::array<Clip, 18> now {};
+            for (UINT i = 0; i < 3; ++i)
+                memcpy(now.data() + order[7 + i] * 6, emitted + i * 6, 6 * sizeof(Clip));
+            for (UINT i = 0; i < 3; ++i)
+            {
+                const UINT object = order[7 + i];
+                const auto& entry = mapping[5 + i];
+                for (UINT v = 0; v < 6; ++v)
+                {
+                    const auto& vertex = hist[entry.historyBase + indices[v]];
+                    require(vertex.frame == frame && vertex.generation == entry.generation &&
+                                !memcmp(vertex.clip, now[object * 6 + v].xyzw, 16),
+                            "Rebatched object history mismatch");
+                }
+                UINT expectedFlags = frame == 1 || (frame == 3 && object != 1) ? GlassFg::GeometryMissingHistory : 0;
+                if (frame == 4 && object == 1)
+                    expectedFlags = GlassFg::GeometryEscapedBounds;
+                const UINT actualFlags = *reinterpret_cast<const UINT*>(&pixels[entry.statusIndex]);
+                if (actualFlags != expectedFlags)
+                    printf("FLAG frame=%u object=%u expected=%u actual=%u\n", frame, object, expectedFlags,
+                           actualFlags);
+                require(actualFlags == expectedFlags, "Object rejection flag mismatch");
+                if (expectedFlags)
+                    continue;
+                for (UINT y = 0; y < H; ++y)
+                    for (UINT x = 0; x < W; ++x)
+                    {
+                        const auto* originalPixel = reinterpret_cast<const float*>(
+                            bytes + (object + 2) * imageBytes + y * footprint.Footprint.RowPitch + x * 16);
+                        const bool covered = originalPixel[3] > 0;
+                        const bool inRect = x >= entry.left && y >= entry.top && x < entry.left + entry.width &&
+                                            y < entry.top + entry.height;
+                        require(!covered || inRect, "Fixture unexpectedly escapes rectangle");
+                        if (!inRect)
+                            continue;
+                        const auto& pixel = pixels[entry.pixelBase + (y - entry.top) * entry.stride + x - entry.left];
+                        require((pixel.frame == frame) == covered,
+                                "Individual original material contour/depth coverage mismatch");
+                        if (!covered)
+                            continue;
+                        const auto mv = referenceMotion(now.data() + object * 6, last.data() + object * 6, x, y, W, H);
+                        for (UINT c = 0; c < 2; ++c)
+                        {
+                            const double error = std::abs(pixel.motion[c] - mv[c]) * (c ? H : W);
+                            maximum = std::max(maximum, error);
+                            require(error < .004, "Rebatched object motion mismatch");
+                        }
+                        for (float t : pixel.transmission)
+                            require(std::abs(t - (1 - originalPixel[3])) < 3e-7,
+                                    "Cross-object transmission contamination");
+                        require(std::abs(pixel.depth - (.4f + object * .03f)) < 1e-6, "Object depth contamination");
+                        for (UINT other = object + 1; other < 3; ++other)
+                        {
+                            const auto* p = reinterpret_cast<const float*>(bytes + (other + 2) * imageBytes +
+                                                                           y * footprint.Footprint.RowPitch + x * 16);
+                            overlaps += p[3] > 0;
+                        }
+                        ++checked;
+                    }
+            }
+            last = now;
+            D3D12_RANGE noWrite { 0, 0 };
+            readback->Unmap(0, &noWrite);
+        }
+        require(checked > 1000 && overlaps > 100, "Insufficient per-object overlap coverage");
+        printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u instance_rebatch=1 "
+               "isolated_contours=1 opaque_depth_rejection=1 partial_history_flag=1 "
+               "generation_flag=1 escaped_bounds_flag=1 original_pixels=%llu motion_pixels=%llu "
+               "overlapping_samples=%llu max_motion_error_px=%.9f\n",
+               observed, exact, checked, overlaps, maximum);
+        return 0;
+    }
+    catch (const std::exception& e)
+    {
+        fprintf(stderr, "FAIL %s\n", e.what());
+        return 1;
+    }
+}
