@@ -9,6 +9,39 @@
 
 ## Implemented source
 
+`VertexInputPair` records two explicitly selected uint32 input components in
+the existing 32-byte vertex record at offsets 24/28. It rejects absent IDs,
+unsupported packing/types, invalid components and conflicting diagnostic
+payloads. Original output calculations and the pixel shader stay unchanged.
+The standalone unused-Z/W test preserves six exact uint words, current position,
+frame/generation and guard records; native-pair/depth and the 32-frame history
+regressions also pass. This adds two input reads and widens the existing tag
+store, without additional history allocation or a second draw.
+
+`GLASS_CAPTURE_INPUT_WORDS` builds the replaceable diagnostic. After the usual
+compiler/output/selection lines, config requires
+`input-words-v1 PID PIPELINE INPUT_ID FIRST_COMPONENT SECOND_COMPONENT`.
+Its format-4 sidecar labels the input ID/components and byte offset. Numeric
+selection is an audited experiment filter, not production material detection.
+The compiler tool exposes `rewrite-input[-mapped]` with `ID,FIRST,SECOND`.
+Compile `InputWordsVertex.hlsl` to `input-words-vs.dxil`, then run
+`NativePairGpu FIXTURES DXCOMPILER --input-words` for the independent GPU check.
+
+Live PID 72636 generations 9 and 10 each saved 64 captures / 6,272 vertices on
+the observed pipeline 853, without restarting. Input ID 9 is the original
+`INSTANCE_SKINNING_DATA` uint4; the original shader reads only X/Y. The first run
+read Z/W: Z was nonzero and W was one. The second read X/Z: they differed in every
+captured vertex. Three exact consecutive pairs, matched by recorded proxy/mesh/
+slot/generation/chunk/layout/viewport, had current Z equal to preceding X for
+all 155 vertices each. This supports a previous bone-offset candidate already
+supplied to this transparent draw. It does not prove bone-buffer contents,
+previous deformation, camera/world transforms, general route coverage or MV.
+Next validation must evaluate that previous state and compare its positions
+against original N-1 outputs; buffer address equality alone is insufficient.
+Evidence: local `work/glass-input-words-v1/capture-analysis.json` and
+`capture-xz-analysis.json`. Both generations retired and unloaded; totals are
+384 recorded/retired, zero pending/loaded modules, `fg_connected=0`.
+
 The replaceable-module bridge now optionally forwards pre-submit observations
 for each captured recording, in actual command-list order. The separate
 `GlassExperimentSubmission` capability preserves the existing capture ABI.

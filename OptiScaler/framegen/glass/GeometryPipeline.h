@@ -12,6 +12,7 @@ namespace GlassFg
 {
 enum class MaterialMotionTarget;
 struct VertexConstantPair;
+struct VertexInputPair;
 struct VertexClipPair;
 struct NativeClipInputs;
 // Captured serialized bytes must belong to originalIdentity after any upstream
@@ -61,7 +62,8 @@ class GeometryCompiler
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
                                 const VertexConstantPair* capture = nullptr,
-                                const VertexClipPair* clipPair = nullptr);
+                                const VertexClipPair* clipPair = nullptr,
+                                const VertexInputPair* inputPair = nullptr);
     // Original native PS without discard/depth exports; added same-draw MV UAV.
     // Explicit native clip inputs, original color/depth state, no second draw.
     HRESULT createNativeMotionCapture(ID3D12Device* device, const GeometryRoot& root,
@@ -78,6 +80,7 @@ class GeometryCompiler
                          MaterialMotionTarget target, bool vertexOnly = false,
                          const VertexConstantPair* capture = nullptr,
                          const VertexClipPair* clipPair = nullptr,
-                         const NativeClipInputs* nativeInputs = nullptr);
+                         const NativeClipInputs* nativeInputs = nullptr,
+                         const VertexInputPair* inputPair = nullptr);
 };
 } // namespace GlassFg

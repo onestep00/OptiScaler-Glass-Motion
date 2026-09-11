@@ -48,6 +48,13 @@ struct VertexConstantPair
 {
     unsigned space, binding, bytes, row;
 };
+// Explicit original uint input signature ID/components. Diagnostic raw words
+// at bytes 24/28, mutually exclusive with the other diagnostic payloads.
+// Values have no inferred bone/history meaning.
+struct VertexInputPair
+{
+    unsigned input, first, second;
+};
 // Explicitly audited native VS output IDs, not automatically identified motion.
 // Diagnostic records are 64 bytes: original clip float4 and frame/gen/padding,
 // followed by selected current and previous clip float4 at bytes 32 and 48.
@@ -73,7 +80,8 @@ VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsi
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly,
                                          GeometryLayout layout = GeometryLayout::Contiguous,
                                          const VertexConstantPair* capture = nullptr,
-                                         const VertexClipPair* clipPair = nullptr);
+                                         const VertexClipPair* clipPair = nullptr,
+                                         const VertexInputPair* inputPair = nullptr);
 
 enum class MaterialSource
 {

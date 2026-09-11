@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): Raw unused uint inputs verified on GPU and live. Three N-1 pairs have current Z equal to previous X; bone contents/previous geometry and dense MV/FG remain unverified.
+
 - [GeometryShaders.md](GeometryShaders.md): Optional pre-submit module bridge passes actual queue callbacks and legacy capture/unload; unsupported hosts reject it. No live history reuse or FG integration.
 
 - [GeometryShaders.md](GeometryShaders.md): 32-frame single-list GPU history test reuses two buffers without interframe CPU waits/copies; 558 previous vertices match. Game queue admission and dense MV/FG remain incomplete.

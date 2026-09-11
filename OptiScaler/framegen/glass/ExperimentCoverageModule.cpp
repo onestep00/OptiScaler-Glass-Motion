@@ -39,7 +39,13 @@ static_assert(!VertexCoverageDiagnostic, "Native pair and coverage use different
 constexpr bool NativePairDiagnostic = false;
 #endif
 constexpr unsigned VertexRecordBytes = NativePairDiagnostic ? 64 : 32;
-#if defined(GLASS_CAPTURE_VERTEX_OUTPUTS) || defined(GLASS_CAPTURE_VERTEX_COVERAGE) || defined(GLASS_CAPTURE_NATIVE_PAIR)
+#ifdef GLASS_CAPTURE_INPUT_WORDS
+constexpr bool InputWordsDiagnostic = true;
+static_assert(!NativePairDiagnostic && !VertexCoverageDiagnostic && !NativePixelDiagnostic);
+#else
+constexpr bool InputWordsDiagnostic = false;
+#endif
+#if defined(GLASS_CAPTURE_VERTEX_OUTPUTS) || defined(GLASS_CAPTURE_VERTEX_COVERAGE) || defined(GLASS_CAPTURE_NATIVE_PAIR) || defined(GLASS_CAPTURE_INPUT_WORDS)
 constexpr bool VertexOutputDiagnostic = true;
 #else
 constexpr bool VertexOutputDiagnostic = false;
@@ -106,6 +112,7 @@ class Coverage
     ExperimentCensusLog census;
     ExperimentCaptureSelection selection;
     VertexClipPair clipPair {};
+    VertexInputPair inputWords {};
     uint64_t nativePipeline = 0;
     uint64_t selectionAccepted = 0, selectionRejected = 0;
     std::array<Slot, SlotCount> slots;
@@ -158,6 +165,8 @@ class Coverage
                 ? dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error, &cameraWords)
                 : NativePairDiagnostic
                 ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, nullptr, &clipPair)
+                : InputWordsDiagnostic
+                ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, nullptr, nullptr, &inputWords)
                 : VertexOutputDiagnostic
                 ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error, &cameraWords)
                 : dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error);
@@ -282,6 +291,9 @@ class Coverage
             if constexpr (NativePairDiagnostic)
                 meta << "vertex_format=3\nrecord_bytes=64\ncurrent_clip_offset=32\nprevious_clip_offset=48\ncurrent_output="
                      << clipPair.currentOutput << "\nprevious_output=" << clipPair.previousOutput;
+            else if constexpr (InputWordsDiagnostic)
+                meta << "vertex_format=4\nrecord_bytes=32\nextra_word_offset=24\ninput_id=" << inputWords.input
+                     << "\ninput_first_component=" << inputWords.first << "\ninput_second_component=" << inputWords.second;
             else
                 meta << "vertex_format=2\nrecord_bytes=32\nextra_word_offset=24\nextra_cb_space=0\nextra_cb_binding=1\nextra_cb_bytes=848\nextra_cb_row=51";
             meta << "\nframe=" << slot.frame
@@ -397,8 +409,8 @@ class Coverage
     }
   public:
     Coverage(ID3D12Device* d, std::filesystem::path c, std::filesystem::path o, ExperimentCaptureSelection select,
-             VertexClipPair pair, uint64_t selectedPipeline)
-        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select), clipPair(pair), nativePipeline(selectedPipeline)
+             VertexClipPair pair, uint64_t selectedPipeline, VertexInputPair words)
+        : device(d), compiler(std::move(c)), output(std::move(o)), selection(select), clipPair(pair), inputWords(words), nativePipeline(selectedPipeline)
     {
         if (!d || !compiler.is_absolute() || !std::filesystem::is_regular_file(compiler) || !output.is_absolute() ||
             !std::filesystem::create_directory(output)) throw std::runtime_error("Invalid capture module paths");
@@ -458,7 +470,7 @@ class Coverage
             !d->instances || d->instances > MaxInstances || !d->objectAt || !d->meshShape || d->objectCount > 4096 ||
             !d->pipelineIdentity || !d->pipelineAccess.retain || !d->pipelineAccess.view || !d->pipelineAccess.release)
             return 0;
-        if (((NativePairDiagnostic || NativePixelDiagnostic) && d->pipelineIdentity != nativePipeline) ||
+        if (((NativePairDiagnostic || NativePixelDiagnostic || InputWordsDiagnostic) && d->pipelineIdentity != nativePipeline) ||
             (NativePixelDiagnostic && d->instances != 1) || !selection.matches(*d))
         { ++selectionRejected; return 0; }
         ++selectionAccepted;
@@ -650,6 +662,7 @@ int32_t create(const GlassExperimentHost* host, void** context)
             if (!select.empty() && select.back() == '\r') select.pop_back();
         }
         VertexClipPair pair {};
+        VertexInputPair words {};
         uint64_t selectedPipeline = 0;
         if constexpr (NativePairDiagnostic || NativePixelDiagnostic)
         {
@@ -662,11 +675,20 @@ int32_t create(const GlassExperimentHost* host, void** context)
                 (fields >> extra) || pair.currentOutput == pair.previousOutput ||
                 pair.currentOutput >= 32 || pair.previousOutput >= 32) return -1;
         }
+        if constexpr (InputWordsDiagnostic)
+        {
+            std::string line, marker, extra;
+            if (!std::getline(file, line)) return -1;
+            std::istringstream fields(line); uint32_t process = 0;
+            if (!(fields >> marker >> process >> selectedPipeline >> words.input >> words.first >> words.second) ||
+                marker != "input-words-v1" || process != GetCurrentProcessId() || !selectedPipeline ||
+                words.input >= 32 || words.first >= 4 || words.second >= 4 || (fields >> extra)) return -1;
+        }
         if (file.peek() != std::char_traits<char>::eof()) return -1;
         *context = new Coverage(static_cast<ID3D12Device*>(host->device),
             std::filesystem::path(std::u8string(compiler.begin(), compiler.end())),
             std::filesystem::path(std::u8string(output.begin(), output.end())),
-            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()), pair, selectedPipeline);
+            ExperimentCaptureSelection::parse(select, GetCurrentProcessId()), pair, selectedPipeline, words);
         return 0;
     }
     catch (...) { return -1; }

@@ -3,9 +3,11 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 3, "Expected fixture directory and dxcompiler.dll");
+        require(argc == 3 || (argc == 4 && wcscmp(argv[3], L"--input-words") == 0),
+                "Expected fixture directory and dxcompiler.dll [--input-words]");
+        const bool inputWords = argc == 4;
         Device g;
-        const auto vs = read(std::filesystem::path(argv[1]) / "native-pair-vs.dxil");
+        const auto vs = read(std::filesystem::path(argv[1]) / (inputWords ? "input-words-vs.dxil" : "native-pair-vs.dxil"));
         const auto ps = read(std::filesystem::path(argv[1]) / "native-pair-ps.dxil");
         D3D12_ROOT_SIGNATURE_DESC desc {};
         desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -29,10 +31,19 @@ int wmain(int argc, wchar_t** argv)
         pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
         GlassFg::GeometryCompiler compiler {std::filesystem::path(argv[2])};
         const GlassFg::VertexClipPair pair {1,2};
+        const GlassFg::VertexInputPair words {0,2,3};
+        const D3D12_INPUT_ELEMENT_DESC inputLayout {"RAW_WORDS",0,DXGI_FORMAT_R32G32B32A32_UINT,0,0,
+                                                  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
+        if (inputWords) pd.InputLayout = {&inputLayout,1};
         ComPtr<ID3D12PipelineState> pipeline;
-        check(compiler.createVertexCapture(g.d.Get(), root, pd, pipeline, error, nullptr, &pair));
-        constexpr size_t size = 5 * 64;
-        std::array<unsigned char, size> zero {};
+        check(compiler.createVertexCapture(g.d.Get(), root, pd, pipeline, error, nullptr,
+                                           inputWords ? nullptr : &pair, inputWords ? &words : nullptr));
+        const size_t recordBytes = inputWords ? 32 : 64, size = 5 * recordBytes;
+        std::vector<unsigned char> zero(size);
+        const uint32_t wordData[3][4] {{0,0,0x12345678,0xfedcba98},{0,0,48,96},{0,0,UINT32_MAX,0}};
+        auto wordBuffer = g.buffer(sizeof(wordData),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+        upload(wordBuffer.Get(),wordData,sizeof(wordData));
+        const D3D12_VERTEX_BUFFER_VIEW wordView {wordBuffer->GetGPUVirtualAddress(),sizeof(wordData),sizeof(wordData[0])};
         auto prior = g.buffer(size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         auto next = g.buffer(size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         auto back = g.buffer(size, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -59,25 +70,38 @@ int wmain(int argc, wchar_t** argv)
         g.c->RSSetViewports(1, &viewport); g.c->RSSetScissorRects(1, &scissor);
         g.c->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         g.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (inputWords) g.c->IASetVertexBuffers(0,1,&wordView);
         g.c->DrawInstanced(3,1,0,0);
         g.barrier(next.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         g.c->CopyBufferRegion(back.Get(),0,next.Get(),0,size); g.finish();
         void* mapped = nullptr; D3D12_RANGE range {0,size}; check(back->Map(0,&range,&mapped));
         const auto* data = static_cast<const unsigned char*>(mapped);
-        require(!memcmp(data,zero.data(),64) && !memcmp(data+256,zero.data(),64), "Guard record changed");
+        require(!memcmp(data,zero.data(),recordBytes) && !memcmp(data+4*recordBytes,zero.data(),recordBytes), "Guard record changed");
         for (unsigned i = 0; i < 3; ++i)
         {
             const float x = i == 0 ? -0.5f : i == 1 ? 0.f : 0.5f;
             const float y = i == 1 ? 0.5f : -0.5f, w = float(i+2);
             const float expected[] = {x*w,y*w,0.5f*w,w,(x+0.125f)*(w+1),(y-0.25f)*(w+1),0.25f*(w+1),w+1};
-            const auto* record = data + (i+1)*64;
-            require(!memcmp(record+32,expected,sizeof(expected)), "Native clip pair mismatch");
+            const auto* record = data + (i+1)*recordBytes;
+            if (inputWords) require(!memcmp(record+24,&wordData[i][2],8), "Unused uint input words changed");
+            else require(!memcmp(record+32,expected,sizeof(expected)), "Native clip pair mismatch");
             uint32_t tags[2]; memcpy(tags,record+16,8);
             require(tags[0] == 11 && tags[1] == 7, "Native pair tags mismatch");
             float rasterX; memcpy(&rasterX,record,4);
             require(rasterX == (x+0.0625f)*w, "Raster clip replaced by unjittered clip");
         }
         D3D12_RANGE noWrite {0,0}; back->Unmap(0,&noWrite);
+        if (inputWords)
+        {
+            const GlassFg::VertexInputPair absent {99,2,3}, outside {0,4,0};
+            ComPtr<ID3D12PipelineState> rejected;
+            require(FAILED(compiler.createVertexCapture(g.d.Get(),root,pd,rejected,error,nullptr,nullptr,&absent)) && !rejected,
+                    "Absent input admitted");
+            require(FAILED(compiler.createVertexCapture(g.d.Get(),root,pd,rejected,error,nullptr,nullptr,&outside)) && !rejected,
+                    "Out-of-range component admitted");
+            puts("INPUT_WORDS_GPU_OK unused_uint_components=6 raw_bits_exact=1 current_position_and_tags=1 guards=1 invalid_inputs_rejected=1");
+            return 0;
+        }
         const GlassFg::NativeClipInputs inputs {1,2};
         ComPtr<ID3D12PipelineState> motionPipeline;
         if (FAILED(compiler.createNativeMotionCapture(g.d.Get(), root, pd, motionPipeline, error, inputs)))

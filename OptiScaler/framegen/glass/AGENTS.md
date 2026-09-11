@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Live original skinned input Z matches preceding X in three consecutive pairs; raw-word recorder is tested. Previous-position evaluation and dense MV/FG still absent.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Optional submission capability forwards actual queue/list/recording order to retained diagnostic modules. Independent GPU and legacy tests pass; not deployed, history/MV/FG incomplete.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Two-buffer GPU history passes 32 fixture frames without interframe CPU wait/copy; game ordering, dense boundary MV and FG remain incomplete.

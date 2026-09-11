@@ -133,7 +133,8 @@ std::string single(const std::string& source, const std::regex& pattern, size_t 
 } // namespace
 
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryLayout layout,
-                                         const VertexConstantPair* capture, const VertexClipPair* clipPair)
+                                         const VertexConstantPair* capture, const VertexClipPair* clipPair,
+                                         const VertexInputPair* inputPair)
 {
     VertexHistoryShader result;
     try
@@ -141,6 +142,7 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
         need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
         const bool mapped = layout == GeometryLayout::PerInstance;
         need(!capture || !clipPair, "Diagnostic record payload collision");
+        need(!inputPair || (!capture && !clipPair), "Diagnostic input payload collision");
         result.recordBytes = clipPair ? 64 : 32;
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
@@ -178,6 +180,20 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
         auto signatures = split(metadata.get(entry[2]));
         need(signatures.size() == 3 && signatures[2] == "null", "Unsupported vertex signature");
         auto inputs = split(metadata.get(signatures[0])), outputs = split(metadata.get(signatures[1]));
+        if (inputPair)
+        {
+            unsigned matches = 0;
+            for (const auto& node : inputs)
+            {
+                const Signature sig(metadata.get(node));
+                if (sig.id != inputPair->input) continue;
+                need(sig.fields[2] == "i8 5" && sig.rows == 1 && sig.fields[9] == "i8 0" &&
+                         inputPair->first < sig.columns && inputPair->second < sig.columns,
+                     "Diagnostic input must be unpacked uint32 with valid components");
+                ++matches;
+            }
+            need(matches == 1, "Diagnostic input absent or ambiguous");
+        }
         auto resources = entry[3] == "null" ? Parts { "null", "null", "null", "null" } : split(metadata.get(entry[3]));
         need(resources.size() == 4 && resources[1] == "null", "Shaders with existing UAVs are not replay safe");
         unsigned captureId = UINT32_MAX;
@@ -454,6 +470,11 @@ glass.read:
                  << capture->row << ")\n"
                  << "  %glass.extra0 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 0\n"
                  << "  %glass.extra1 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 1\n";
+        if (inputPair)
+            for (unsigned word = 0; word < 2; ++word)
+                code << "  %glass.extra" << word << " = call i32 @dx.op.loadInput.i32(i32 4, i32 "
+                     << inputPair->input << ", i32 0, i8 " << (word ? inputPair->second : inputPair->first)
+                     << ", i32 undef)\n";
         if (clipPair)
             for (unsigned p = 0; p < 2; ++p)
             {
@@ -469,7 +490,7 @@ glass.read:
             }
         code << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.address, i32 undef, i32 %glass.c0i, i32 %glass.c1i, i32 %glass.c2i, i32 %glass.c3i, i8 15)\n"
              << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, "
-             << (capture ? "i32 %glass.extra0, i32 %glass.extra1, i8 15)\n"
+             << ((capture || inputPair) ? "i32 %glass.extra0, i32 %glass.extra1, i8 15)\n"
                          : "i32 undef, i32 undef, i8 3)\n")
              << R"(  br label %glass.end
 glass.reject:

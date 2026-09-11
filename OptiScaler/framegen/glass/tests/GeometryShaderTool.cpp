@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 #include "../DxilVertexHistory.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT hr)
@@ -54,6 +55,15 @@ int wmain(int argc, wchar_t** argv)
         const auto layout = mapped ? GlassFg::GeometryLayout::PerInstance : GlassFg::GeometryLayout::Contiguous;
         const bool cameraCapture = mode == L"rewrite-camera";
         const bool pairCapture = mode == L"rewrite-pair";
+        const bool inputCapture = mode == L"rewrite-input";
+        GlassFg::VertexInputPair inputPair {};
+        if (inputCapture)
+        {
+            std::wistringstream selection(argv[5]); wchar_t first = 0, second = 0;
+            if (!(selection >> inputPair.input >> first >> inputPair.first >> second >> inputPair.second) ||
+                first != L',' || second != L',' || selection.peek() != std::char_traits<wchar_t>::eof())
+                throw std::runtime_error("Expected input-id,first-component,second-component");
+        }
         GlassFg::VertexClipPair clipPair {};
         if (pairCapture)
         {
@@ -65,7 +75,7 @@ int wmain(int argc, wchar_t** argv)
                 throw std::runtime_error("Expected current-output-id,previous-output-id");
             clipPair = {std::stoul(selection.substr(0, comma)), std::stoul(selection.substr(comma + 1))};
         }
-        if (cameraCapture || pairCapture)
+        if (cameraCapture || pairCapture || inputCapture)
             mode = L"rewrite";
         // Explicit recorded Cyberpunk diagnostic layout, not a generic camera detector.
         const GlassFg::VertexConstantPair camera { 0, 1, 848, 51 };
@@ -104,7 +114,7 @@ int wmain(int argc, wchar_t** argv)
                 auto patched =
                     mode == L"native-motion" ? GlassFg::ExtractNativeMotionTarget(assembly, unsigned(std::stoul(argv[5]))) : mode == L"rewrite"
                         ? GlassFg::RewriteVertexHistory(assembly, layout, cameraCapture ? &camera : nullptr,
-                                                       pairCapture ? &clipPair : nullptr)
+                                                       pairCapture ? &clipPair : nullptr, inputCapture ? &inputPair : nullptr)
                         : GlassFg::RewriteMaterialMotion(
                               assembly, GlassFg::MaterialSource::One,
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb

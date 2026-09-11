@@ -202,7 +202,8 @@ struct GeometryCompiler::Impl
     HRESULT rewrite(D3D12_SHADER_BYTECODE input, bool vertex, MaterialSource source, MaterialDestination destination,
                     ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout,
                     MaterialMotionTarget target, const VertexConstantPair* capture = nullptr,
-                    const VertexClipPair* clipPair = nullptr, const NativeClipInputs* nativeInputs = nullptr)
+                    const VertexClipPair* clipPair = nullptr, const NativeClipInputs* nativeInputs = nullptr,
+                    const VertexInputPair* inputPair = nullptr)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -214,7 +215,7 @@ struct GeometryCompiler::Impl
         const std::string_view text(static_cast<const char*>(disassembly->GetBufferPointer()),
                                     disassembly->GetBufferSize());
         auto rewritten =
-            vertex ? RewriteVertexHistory(text, layout, capture, clipPair)
+            vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair)
                    : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs);
         if (!rewritten)
         {
@@ -266,10 +267,11 @@ HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const Geomet
 HRESULT GeometryCompiler::createVertexCapture(ID3D12Device* device, const GeometryRoot& root,
                                               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                               ComPtr<ID3D12PipelineState>& output, std::string& error,
-                                              const VertexConstantPair* capture, const VertexClipPair* clipPair)
+                                              const VertexConstantPair* capture, const VertexClipPair* clipPair,
+                                              const VertexInputPair* inputPair)
 {
     return createTarget(device, root, original, output, error,
-                        MaterialMotionTarget::OriginalColorAndCapture, true, capture, clipPair);
+                        MaterialMotionTarget::OriginalColorAndCapture, true, capture, clipPair, nullptr, inputPair);
 }
 HRESULT GeometryCompiler::createNativeMotionCapture(ID3D12Device* device, const GeometryRoot& root,
                                        const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
@@ -283,7 +285,8 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
                                        const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
                                        MaterialMotionTarget target, bool vertexOnly, const VertexConstantPair* capture,
-                                       const VertexClipPair* clipPair, const NativeClipInputs* nativeInputs)
+                                       const VertexClipPair* clipPair, const NativeClipInputs* nativeInputs,
+                                       const VertexInputPair* inputPair)
 {
     error.clear();
     if (FAILED(implementation->status))
@@ -326,7 +329,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     ComPtr<IDxcBlob> vs, ps;
     unsigned historyRegister = UINT32_MAX;
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
-                                            root.layout, target, capture, clipPair)) ||
+                                            root.layout, target, capture, clipPair, nullptr, inputPair)) ||
         (!vertexOnly && FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
                                             root.layout, target, nullptr, nullptr, nativeInputs))))
         return hr;
