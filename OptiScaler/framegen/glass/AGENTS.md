@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Latest source adds object bit coverage and single-draw hook insertion, independently GPU verified. Live capture owner, lifetime/frame linkage and FG substitution are still absent.
+
 - [Compatibility.md](Compatibility.md): Relocatable engine discovery, indirect signatures, MRT admission and UI/log evidence pass independent checks. Fresh-process validation pending; production object capture/FG substitution remain absent.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): 32054cc live packet/public draw observation verified; active MRT/root joins failed and new FG input remains absent. Source fixes and relocatable discovery pass independent checks; fresh-process validation pending.

@@ -457,11 +457,14 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
     VertexHistoryShader result;
     try
     {
-        need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture,
+        need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture ||
+                 target == MaterialMotionTarget::OriginalColorAndCoverage,
              "Unsupported material target");
-        const bool retainColor = target == MaterialMotionTarget::OriginalColorAndCapture;
+        const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage;
+        const bool retainColor = target != MaterialMotionTarget::SeparateTarget;
         need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
         const bool mapped = layout == GeometryLayout::PerInstance;
+        need(!coverageOnly || mapped, "Coverage requires object mapping");
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
         while (!source.empty() && source.back() == '\0')
@@ -742,7 +745,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
         body.replace(body.find("  ret void"), 10,
-                     retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId) : code.str());
+                     retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly)
+                                 : code.str());
         if (mapped)
         {
             if (retainColor)
@@ -765,7 +769,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  { "%dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32, %dx.types.Handle, i32)",
                    "%dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32, %dx.types.Handle, i32, i32)",
                    "void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8)" })
-                if (body.find(std::string("declare ") + declaration) == std::string::npos)
+                if (!(coverageOnly && std::string_view(declaration).starts_with("void @dx.op.bufferStore")) &&
+                    body.find(std::string("declare ") + declaration) == std::string::npos)
                     body += std::string("declare ") + declaration + "\n";
         }
         for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {

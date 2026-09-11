@@ -60,7 +60,9 @@ enum class MaterialDestination
 enum class MaterialMotionTarget
 {
     SeparateTarget,
-    OriginalColorAndCapture
+    OriginalColorAndCapture,
+    // Diagnostic object coverage only. No motion is produced or implied.
+    OriginalColorAndCoverage
 };
 
 struct MaterialCaptureConstants

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GeometryCommands.h"
 #include "GeometryCreation.h"
+#include "GeometryDrawCapture.h"
 #include "CyberpunkDraws.h"
 #include "CommandLifetime.h"
 #include "IndirectBindings.h"
@@ -29,6 +30,7 @@ struct Record
     std::atomic<Command*> key = nullptr;
     CommandLifetime lifetime;
     GraphicsRootBindings bindings;
+    GeometryRasterState raster;
     std::array<ID3D12DescriptorHeap*, 2> heaps {};
     std::array<ID3D12DescriptorHeap*, 2> heapArguments {};
     UINT heapCount = 0;
@@ -36,6 +38,7 @@ struct Record
     void reset(ID3D12PipelineState* initial)
     {
         bindings.reset(initial);
+        raster = {};
         heaps = {};
         heapArguments = {};
         heapCount = 0;
@@ -45,6 +48,7 @@ struct Record
 struct Observation
 {
     ComPtr<ID3D12Device> device;
+    UINT rtvIncrement = 0;
     std::mutex registrations;
     std::array<Record, 512> records;
     IndirectBindingCache indirect;
@@ -54,9 +58,11 @@ struct Observation
     std::atomic<std::uint64_t> recordings = 0, capacityRejected = 0, indexed = 0, packets = 0;
     std::atomic<std::uint64_t> instances = 0, identities = 0, pipelinesReady = 0, bindingsReady = 0;
     std::atomic<std::uint64_t> signatures = 0, indirectKnown = 0, indirectUnknown = 0;
+    std::atomic<std::uint64_t> captureRecorded = 0, captureRejected = 0;
     std::atomic<std::uint32_t> lastFrame = 0;
 };
 std::atomic<Observation*> published = nullptr;
+std::atomic<GeometryDrawCaptureOwner*> captureOwner = nullptr;
 std::mutex startup;
 constexpr unsigned Probes = 32;
 std::size_t first(Command* command)
@@ -100,7 +106,9 @@ bool matches(Observation& state, Command* command)
     if (SUCCEEDED(result))
     {
         if (!state.has4 || static_cast<Command*>(c4.Get()) != command ||
-            (*reinterpret_cast<void***>(c4.Get()))[75] != state.targets[75])
+            (*reinterpret_cast<void***>(c4.Get()))[75] != state.targets[75] ||
+            (*reinterpret_cast<void***>(c4.Get()))[68] != state.targets[68] ||
+            (*reinterpret_cast<void***>(c4.Get()))[69] != state.targets[69])
             return false;
     }
     else if (result != E_NOINTERFACE || state.has4)
@@ -261,7 +269,24 @@ GLASS_GRAPHICS(SetGraphicsRootUnorderedAccessView, Command,
                (Command * command, UINT index, D3D12_GPU_VIRTUAL_ADDRESS address), (command, index, address),
                r->bindings.address(index, D3D12_ROOT_PARAMETER_TYPE_UAV, address))
 GLASS_GRAPHICS(ExecuteBundle, Command, (Command * command, Command* bundle), (command, bundle),
-               r->bindings.invalidate())
+               r->bindings.invalidate(); r->raster.unknown = true)
+GLASS_GRAPHICS(RSSetViewports, Command, (Command * command, UINT count, const D3D12_VIEWPORT* values),
+               (command, count, values), r->raster.viewports(count, values))
+GLASS_GRAPHICS(RSSetScissorRects, Command, (Command * command, UINT count, const D3D12_RECT* values),
+               (command, count, values), r->raster.scissors(count, values))
+GLASS_GRAPHICS(OMSetRenderTargets, Command,
+               (Command * command, UINT count, const D3D12_CPU_DESCRIPTOR_HANDLE* values, BOOL contiguous,
+                const D3D12_CPU_DESCRIPTOR_HANDLE* depth), (command, count, values, contiguous, depth),
+               r->raster.renderTargets(count, values, contiguous, depth, published.load()->rtvIncrement))
+GLASS_GRAPHICS(SetPredication, Command,
+               (Command * command, ID3D12Resource* buffer, UINT64 offset, D3D12_PREDICATION_OP operation),
+               (command, buffer, offset, operation), r->raster.predicate = buffer != nullptr)
+GLASS_GRAPHICS(BeginRenderPass, ID3D12GraphicsCommandList4,
+               (ID3D12GraphicsCommandList4 * command, UINT count, const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets,
+                const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth, D3D12_RENDER_PASS_FLAGS flags),
+               (command, count, targets, depth, flags), r->raster.renderPass = true; r->raster.targetsKnown = false)
+GLASS_GRAPHICS(EndRenderPass, ID3D12GraphicsCommandList4, (ID3D12GraphicsCommandList4 * command), (command),
+               r->raster.renderPass = false; r->raster.targetsKnown = false)
 GLASS_GRAPHICS(ExecuteIndirect, Command,
                (Command * command, ID3D12CommandSignature* signature, UINT count, ID3D12Resource* args, UINT64 offset,
                 ID3D12Resource* counter, UINT64 counterOffset),
@@ -346,7 +371,35 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
                     {
                         ++state->pipelinesReady;
                         if (r->bindings.canReplay(*pipeline->root, pipeline->original.Get()))
+                        {
                             ++state->bindingsReady;
+                            if (auto* owner = captureOwner.load(std::memory_order_acquire))
+                            {
+                                GeometryPreparedDraw prepared;
+                                const GeometryIndexedArguments args { indices, instances, startIndex, baseVertex,
+                                                                      startInstance };
+                                if (owner->prepare(command, draw, args, pipeline, r->bindings, prepared))
+                                {
+                                    const bool accepted = prepared.bindable() && r->raster.usable() &&
+                                        pipeline->root->layout == GeometryLayout::PerInstance &&
+                                        prepared.history.instances == instances;
+                                    if (accepted)
+                                    {
+                                        prepared.bind(command, *pipeline->root, r->bindings);
+                                        originalIndexed(command, indices, instances, startIndex, baseVertex,
+                                                        startInstance);
+                                        r->bindings.replay(command, pipeline->root->original.Get());
+                                        command->SetPipelineState(pipeline->original.Get());
+                                        ++state->captureRecorded;
+                                    }
+                                    else
+                                        ++state->captureRejected;
+                                    owner->finish(command, accepted);
+                                    if (accepted)
+                                        return;
+                                }
+                            }
+                        }
                     }
             }
         }
@@ -360,6 +413,20 @@ template <class Function> bool attach(Function& original, void* address, Functio
 }
 } // namespace
 
+bool RegisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept
+{
+    if (!owner)
+        return false;
+    GeometryDrawCaptureOwner* expected = nullptr;
+    return captureOwner.compare_exchange_strong(expected, owner, std::memory_order_release) || expected == owner;
+}
+const GeometryRasterState* ReadGeometryRasterState(ID3D12GraphicsCommandList* command) noexcept
+{
+    if (auto* record = find(command))
+        return &record->raster;
+    return nullptr;
+}
+
 bool StartGeometryCommands(ID3D12Device* device) noexcept
 {
     try
@@ -371,6 +438,7 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
             return false;
         auto state = std::make_unique<Observation>();
         state->device = device;
+        state->rtvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<Command> command;
         if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) ||
@@ -379,7 +447,7 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
             FAILED(command->Close()))
             return false;
         auto table = *reinterpret_cast<void***>(command.Get());
-        for (auto slot : { 9, 10, 11, 13, 25, 27, 28, 30, 32, 34, 36, 38, 40, 42, 59 })
+        for (auto slot : { 9, 10, 11, 13, 21, 22, 25, 27, 28, 30, 32, 34, 36, 38, 40, 42, 46, 56, 59 })
             state->targets[slot] = table[slot];
         ComPtr<ID3D12GraphicsCommandList4> c4;
         ComPtr<ID3D12GraphicsCommandList10> c10;
@@ -389,6 +457,8 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
             if (static_cast<Command*>(c4.Get()) != command.Get())
                 return false;
             state->has4 = true;
+            state->targets[68] = (*reinterpret_cast<void***>(c4.Get()))[68];
+            state->targets[69] = (*reinterpret_cast<void***>(c4.Get()))[69];
             state->targets[75] = (*reinterpret_cast<void***>(c4.Get()))[75];
         }
         else if (result != E_NOINTERFACE)
@@ -416,6 +486,10 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
                     attach(originalIndexed, table[13], indexed) && attach(originalHeaps, table[28], heaps);
 #define GLASS_ATTACH(Name, Slot) okay = attach(original##Name, state->targets[Slot], hook##Name) && okay
         GLASS_ATTACH(ClearState, 11);
+        GLASS_ATTACH(RSSetViewports, 21);
+        GLASS_ATTACH(RSSetScissorRects, 22);
+        GLASS_ATTACH(OMSetRenderTargets, 46);
+        GLASS_ATTACH(SetPredication, 56);
         GLASS_ATTACH(SetPipelineState, 25);
         GLASS_ATTACH(ExecuteBundle, 27);
         GLASS_ATTACH(SetGraphicsRootSignature, 30);
@@ -428,6 +502,8 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
         GLASS_ATTACH(ExecuteIndirect, 59);
         if (state->has4)
         {
+            GLASS_ATTACH(BeginRenderPass, 68);
+            GLASS_ATTACH(EndRenderPass, 69);
             GLASS_ATTACH(SetPipelineState1, 75);
         }
         if (state->has10)
@@ -472,6 +548,8 @@ GeometryCommandStats GetGeometryCommandStats() noexcept
         GLASS_STAT(identities);
         GLASS_STAT(pipelinesReady);
         GLASS_STAT(bindingsReady);
+        GLASS_STAT(captureRecorded);
+        GLASS_STAT(captureRejected);
         GLASS_STAT(signatures);
         GLASS_STAT(indirectKnown);
         GLASS_STAT(indirectUnknown);

@@ -9,6 +9,31 @@
 
 ## Implemented source
 
+Latest source checkpoint (2026-09-11): `OriginalColorAndCoverage` records separate
+object material coverage as bits, independent of vertex-history availability.
+It preserves original color exports, material discard and read-only depth tests.
+It produces no MV and requires a per-instance identity map with zero history
+range. An independent eight-frame GPU test preserves 143,360 original pixels
+and matches 5,296 covered samples against separate original object draws.
+This diagnostic is not live game capture or a complete silhouette producer.
+
+`GeometryDrawCapture.h` now supplies the actual indexed-hook insertion seam.
+The registered owner must reserve immutable mappings and retain all resources;
+the hook binds the prepared pipeline, forwards the draw once, then restores the
+original root values and PSO. It does not infer identities or own retirement.
+`GeometryInstances --capture-command` exercises this production hook on an
+independent device: eight inserted draws, 143,360 unchanged original pixels,
+3,563 geometry MV samples with maximum error 0.001688 pixels, and 896 overlapping
+object samples. The fixture supplies identities and synchronized resources;
+the live owner, queue/frame linkage and FG replacement remain unimplemented.
+
+The draw observer also records actual viewport, scissor, RTV/DSV bindings,
+predication and render-pass state. Capture insertion requires a known single
+viewport/scissor outside predication/render passes; bundle execution invalidates
+the raster snapshot until reset. These are API binding observations, not retained
+resource identities or FG-color provenance. The capture-command fixture checks
+the real 160x112 viewport, scissor and target handles at all eight insertions.
+
 The latest [compatibility checkpoint](../Compatibility.md) adds preservation of actual MRT/dual-source layouts and precise indirect-command root resets. Both MRT GPU fixtures and the public indirect fixture pass. These source fixes do not create a production capture caller or new FG replacement.
 
 `DxilVertexHistory.cpp` rewrites DXC disassembly, which the caller must assemble and validate before creating a pipeline. It preserves the original vertex outputs and records the actual computed clip position in a caller-owned history buffer. A generation and expected-frame tag reject stale or unrelated entries. New varyings expose the previous position and a missing-history flag. This includes transformations and deformations already computed by the original vertex shader; it does not infer motion from scene pixels or duplicate a skinning algorithm.

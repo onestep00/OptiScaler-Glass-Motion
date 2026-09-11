@@ -197,7 +197,8 @@ struct GeometryCompiler::Impl
         return op->GetResult(&output);
     }
     HRESULT rewrite(D3D12_SHADER_BYTECODE input, bool vertex, MaterialSource source, MaterialDestination destination,
-                    ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout)
+                    ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout,
+                    MaterialMotionTarget target)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -210,8 +211,7 @@ struct GeometryCompiler::Impl
                                     disassembly->GetBufferSize());
         auto rewritten =
             vertex ? RewriteVertexHistory(text, layout)
-                   : RewriteMaterialMotion(text, source, destination, MaterialMotionTarget::OriginalColorAndCapture,
-                                           historyRegister, layout);
+                   : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout);
         if (!rewritten)
         {
             error = rewritten.error;
@@ -238,6 +238,21 @@ GeometryCompiler::~GeometryCompiler() = default;
 HRESULT GeometryCompiler::create(ID3D12Device* device, const GeometryRoot& root,
                                  const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                  ComPtr<ID3D12PipelineState>& output, std::string& error)
+{
+    return createTarget(device, root, original, output, error, MaterialMotionTarget::OriginalColorAndCapture);
+}
+HRESULT GeometryCompiler::createCoverage(ID3D12Device* device, const GeometryRoot& root,
+                                         const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                         ComPtr<ID3D12PipelineState>& output, std::string& error)
+{
+    if (root.layout != GeometryLayout::PerInstance)
+        return reject(error, "Object coverage requires per-instance identity mapping");
+    return createTarget(device, root, original, output, error, MaterialMotionTarget::OriginalColorAndCoverage);
+}
+HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot& root,
+                                       const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                       ComPtr<ID3D12PipelineState>& output, std::string& error,
+                                       MaterialMotionTarget target)
 {
     error.clear();
     if (FAILED(implementation->status))
@@ -267,9 +282,9 @@ HRESULT GeometryCompiler::create(ID3D12Device* device, const GeometryRoot& root,
     ComPtr<IDxcBlob> vs, ps;
     unsigned historyRegister = UINT32_MAX;
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
-                                            root.layout)) ||
+                                            root.layout, target)) ||
         FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                            root.layout)))
+                                            root.layout, target)))
         return hr;
     // Same-draw capture retains every original export/attachment. Extra MRT
     // slots do not turn the RT0 material equation into a single-target PSO.

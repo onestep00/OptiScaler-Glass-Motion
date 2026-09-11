@@ -38,6 +38,18 @@ struct GeometryInstance
                std::uint64_t(top) + height <= 32768 && statusIndex < pixelBase &&
                std::uint64_t(pixelBase) + std::uint64_t(height - 1) * stride + width <= pixelCapacity;
     }
+
+    // Diagnostic bit coverage uses bit addresses for pixels and word addresses
+    // for status. It deliberately cannot authorize vertex-history access.
+    bool validCoverage(std::uint64_t words) const
+    {
+        return generation && !historyBase && !vertices && !vertexOrigin && width && height && stride >= width &&
+               words <= UINT32_MAX / 4 && pixelCapacity && std::uint64_t(pixelCapacity) <= words * 32 &&
+               !(pixelBase & 31) && std::uint64_t(statusIndex) * 32 < pixelBase &&
+               std::uint64_t(pixelBase) + std::uint64_t(height - 1) * stride + width <= pixelCapacity &&
+               std::uint64_t(left) + width <= 32768 && std::uint64_t(top) + height <= 32768 &&
+               !(reserved[0] | reserved[1] | reserved[2] | reserved[3]);
+    }
 };
 static_assert(sizeof(GeometryInstance) == 64);
 

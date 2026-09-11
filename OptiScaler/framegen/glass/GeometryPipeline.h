@@ -9,6 +9,7 @@
 
 namespace GlassFg
 {
+enum class MaterialMotionTarget;
 // Captured serialized bytes must belong to originalIdentity after any upstream
 // sampler overrides. Creation does not bind or replace the application's root.
 struct GeometryRoot
@@ -41,9 +42,16 @@ class GeometryCompiler
     GeometryCompiler& operator=(const GeometryCompiler&) = delete;
     HRESULT create(ID3D12Device* device, const GeometryRoot& root, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                    Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
+    HRESULT createCoverage(ID3D12Device* device, const GeometryRoot& root,
+                           const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                           Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
 
   private:
     struct Impl;
     std::unique_ptr<Impl> implementation;
+    HRESULT createTarget(ID3D12Device* device, const GeometryRoot& root,
+                         const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                         Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
+                         MaterialMotionTarget target);
 };
 } // namespace GlassFg

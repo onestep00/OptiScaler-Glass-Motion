@@ -2,7 +2,31 @@
 #include "../GeometryPipelineCache.h"
 #include "../GeometryCreation.h"
 #include "../GeometryCommands.h"
+#include "../GeometryDrawCapture.h"
 extern bool geometryFixturePacket;
+struct CaptureOwner final : GlassFg::GeometryDrawCaptureOwner
+{
+    GlassFg::GeometryPreparedDraw prepared;
+    UINT completed = 0, rasterMatched = 0;
+    bool enabled = false;
+    bool prepare(ID3D12GraphicsCommandList* command, const GlassFg::GeometryDrawView&,
+                 const GlassFg::GeometryIndexedArguments& args,
+                 const std::shared_ptr<const GlassFg::GeometryPipelineEntry>&,
+                 const GlassFg::GraphicsRootBindings&, GlassFg::GeometryPreparedDraw& out) noexcept override
+    {
+        if (!enabled || args.instances != 3)
+            return false;
+        const auto* raster = GlassFg::ReadGeometryRasterState(command);
+        if (!raster || !raster->usable() || raster->viewport.Width != 160 || raster->viewport.Height != 112 ||
+            raster->targetCount != 1 || !raster->targets[0].ptr || !raster->depth.ptr || raster->scissor.left != 0 ||
+            raster->scissor.top != 0 || raster->scissor.right != 160 || raster->scissor.bottom != 112)
+            return false;
+        ++rasterMatched;
+        out = prepared;
+        return true;
+    }
+    void finish(ID3D12GraphicsCommandList*, bool recorded) noexcept override { completed += recorded; }
+};
 #pragma warning(push, 0)
 #include <d3dx/d3dx12.h>
 #pragma warning(pop)
@@ -157,12 +181,19 @@ int wmain(int argc, wchar_t** argv)
     try
     {
         require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0 ||
-                                            wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0)),
+                                            wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0 ||
+                                            wcscmp(argv[3], L"--coverage") == 0 ||
+                                            wcscmp(argv[3], L"--capture-command") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
-        const bool observed = argc == 4;
+        const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
+        const bool captureCommand = argc == 4 && wcscmp(argv[3], L"--capture-command") == 0;
+        static CaptureOwner captureOwner;
+        const bool observed = argc == 4 && !coverageOnly;
         const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
         const bool mrt = dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
-        const bool commands = mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
+        const bool commands = captureCommand || mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
+        if (captureCommand)
+            require(GlassFg::RegisterGeometryDrawCapture(&captureOwner), "Register capture owner");
         const std::filesystem::path dir(argv[1]);
         auto vs = read(dir / "instances.dxil");
         auto ps = read(dir / (dual ? "fixture-dual.dxil" : mrt ? "fixture-mrt.dxil" : "fixture-pixel.dxil"));
@@ -287,6 +318,13 @@ int wmain(int argc, wchar_t** argv)
         const auto& root = *lease->root;
         rootInvalidation(root, original.Get());
         capturePso = lease->instrumented;
+        if (coverageOnly)
+        {
+            GlassFg::GeometryCompiler compiler(std::filesystem::absolute(argv[2]));
+            std::string error;
+            if (FAILED(compiler.createCoverage(g.d.Get(), root, pd, capturePso, error)))
+                throw std::runtime_error(error);
+        }
         require(root.dwords == 22 && root.instanceSlot == 6, "Mapped root extension");
         D3D12_SO_DECLARATION_ENTRY so { 0, "SV_Position", 0, 0, 4, 0 };
         UINT soStride = sizeof(Clip);
@@ -379,6 +417,16 @@ int wmain(int argc, wchar_t** argv)
             badMap = {};
             require(!hc.valid(badMap, Slots, CapturePixels), "Entirely inactive draw admitted");
             upload(objects.Get(), order, sizeof(order));
+            if (coverageOnly)
+                for (auto& entry : mapping)
+                {
+                    if (entry.inactive())
+                        continue;
+                    entry.historyBase = entry.vertices = entry.vertexOrigin = 0;
+                    entry.pixelBase = (entry.statusIndex + 1) * 32;
+                    entry.pixelCapacity = CapturePixels * 32;
+                    require(entry.validCoverage(CapturePixels), "Coverage bit allocation validation");
+                }
             upload(mappingBuffer.Get(), mapping.data(), sizeof(mapping));
             GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame,         0,
                                                    0, 0, W,       H,       0, W, CapturePixels, 0 };
@@ -387,6 +435,8 @@ int wmain(int argc, wchar_t** argv)
             const UINT current = frame & 1, previous = current ^ 1;
             g.begin();
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+            if (coverageOnly)
+                g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, CaptureBytes);
             for (UINT object = 0; object < 3; ++object)
                 g.c->CopyBufferRegion(capture.Get(), (8 + object * Segment) * 32, zeros.Get(), 0, 32);
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -412,7 +462,8 @@ int wmain(int argc, wchar_t** argv)
             for (UINT pass = 0; pass < 5; ++pass)
             {
                 const bool instrument = pass == 1;
-                g.c->SetGraphicsRootSignature(instrument ? root.extended.Get() : originalRoot.Get());
+                const bool directInstrument = instrument && !captureCommand;
+                g.c->SetGraphicsRootSignature(directInstrument ? root.extended.Get() : originalRoot.Get());
                 g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
                 if (commands)
                 {
@@ -423,8 +474,16 @@ int wmain(int argc, wchar_t** argv)
                     memcpy(&bits, fc + 3, sizeof(bits));
                     g.c->SetGraphicsRoot32BitConstant(0, bits, 3);
                 }
-                g.c->SetPipelineState(instrument ? capturePso.Get() : pass == 0 ? streamPso.Get() : original.Get());
-                if (instrument)
+                g.c->SetPipelineState(directInstrument ? capturePso.Get() : pass == 0 ? streamPso.Get() : original.Get());
+                if (captureCommand && instrument)
+                {
+                    captureOwner.prepared = { capturePso.Get(), hc, history[previous]->GetGPUVirtualAddress(),
+                        history[current]->GetGPUVirtualAddress(), pixelConstants->GetGPUVirtualAddress(),
+                        capture->GetGPUVirtualAddress(), mappingBuffer->GetGPUVirtualAddress() };
+                    captureOwner.enabled = true;
+                    geometryFixturePacket = true;
+                }
+                if (directInstrument)
                 {
                     g.c->SetGraphicsRoot32BitConstants(root.constantsSlot, 8, &hc, 0);
                     g.c->SetGraphicsRootShaderResourceView(root.previousSlot,
@@ -451,7 +510,11 @@ int wmain(int argc, wchar_t** argv)
                 const float clear[4] {};
                 g.c->ClearRenderTargetView(rtvs[pass], clear, 0, nullptr);
                 if (pass < 2)
+                {
                     g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+                    geometryFixturePacket = false;
+                    captureOwner.enabled = false;
+                }
                 else
                 {
                     UINT index = 0;
@@ -531,6 +594,33 @@ int wmain(int argc, wchar_t** argv)
             const auto* hist = reinterpret_cast<const History*>(bytes + 5 * imageBytes + SOBytes);
             const auto* pixels =
                 reinterpret_cast<const CaptureRecord*>(bytes + 5 * imageBytes + SOBytes + HistoryBytes);
+            if (coverageOnly)
+            {
+                require(!memcmp(hist, zero.data(), HistoryBytes), "Coverage-only draw wrote vertex history");
+                const auto* words = reinterpret_cast<const UINT*>(pixels);
+                for (UINT i = 0; i < 3; ++i)
+                {
+                    const UINT object = order[7 + i];
+                    const auto& entry = mapping[5 + i];
+                    if (entry.inactive())
+                        continue;
+                    require(words[entry.statusIndex] == (frame == 4 && object == 1 ? 1u : 0u),
+                            "Coverage escape flag mismatch");
+                    for (UINT y = entry.top; y < entry.top + entry.height; ++y)
+                        for (UINT x = entry.left; x < entry.left + entry.width; ++x)
+                        {
+                            const auto* color = reinterpret_cast<const float*>(
+                                bytes + (object + 2) * imageBytes + y * footprint.Footprint.RowPitch + x * 16);
+                            const UINT bit = entry.pixelBase + (y - entry.top) * entry.stride + x - entry.left;
+                            const bool actual = (words[bit / 32] & (1u << (bit % 32))) != 0;
+                            require(actual == (color[3] > 0), "Coverage bit differs from original object material");
+                            checked += actual;
+                        }
+                }
+                D3D12_RANGE noWrite { 0, 0 };
+                readback->Unmap(0, &noWrite);
+                continue;
+            }
             std::array<Clip, 18> now {};
             for (UINT i = 0; i < 3; ++i)
                 memcpy(now.data() + order[7 + i] * 6, emitted + i * 6, 6 * sizeof(Clip));
@@ -618,6 +708,13 @@ int wmain(int argc, wchar_t** argv)
             D3D12_RANGE noWrite { 0, 0 };
             readback->Unmap(0, &noWrite);
         }
+        if (coverageOnly)
+        {
+            require(checked > 1000, "Insufficient coverage samples");
+            printf("PASS object_bit_coverage=1 original_material_discard=1 original_pixels=%llu covered_samples=%llu "
+                   "vertex_history_writes=0 motion_produced=0 game_hooks=0\n", exact, checked);
+            return 0;
+        }
         require(checked > 1000 && overlaps > 100, "Insufficient per-object overlap coverage");
         require(recovered > 100, "Inactive object did not recover after fresh history");
         if (mrt)
@@ -630,9 +727,16 @@ int wmain(int argc, wchar_t** argv)
         if (commands)
         {
             const auto stats = GlassFg::GetGeometryCommandStats();
-            require(stats.active && !stats.capacityRejected && stats.indexed == 40 && stats.packets == 24 &&
-                        stats.identities == 24 && stats.pipelinesReady == 24 && stats.bindingsReady == 24,
+            require(stats.active && !stats.capacityRejected && stats.indexed == 40 &&
+                        stats.packets == (captureCommand ? 32u : 24u) &&
+                        stats.identities == (captureCommand ? 48u : 24u) &&
+                        stats.pipelinesReady == (captureCommand ? 32u : 24u) &&
+                        stats.bindingsReady == (captureCommand ? 32u : 24u),
                     "Actual public draw/packet/pipeline observation mismatch");
+            if (captureCommand)
+                require(captureOwner.completed == 8 && captureOwner.rasterMatched == 8 &&
+                            stats.captureRecorded == 8 && !stats.captureRejected,
+                        "Capture command not recorded exactly once");
             printf("PASS public_command_observer=1 restored_root_pixels=%llu indexed=%llu packets=%llu "
                    "bindings_ready=%llu game_hooks=0\n",
                    exact, stats.indexed, stats.packets, stats.bindingsReady);

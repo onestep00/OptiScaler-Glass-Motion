@@ -7,8 +7,11 @@ namespace GlassFg::Detail
 {
 // Only appended instrumentation is changed here, never the original PS body.
 // Its original exports are retained by RewriteMaterialMotion.
-inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped = false, unsigned instanceMapId = 0)
+inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped = false, unsigned instanceMapId = 0,
+                                       bool coverageOnly = false)
 {
+    if (coverageOnly && !mapped)
+        throw std::runtime_error("Coverage requires object mapping");
     for (const auto* condition : { "bad", "empty", "nonfinite" })
     {
         const std::string discard = std::string("  call void @dx.op.discard(i32 82, i1 %glass.") + condition + ")\n";
@@ -137,6 +140,32 @@ glass.capture:
   br label %glass.captureend
 glass.captureend:
   ret void)";
-    return instrumentation + code.str();
+    auto storage = code.str();
+    if (coverageOnly)
+    {
+        // Coverage has no history dependency. Keep original material discard,
+        // contribution, object mapping and bounds checks; emit no motion.
+        const auto flags = storage.find("  %glass.flagmissing =");
+        const auto escape = storage.find("  %glass.flagescape =", flags);
+        storage.erase(flags, escape - flags);
+        const auto combine = storage.find("  %glass.flags0 =");
+        const auto any = storage.find("  %glass.anyflag =", combine);
+        storage.replace(combine, any - combine, "  %glass.flags = or i32 %glass.flagescape, 0\n");
+        const auto write = storage.find("  %glass.address = shl i32 %glass.pixelindex, 5");
+        storage.erase(write);
+        storage += R"(  %glass.word = lshr i32 %glass.pixelindex, 5
+  %glass.address = shl i32 %glass.word, 2
+  %glass.bit = and i32 %glass.pixelindex, 31
+  %glass.bitmask = shl i32 1, %glass.bit
+  %glass.coverageignored = call i32 @dx.op.atomicBinOp.i32(i32 78, %dx.types.Handle %glass.capturebuffer, i32 2, i32 %glass.address, i32 undef, i32 undef, i32 %glass.bitmask)
+  br label %glass.captureend
+glass.captureend:
+  ret void)";
+        // Coverage destinations/status are word indices, unlike 32-byte MV records.
+        const auto status = storage.find("%glass.statusaddress = shl i32 %glass.dest3, 5");
+        storage.replace(status, std::string("%glass.statusaddress = shl i32 %glass.dest3, 5").size(),
+                        "%glass.statusaddress = shl i32 %glass.dest3, 2");
+    }
+    return instrumentation + storage;
 }
 } // namespace GlassFg::Detail

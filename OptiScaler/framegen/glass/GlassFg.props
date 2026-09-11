@@ -13,6 +13,8 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCreation.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryHost.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCommands.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryDrawCapture.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryRasterState.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryHealth.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCommands.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryObjectRegistry.h" />

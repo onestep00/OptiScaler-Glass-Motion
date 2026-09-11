@@ -57,6 +57,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Instance geometry capture test failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Actual creation observer GPU test failed' }
 & $instances $build $dxc --commands
 if ($LASTEXITCODE -ne 0) { throw 'Actual graphics command observer GPU test failed' }
+& $instances $build $dxc --capture-command
+if ($LASTEXITCODE -ne 0) { throw 'Single-draw capture insertion or root restoration failed' }
+& $instances $build $dxc --coverage
+if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialMrt.hlsl') (Join-Path $build 'fixture-mrt.dxil') ps_6_0
 if ($LASTEXITCODE -ne 0) { throw 'MRT material compilation failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialDual.hlsl') (Join-Path $build 'fixture-dual.dxil') ps_6_0
