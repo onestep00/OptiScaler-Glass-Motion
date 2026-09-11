@@ -620,6 +620,95 @@ int wmain(int argc, wchar_t** argv)
             readback->Unmap(0, &noWrite);
         }
         require(capturePixels > 0, "No simultaneous capture pixels");
+        // Record a continuous batch without per-frame CPU completion/readback.
+        // Only two history buffers are reused; stream output is an independent
+        // test oracle retained until one final GPU completion.
+        constexpr UINT BatchFrames = 32, BatchStride = 1024;
+        constexpr UINT BatchBytes = BatchFrames * (BatchStride + sizeof(UINT64));
+        ComPtr<ID3D12Resource> batchStream[2];
+        for (auto& r : batchStream)
+            r = g.buffer(BatchBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+        auto batchZero = g.buffer(BatchBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        std::vector<char> batchEmpty(BatchBytes);
+        upload(batchZero.Get(), batchEmpty.data(), batchEmpty.size());
+        auto batchReadback = g.buffer(2 * BatchBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        g.begin();
+        for (auto& r : batchStream)
+        {
+            g.c->CopyBufferRegion(r.Get(), 0, batchZero.Get(), 0, BatchBytes);
+            g.barrier(r.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_STREAM_OUT);
+        }
+        for (UINT step = 0; step < BatchFrames; ++step)
+        {
+            const UINT current = step & 1, previous = current ^ 1, frame = 200 + step;
+            const float fc[] = { step * .07f, std::sin(step * .1f) * .04f, std::cos(step * .13f) * .03f, 0 };
+            const GlassFg::VertexHistoryConstants hc { 8, 4, 0, 0, 3, 77, frame, step ? frame - 1 : 0 };
+            g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            g.c->SetGraphicsRootSignature(root.Get());
+            g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
+            g.c->SetGraphicsRoot32BitConstants(1, 8, &hc, 0);
+            g.c->SetGraphicsRootShaderResourceView(2, history[previous]->GetGPUVirtualAddress());
+            g.c->SetGraphicsRootUnorderedAccessView(3, history[current]->GetGPUVirtualAddress());
+            g.c->SetGraphicsRootConstantBufferView(4, materialConstants->GetGPUVirtualAddress());
+            g.c->SetGraphicsRootUnorderedAccessView(5, capture->GetGPUVirtualAddress());
+            const D3D12_VIEWPORT viewport { 0, 0, float(W), float(H), 0, 1 };
+            const D3D12_RECT scissor { 0, 0, W, H };
+            g.c->RSSetViewports(1, &viewport);
+            g.c->RSSetScissorRects(1, &scissor);
+            g.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            g.c->IASetVertexBuffers(0, 1, &vv);
+            g.c->IASetIndexBuffer(&iv);
+            for (UINT variant = 0; variant < 2; ++variant)
+            {
+                g.c->SetPipelineState(pipeline[variant].Get());
+                g.c->OMSetRenderTargets(1, &handles[variant], FALSE, nullptr);
+                const auto address = batchStream[variant]->GetGPUVirtualAddress();
+                const D3D12_STREAM_OUTPUT_BUFFER_VIEW output {
+                    address + step * BatchStride, BatchStride,
+                    address + BatchFrames * BatchStride + step * sizeof(UINT64) };
+                g.c->SOSetTargets(0, 1, &output);
+                g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+            }
+            g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        const D3D12_STREAM_OUTPUT_BUFFER_VIEW emptyOutput {};
+        g.c->SOSetTargets(0, 1, &emptyOutput);
+        for (UINT variant = 0; variant < 2; ++variant)
+        {
+            g.barrier(batchStream[variant].Get(), D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.c->CopyBufferRegion(batchReadback.Get(), variant * BatchBytes, batchStream[variant].Get(), 0, BatchBytes);
+        }
+        g.finish();
+        void* batchData = nullptr;
+        D3D12_RANGE batchRange { 0, 2 * BatchBytes };
+        check(batchReadback->Map(0, &batchRange, &batchData));
+        const auto* batch = static_cast<const char*>(batchData);
+        for (UINT step = 0; step < BatchFrames; ++step)
+        {
+            const auto* original = reinterpret_cast<const Clip*>(batch + step * BatchStride);
+            const auto* previous = step ? reinterpret_cast<const Clip*>(batch + (step - 1) * BatchStride) : nullptr;
+            const auto* result = reinterpret_cast<const Record*>(batch + BatchBytes + step * BatchStride);
+            for (UINT variant = 0; variant < 2; ++variant)
+            {
+                UINT64 bytes = 0;
+                memcpy(&bytes, batch + variant * BatchBytes + BatchFrames * BatchStride + step * sizeof(UINT64), sizeof(bytes));
+                require(bytes == 18 * (variant ? sizeof(Record) : sizeof(Clip)), "Batch stream output count mismatch");
+            }
+            for (UINT vertex = 0; vertex < 18; ++vertex)
+            {
+                require(!memcmp(result[vertex].current, original[vertex].xyzw, sizeof(Clip)), "Batch original position changed");
+                require(result[vertex].valid == (step ? 0.f : 1.f), "Batch history admission mismatch");
+                require(!memcmp(result[vertex].previous, step ? previous[vertex].xyzw : original[vertex].xyzw, sizeof(Clip)),
+                        "Batch GPU history differs from immediately preceding original vertex");
+            }
+        }
+        const D3D12_RANGE batchNoWrite { 0, 0 };
+        batchReadback->Unmap(0, &batchNoWrite);
+        printf("PASS gpu_history_frames=%u history_buffers=2 interframe_cpu_waits=0 interframe_history_copies=0 "
+               "exact_current_vertices=%u exact_previous_vertices=%u final_readback_only=1\n",
+               BatchFrames, BatchFrames * 18, (BatchFrames - 1) * 18);
         printf("PASS original_pixels=%llu exact_current_vertices=%llu exact_previous_vertices=%llu motion_pixels=%llu "
                "capture_pixels=%llu "
                "max_motion_error_px=%.9f frames=5 generation_and_stale_rejection=1 outside_range_unchanged=1 "

@@ -18,6 +18,8 @@
 
 ## Document index
 
+- [GeometryShaders.md](GeometryShaders.md): 32-frame single-list GPU history test reuses two buffers without interframe CPU waits/copies; 558 previous vertices match. Game queue admission and dense MV/FG remain incomplete.
+
 - [GeometryShaders.md](GeometryShaders.md): Matching N-2 history is now GPU-rejected; original rendering and mapped capture regression pass. Continuous game history and FG remain incomplete.
 
 - [SourceBootstrap.md](SourceBootstrap.md): Worker-owned PSO reuse verified live (one build, 63 reuses); buffers still per-capture and continuous history/FG absent.

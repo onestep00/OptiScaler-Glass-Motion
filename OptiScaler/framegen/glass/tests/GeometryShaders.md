@@ -454,6 +454,24 @@ Mapped capture atomically marks the object's status if contributing material pix
 
 ## GPU validation
 
+`GeometryShaderGpu` additionally records 32 consecutive fixture frames in one
+command list. It reuses exactly two vertex-history buffers, with explicit
+read/write transitions and no interframe CPU wait, readback, history copy or
+allocation. Original and modified stream outputs are retained solely as a test
+oracle and read once after the final submission completes. All 576 current
+vertices match the original shader exactly; all 558 accepted previous vertices
+match the immediately preceding original outputs. Warmup rejects history.
+The existing material-MV/color/depth regression also passes. Local evidence is
+`work/glass-history-adjacency-v1/gpu-batch-result.txt`.
+
+This is a single ordered command-list test, not proof of game multi-list or
+cross-queue ordering. Test stream-output/readback storage is not the proposed
+runtime allocation. The live owner still must prove queue/recording ordering,
+identity, view and lifetime before reusing these buffers. Its current diagnostic
+ABI exposes no safe original index-buffer capture service either. Dense game
+boundary MV and FG integration remain incomplete. Resource transitions follow
+Microsoft's [resource-state synchronization contract](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12).
+
 Run `build_geometry_shader.ps1` from an x64 Visual Studio Developer PowerShell. It uses the repository's pinned DXC binary, generates shaders from the included synthetic HLSL, runs the actual production rewriter/assembler/validator, and creates an independent NVIDIA D3D12 device. It does not attach to or modify a game. It has no Python dependency.
 
 The fixture uses indexed, instanced geometry with nonzero IA start offsets, time-dependent deformation, camera movement, perspective, and a material with both a curved alpha contour and a discarded internal gap. Five frames test warmup, valid history, changed generation, and stale-frame rejection. Stream output independently reads original and instrumented vertex results.

@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Two-buffer GPU history passes 32 fixture frames without interframe CPU wait/copy; game ordering, dense boundary MV and FG remain incomplete.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Strict GPU N-1 guard rejects matching stale tags without copies or waits; independent original-rendering and mapped-capture checks pass. Not deployed; continuous game history and FG incomplete.
 
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Diagnostic PSO cache avoids 63 repeated compilations in a 64-job live run. Continuous GPU history and FG remain incomplete.
