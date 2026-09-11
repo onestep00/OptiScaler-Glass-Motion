@@ -8,6 +8,7 @@ namespace GlassFg
 {
 // Optional diagnostic filter from a census in the same running process. This
 // selects original draws only; it supplies no missing identity/geometry/history.
+// UINT32_MAX startInstance permits changing engine upload offsets during capture.
 struct ExperimentCaptureSelection
 {
     bool enabled = false;
@@ -33,7 +34,7 @@ struct ExperimentCaptureSelection
         if (!enabled) return true;
         if (draw.pipelineIdentity != pipeline || draw.mesh != mesh || draw.chunk != chunk || draw.indices != indices ||
             draw.instances != instances || draw.startIndex != startIndex || draw.baseVertex != baseVertex ||
-            draw.startInstance != startInstance || !draw.targetAt) return false;
+            (startInstance != UINT32_MAX && draw.startInstance != startInstance) || !draw.targetAt) return false;
         GlassExperimentTarget view {}; view.size = sizeof(view);
         if (draw.targetAt(draw.targetSource, binding, &view) != 1 || view.resource != target) return false;
         if (!proxy) return true;

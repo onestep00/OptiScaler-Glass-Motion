@@ -2,8 +2,8 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-11
-- Status: repeatable same-draw coverage audit independently GPU verified; continuous engine object history and FG integration incomplete
-- Deployment: 7769d34 coverage diagnostic observed live; seven captures contain only four covered pixels. Additional draw provenance below is not deployed
+- Status: live vertex snapshots recorded; continuous object history, jitter/view admission and FG integration incomplete
+- Deployment: replaceable vertex diagnostic ran in PID 56340 and unloaded; installed correction unchanged
 - Deprecated: no
 - Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
 
@@ -22,8 +22,34 @@ frames, preserving all 122,880 original material pixels. Its history writes are
 included in the existing exact vertex-output comparisons; all 90 current outputs
 and 36 accepted previous outputs still match. A UAV barrier orders the added
 diagnostic draw after earlier writes. This test passed after rebuilding the
-compiler and fixture with MSVC `/W4 /WX`. The live experiment module has not yet
-been connected to this new preparation method.
+compiler and fixture with MSVC `/W4 /WX`.
+
+The replaceable `ExperimentCoverageModule` now has a separate
+`GLASS_CAPTURE_VERTEX_OUTPUTS` build. It saves frame-local raw clip positions and
+tags as 32-byte records, preserves original PS bytes, and uses separate owned
+buffers for each pending recording. The 256 MiB diagnostic budget, eight pending
+slots and 64-capture ceiling remain. No cross-frame GPU dependency or temporal
+identity is invented: previous input is zeroed, generation 1 is only a local
+write-enable tag, and actual engine identity is stored separately in CSV. It
+records at most one selected draw per engine frame. Original coverage mode also
+still compiles with `/W4 /WX`.
+
+In the same running game, generation 6 captured a selected skinned draw 64 times
+over engine frames 79426--79518. All 128 vertices in every snapshot had the actual
+frame tag, local write tag and finite clip coordinates. One owner/mesh/slot/
+generation/chunk tuple persisted in these records; 35 pairs had consecutive frame
+numbers. Position differences were calculated directly from the recorded VS
+outputs, without image matching. They still include projection jitter and do not
+prove complete temporal topology/view identity or a rasterized surface MV.
+Each snapshot is 4,096 bytes; this is diagnostic readback, not the production path.
+The host reported 64 new recorded/retired jobs, then generation 6 unloaded with
+zero pending captures. The older pinned CPU observers are separate and remain
+resident with recording stopped. No new motion was substituted into FG.
+
+The diagnostic selector can use UINT32_MAX for startInstance to permit changing
+upload offsets while still checking live object/mesh/pipeline/target criteria.
+That wildcard never supplies missing identity. The selected numeric identifiers
+are a local experiment filter, not a production object whitelist.
 
 The diagnostic now uses `OriginalColorAndCoverageAudit`: the same PS records
 two reference bit regions before any object-map rejection. One records surviving

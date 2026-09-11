@@ -20,6 +20,11 @@ using namespace GlassFg;
 HMODULE moduleIdentity = nullptr;
 constexpr unsigned SlotCount = 8, MaxInstances = 64, MaxCaptures = 64;
 constexpr uint64_t Budget = 256ull * 1024 * 1024;
+#ifdef GLASS_CAPTURE_VERTEX_OUTPUTS
+constexpr bool VertexOutputDiagnostic = true;
+#else
+constexpr bool VertexOutputDiagnostic = false;
+#endif
 #ifdef GLASS_CAPTURE_DRAW_INSTANCES
 constexpr bool DrawInstanceDiagnostic = true;
 #else
@@ -85,6 +90,7 @@ class Coverage
     std::array<Selection, MaxCaptures> selected {};
     unsigned selections = 0;
     uint64_t allocated = 0;
+    uint64_t lastVertexFrame = 0;
     ComPtr<ID3D12Resource> buffer(uint64_t bytes, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state, bool uav = false)
     {
         D3D12_HEAP_PROPERTIES heap {}; heap.Type = type;
@@ -108,8 +114,11 @@ class Coverage
         root.layout = GeometryLayout::PerInstance; root.dwords = view.dwords;
         GeometryCompiler dxc(compiler);
         std::string error;
-        if (FAILED(dxc.createCoverageAudit(device.Get(), root,
-            *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(view.descriptor), slot.pipeline, error)))
+        const auto& original = *static_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(view.descriptor);
+        const auto compiled = VertexOutputDiagnostic
+            ? dxc.createVertexCapture(device.Get(), root, original, slot.pipeline, error)
+            : dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error);
+        if (FAILED(compiled))
             throw std::runtime_error(error);
         slot.bits = buffer(slot.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true);
         slot.readback = buffer(slot.bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -141,7 +150,8 @@ class Coverage
         slot.initComplete = true;
         slot.initCommand.Reset(); // Destroy the private completed recording.
         slot.initAllocator.Reset(); slot.initQueue.Reset(); slot.initFence.Reset();
-        slot.zeros.Reset(); // Worker only, after its private initialization completes.
+        if constexpr (!VertexOutputDiagnostic)
+            slot.zeros.Reset(); // Vertex snapshots retain a zero previous-input SRV.
     }
     void save(Slot& slot)
     {
@@ -186,6 +196,32 @@ class Coverage
             targets << '\n';
         }
         targets.close(); if (!targets) throw std::runtime_error("Capture target metadata failed");
+        if constexpr (VertexOutputDiagnostic)
+        {
+            std::ofstream csv(withSuffix(".csv"));
+            csv << "frame,instance,proxy,mesh,slot,generation,vertices,first_record,chunk,pipeline\n";
+            for (unsigned i = 0; i < slot.instances; ++i)
+            {
+                const auto& object = slot.objects[i];
+                csv << slot.frame << ',' << i << ',' << object.proxy << ',' << slot.draw.mesh << ','
+                    << object.slot << ',' << object.generation << ',' << slot.mesh.vertices << ','
+                    << i * slot.mesh.vertices << ',' << slot.draw.chunk << ',' << slot.view.identity << '\n';
+            }
+            csv.close(); if (!csv) throw std::runtime_error("Vertex metadata write failed");
+            std::ofstream meta(withSuffix(".draw"));
+            meta << "vertex_format=1\nrecord_bytes=32\nframe=" << slot.frame
+                 << "\nrecording=" << slot.recording << "\nvertices=" << slot.mesh.vertices
+                 << "\ninstances=" << slot.instances << "\nmesh=" << slot.draw.mesh
+                 << "\nchunk=" << slot.draw.chunk << "\nvertex_buffer=" << slot.mesh.vertexBuffer
+                 << "\nindex_buffer=" << slot.mesh.indexBuffer << "\nindex_offset=" << slot.mesh.indexOffset
+                 << "\nvertex_factory=" << slot.mesh.vertexFactory << "\nviewport=";
+            for (unsigned i = 0; i < 6; ++i) meta << (i ? "," : "") << slot.draw.viewport[i];
+            meta << "\nview_identity_proven=0\ntopology_history_proven=0\nmotion_produced=0\n";
+            meta.close(); if (!meta) throw std::runtime_error("Vertex provenance write failed");
+            const char done[] = "vertex_only=1 motion_produced=0 gpu_complete=1 recording_discarded=1\n";
+            write(".done", done, sizeof(done) - 1);
+            return;
+        }
         std::ofstream csv(withSuffix(".csv"));
         csv << "frame,chunk,width,height,left,top,instance,proxy,mesh,slot,generation,status_word,first_bit,motion_produced\n";
         for (unsigned i = 0; i < slot.instances; ++i)
@@ -333,11 +369,18 @@ class Coverage
         const unsigned left = unsigned(d->viewport[0]), top = unsigned(d->viewport[1]);
         const unsigned width = unsigned(d->viewport[2]), height = unsigned(d->viewport[3]);
         if (!width || !height || left + width > 32768 || top + height > 32768) return 0;
+        GlassExperimentMesh vertexShape {};
+        if constexpr (VertexOutputDiagnostic)
+            if (!d->meshShape(d->source, &vertexShape) || !vertexShape.vertices ||
+                vertexShape.vertices > 65535 || d->baseVertex || d->startIndex) return 0;
         std::unique_lock lock(mutex, std::try_to_lock);
         if (!lock || stopping) return 0;
+        if constexpr (VertexOutputDiagnostic)
+            if (lastVertexFrame == event.frame) return 0;
         for (auto& slot : slots)
             if (slot.state == Slot::Ready && slot.view.identity == d->pipelineIdentity && slot.width == width &&
-                slot.height == height && slot.instances == d->instances)
+                slot.height == height && slot.instances == d->instances &&
+                (!VertexOutputDiagnostic || slot.mesh.vertices == vertexShape.vertices))
             {
                 slot.left = left; slot.top = top; slot.objects = {};
                 auto* mapping = static_cast<GeometryInstance*>(slot.mapping);
@@ -356,9 +399,10 @@ class Coverage
                     slot.objects[index] = object;
                     mapping[index] = { 0, 0, 0, object.generation, left, top, width, height,
                                        (status + 1) * 32, width, unsigned(slot.bytes * 8), status };
-                    if (!mapping[index].validCoverage(slot.bytes / 4)) return -1;
+                    if constexpr (!VertexOutputDiagnostic)
+                        if (!mapping[index].validCoverage(slot.bytes / 4)) return -1;
                 }
-                if constexpr (DrawInstanceDiagnostic)
+                if constexpr (DrawInstanceDiagnostic && !VertexOutputDiagnostic)
                 {
                     // Same-draw ordinal isolation only. Never invent an engine
                     // object identity or authorize previous-vertex history.
@@ -395,16 +439,30 @@ class Coverage
                 prepared.previous = slot.map->GetGPUVirtualAddress(); prepared.current = slot.dummy->GetGPUVirtualAddress() + 32;
                 prepared.material = slot.constants->GetGPUVirtualAddress(); prepared.capture = slot.bits->GetGPUVirtualAddress();
                 prepared.mapping = slot.map->GetGPUVirtualAddress(); slot.state = Slot::Reserved;
+                if constexpr (VertexOutputDiagnostic)
+                {
+                    // Frame-local ordinal storage only. Tags never authorize temporal identity.
+                    for (unsigned i = 0; i < d->instances; ++i)
+                        mapping[i] = { i * vertexShape.vertices, vertexShape.vertices, 0, 1 };
+                    const InstanceHistoryConstants vertices { 0, d->instances, unsigned(slot.bytes / 32),
+                        0, d->instances, 0, unsigned(event.frame), 0 };
+                    memcpy(prepared.history, &vertices, sizeof(vertices));
+                    prepared.previous = slot.zeros->GetGPUVirtualAddress();
+                    prepared.current = slot.bits->GetGPUVirtualAddress();
+                    lastVertexFrame = event.frame;
+                }
                 return 1;
             }
-        for (unsigned i = 0; i < selections; ++i)
-            if (selected[i].pipeline == d->pipelineIdentity && selected[i].width == width &&
-                selected[i].height == height && selected[i].instances == d->instances) return 0;
+        if constexpr (!VertexOutputDiagnostic)
+            for (unsigned i = 0; i < selections; ++i)
+                if (selected[i].pipeline == d->pipelineIdentity && selected[i].width == width &&
+                    selected[i].height == height && selected[i].instances == d->instances) return 0;
         if (selections == MaxCaptures) return 0;
         for (auto& slot : slots) if (slot.state == Slot::Empty)
         {
             const unsigned words = unsigned(1 + (uint64_t(width) * height + 31) / 32);
-            const uint64_t bytes = uint64_t(words) * (d->instances + 2) * 4;
+            const uint64_t bytes = VertexOutputDiagnostic ? uint64_t(vertexShape.vertices) * d->instances * 32
+                : uint64_t(words) * (d->instances + 2) * 4;
             const uint64_t charge = ((bytes + 65535) & ~uint64_t(65535)) * 3 + 1024 * 1024;
             if (allocated + charge > Budget || bytes * 8 > UINT32_MAX) return 0;
             slot.source.access = d->pipelineAccess;
@@ -413,8 +471,11 @@ class Coverage
             if (!slot.source.value) return 0;
             slot.width = width; slot.height = height; slot.instances = d->instances; slot.words = words;
             slot.bytes = bytes; slot.charge = charge; allocated += charge; slot.index = selections;
+            if constexpr (VertexOutputDiagnostic) slot.mesh = vertexShape;
             selected[selections++] = { d->pipelineIdentity, width, height, d->instances };
-            slot.state = Slot::Requested; changed.notify_one(); break;
+            slot.state = Slot::Requested; changed.notify_one();
+            if constexpr (!VertexOutputDiagnostic) break;
+            if (selections == MaxCaptures) break;
         }
         return 0;
     }

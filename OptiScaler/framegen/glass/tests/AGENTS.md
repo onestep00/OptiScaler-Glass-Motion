@@ -18,7 +18,7 @@
 
 ## Document index
 
-- [GeometryShaders.md](GeometryShaders.md): Vertex-only capture keeps original PS and passes five-frame GPU color/history checks. Game module connection remains pending.
+- [GeometryShaders.md](GeometryShaders.md): Live replaceable vertex recorder captured 64 x 128 valid VS outputs and unloaded. 35 consecutive pairs retain one metadata tuple; jitter/view/topology admission and FG remain incomplete.
 
 - [SourceSlots.md](SourceSlots.md): Live enqueue probe stopped after 4,096 updates; three associated recorded skinning VS accept history instrumentation. Cross-time owner overlaps are not admitted identity; live MV/FG integration remains absent.
 

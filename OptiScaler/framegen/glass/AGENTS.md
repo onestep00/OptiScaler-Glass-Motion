@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/GeometryShaders.md](tests/GeometryShaders.md): Original-PS vertex-output capture added and GPU verified. Live recorder connection and object MV/FG remain incomplete.
+- [tests/GeometryShaders.md](tests/GeometryShaders.md): Original-PS vertex recorder captured 64 live frames and unloaded. Exact current VS outputs are available; jitter/view/history admission and object MV/FG remain incomplete.
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Direct source-slot cache has bounded storage, constant-index lookup and CPU-verified domain/conflict rejection. Engine provenance and motion integration remain incomplete.
 
