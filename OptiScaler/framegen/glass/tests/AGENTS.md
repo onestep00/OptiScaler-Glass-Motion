@@ -19,6 +19,8 @@
 
 ## Document index
 
+- [ArraySourceDomains.md](ArraySourceDomains.md): Resident RTTI identifies destructible compaction; six direct wrapper callers have distinct source domains. Renderer source indices need upstream translation; runtime lifetime/MV/FG remain incomplete.
+
 - [SourceSlots.md](SourceSlots.md): Source-slot to history lookup checks original index, owner, view and frame. Node IDs identify the parent setup; native array generations and game connection remain incomplete.
 
 - [VertexHistoryCache.md](VertexHistoryCache.md): Original source-index lookup joins the sealed source table to bounded history; reorder/replacement and 300 churn frames pass CPU checks. Native lifetime/update and game integration remain incomplete.

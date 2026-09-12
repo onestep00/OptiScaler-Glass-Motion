@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Destructible source RTTI verified in the resident game. Packed array ordinals require source translation; source lifecycle and true MV/FG integration remain incomplete.
+
 - [tests/SourceSlots.md](tests/SourceSlots.md): Original source-slot lookup now composes array history keys. Node-level ID lookup is documented separately from element identity; native lifetime/update supply remains incomplete.
 
 - [tests/VertexHistoryCache.md](tests/VertexHistoryCache.md): Original source-index lookup preserves history across packed-slot reordering and separates array replacement. Four-way lookup and 300 CPU churn frames pass; native lifetime/update and game capture remain incomplete.
