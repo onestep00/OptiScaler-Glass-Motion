@@ -99,16 +99,16 @@ int main(int argc, char** argv)
                 ++rows;
                 if (!s.sourceArray && !s.arrayCount && s.arrayGlobalStart == UINT32_MAX) continue;
                 ++arrayRows;
-                GlassFg::CyberpunkInstanceSelection selection;
-                if (!selection.resolveGlobalPacket(s.globalRange == 1, s.transformIndex, s.count,
-                    s.arrayGlobalStart, s.arrayCount)) continue;
-                unsigned index = UINT32_MAX;
-                const auto noRead = [](uint64_t, void*, unsigned) { return false; };
-                require(selection.originalIndex(s.count - 1, index, noRead) && index < s.arrayCount);
+                unsigned first = UINT32_MAX;
+                if (!GlassFg::CyberpunkInstanceSelection::globalStorageRange(s.globalRange == 1,
+                    s.transformIndex, s.count, s.arrayGlobalStart, s.arrayCount, first)) continue;
+                require(uint64_t(first) + s.count <= s.arrayCount);
+                // ABI v1 did not record flags. These are storage offsets only;
+                // do not admit them as original source indices or MV identity.
                 ++resolved; elements += s.count;
             }
             require(file.eof());
-            std::printf("RECORDED rows=%llu array_rows=%llu global_source_ranges=%llu elements=%llu "
+            std::printf("RECORDED rows=%llu array_rows=%llu global_storage_ranges=%llu elements=%llu original_order_proven=0 "
                         "native_buffer_reads=0 previous_motion_proven=0\n", rows, arrayRows, resolved, elements);
         }
     }

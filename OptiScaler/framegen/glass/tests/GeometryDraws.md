@@ -2,7 +2,7 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-13
-- Status: same-flush packet parent query verified live; exact global-array source range decoded; continuous object history incomplete
+- Status: same-flush packet parent query verified live; global storage range decoded; grouped source reordering identified; continuous object history incomplete
 - Deployment: same-flush CPU diagnostic captured PID 21760 and stopped; installed host and GPU/FG inputs unchanged
 - Deprecated: no
 - Scope: direct indexed mesh batches in the audited Cyberpunk executable; broader routes remain incomplete
@@ -40,17 +40,43 @@ Missing host pipelines and objects outside this scene still prohibit a claim
 of complete transparency coverage. Timeline and provider recording both stopped;
 the game remained running and no MV/FG input was changed.
 
-`CyberpunkInstanceSelection::resolveGlobalPacket` derives exact current source
-indices for a verified global packet from its offset within the parent's array.
-It validates the native 17-bit range, 32,767-instance packet limit and complete
-owner bounds, including split packets. It performs no source-memory reads.
-The production decoder applied offline to all 6,094 recorded array spans resolves
-20,498 element occurrences. CPU-group selections, original baked-source identity,
-array replacement/compaction and N-1 GPU input are not proven by this arithmetic.
-`build_packet_parents.ps1` runs selection, producer and same-flush callback checks,
-optionally applies the decoder to a recorded packet file, and builds the isolated
-DLL. It never injects a game. The separate timeline test checks ABI propagation
-and refusal outside the provider's active scope.
+`CyberpunkInstanceSelection::globalStorageRange` validates the native 17-bit
+allocation, 32,767-instance packet limit and split-packet bounds without reading
+source memory. Applied offline to the 6,094 recorded array spans, it resolves
+20,498 storage-element occurrences. **These offsets do not establish original
+source indices.** The earlier wording "exact current source indices" was too
+broad: ABI v1 did not record the array's grouping flags.
+
+Owned executable audit (SHA-256
+`a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`)
+finds two writers feeding queue helper RVA `3cc658`: initial conversion at
+`3cc3c0` and packed updates at `3cc59c`. The latter is called from `1e8778`
+when proxy+0xea has bit `0x2000` set. Instructions `1e8932..1e8960` read
+16-bit group indices from group+0x18 and gather proxy+0x108 transforms in that
+order. `1e8974..1e89c5` uploads each group into proxy+0x114 plus its cumulative
+packed offset, then assigns group+0x50. Thus a populated global allocation can
+contain reordered original elements even when its address and count agree.
+Direct-call discovery is evidence for these paths, not proof that all indirect
+writers have been exhaustively excluded.
+
+`resolveGlobalPacket` now requires flags from the same owned engine input and
+rejects grouped (`0x2000`) or unknown flags before exposing original indices.
+Grouped input must use the actual source-index list; the existing group decoder
+reads 16 setup bytes and two bytes per selected element. Array replacement,
+source lifetime and N-1 GPU submission still need separate verification.
+The CPU fixture checks that the same valid storage interval is rejected as an
+original-index mapping under grouped/unknown flags, including stale-result
+clearing. `build_packet_parents.ps1` runs owned checks, optionally validates
+recorded storage ranges, and builds the isolated DLL without game injection.
+
+A later bounded read-only audit of PID 21760 found all 97 recorded parent
+headers currently matching, including 11 array parents with grouping bit clear.
+It read 55,872 bytes and wrote nothing. This is a current snapshot only: parent
+addresses can be reused, and it neither supplies historical flags nor proves
+lifetime continuity. Local evidence is `current-parent-flags.json` and
+`global-upload-audit.txt` / `caller-1e8778.txt` under the diagnostic workspace.
+No new native identity provider, geometry MV or FG input is deployed by this
+source correction.
 
 The latest source preserves `GeometryBatchSpan::parent` separately from admitted
 single-object identity. In the owned array producer at RVA `1ea780`, instructions

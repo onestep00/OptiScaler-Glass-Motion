@@ -14,7 +14,7 @@
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 
-- [tests/GeometryDraws.md](tests/GeometryDraws.md): Same-flush diagnostic obtains 44,213/44,232 live parents; all 6,094 captured array spans resolve current global indices. CPU groups, child lifetimes and N-1 GPU motion remain incomplete.
+- [tests/GeometryDraws.md](tests/GeometryDraws.md): Same-flush parents verified live; global storage offsets are separated from original indices after finding grouped repacking. Grouped/unknown flags reject linear identity; native lifetimes and MV/FG remain incomplete.
 
 - [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Bounded live caller-context capture resolves shared/destructible source ranges, with 2,686 source-element occurrences. Temporal ownership and actual MV/FG remain incomplete; diagnostic recording stopped.
 

@@ -19,17 +19,32 @@ struct CyberpunkInstanceSelection
     bool linear = false;
     std::uint32_t linearFirst = 0;
 
-    // Exact subrange of the owner's populated global array, including native
-    // 32767-element packet splits. Current indices only, not temporal identity.
-    bool resolveGlobalPacket(bool global, std::uint32_t packetStart, std::uint32_t packetCount,
-                             std::uint32_t ownerStart, std::uint32_t originalCount)
+    // Storage offsets alone are not original indices: the grouped update path
+    // repacks source elements into this same allocation in group order.
+    static bool globalStorageRange(bool global, std::uint32_t packetStart, std::uint32_t packetCount,
+                                   std::uint32_t ownerStart, std::uint32_t originalCount,
+                                   std::uint32_t& first)
     {
-        *this = {};
+        first = UINT32_MAX;
         if (!global || !packetCount || packetCount > 32767 || !originalCount || originalCount > 65536 ||
             ownerStart == UINT32_MAX || std::uint64_t(ownerStart) + originalCount > 131072 ||
             packetStart < ownerStart || packetStart - ownerStart >= originalCount ||
             packetCount > originalCount - (packetStart - ownerStart)) return false;
-        linear = true; linearFirst = packetStart - ownerStart;
+        first = packetStart - ownerStart; return true;
+    }
+
+    // The audited non-grouped path preserves source order. Flags must come
+    // from the same owned engine input, not a later snapshot of this address.
+    // Array replacement/lifetime still needs an independent history lease.
+    bool resolveGlobalPacket(bool global, std::uint32_t packetStart, std::uint32_t packetCount,
+                             std::uint32_t ownerStart, std::uint32_t originalCount,
+                             std::uint32_t ownerFlags)
+    {
+        *this = {};
+        if (ownerFlags > UINT16_MAX || (ownerFlags & 0x2000) ||
+            !globalStorageRange(global, packetStart, packetCount, ownerStart, originalCount, linearFirst))
+        { *this = {}; return false; }
+        linear = true;
         count = packetCount; sourceCount = originalCount; return true;
     }
 

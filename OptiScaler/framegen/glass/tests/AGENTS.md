@@ -21,7 +21,7 @@
 
 - [Timeline.md](Timeline.md): Live diagnostic parent lookup and 8,000 concurrent-event checks pass. Neighbor-frame mismatches remain; no GPU replay or MV/FG proof.
 
-- [GeometryDraws.md](GeometryDraws.md): Same-flush packet parent capture verified live; exact global source decoder resolves all 6,094 recorded array spans. build_packet_parents.ps1 performs owned callbacks/optional recorded decoding, never injection. Child lifetime/MV remains incomplete.
+- [GeometryDraws.md](GeometryDraws.md): Same-flush parents verified live; global storage offsets are separated from original indices after finding grouped repacking. Grouped/unknown flags reject linear identity; native lifetimes and MV/FG remain incomplete.
 
 - [ArraySourceDomains.md](ArraySourceDomains.md): Caller-context diagnostics captured 697 game updates and resolved 2,686 source-element occurrences. Four independent tests cover real unwind/callback and scalar decoding. Cross-frame lifetime, foliage/particle identity and MV/FG remain incomplete.
 
