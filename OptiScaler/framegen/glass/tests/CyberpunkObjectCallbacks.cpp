@@ -10,6 +10,7 @@ bool nextResult = true, crossFrame = false, retireBeforeOriginal = false;
 GlassFg::State* fixture = nullptr;
 std::array<unsigned char, 0x1c0> object {};
 GlassFg::GeometryObjectPose current;
+unsigned arrayDepth = 0, arrayCalls = 0;
 void require(bool okay, const char* text)
 {
     if (!okay)
@@ -29,6 +30,20 @@ bool originalUpdate(void* proxy, void* bounds, void* packed)
     if (crossFrame)
         ++tick;
     return nextResult;
+}
+uintptr_t originalSetArray(void* proxy, void* bounds, void* source)
+{
+    require(bounds == current.bounds.data() && source == current.packed.data(), "Array arguments changed");
+    require(!fixture->registry->ticket(reinterpret_cast<uint64_t>(proxy), 2), "Setter has a usable old ticket");
+    ++arrayCalls;
+    if (!arrayDepth++)
+    {
+        require(GlassFg::arrayUpdated(proxy, bounds, source) == 0x123456789abcdef0ULL,
+                "Nested array return changed");
+        require(!fixture->registry->ticket(reinterpret_cast<uint64_t>(proxy), 2), "Nested setter released outer gate");
+    }
+    --arrayDepth;
+    return 0x123456789abcdef0ULL;
 }
 void prepare()
 {
@@ -54,6 +69,7 @@ int main()
         GlassFg::originalRegister = &originalRegister;
         GlassFg::originalRemove = &originalRemove;
         GlassFg::originalUpdate = &originalUpdate;
+        GlassFg::originalSetArray = &originalSetArray;
         GlassFg::activeState.store(&state);
         struct Stop
         {
@@ -90,6 +106,11 @@ int main()
         nextResult = true;
         require(GlassFg::registered(object.data()) && state.registry->ticket(proxy, 2) != recovered.generation,
                 "Pointer reuse");
+        const auto beforeArray = state.registry->ticket(proxy, 2);
+        require(GlassFg::arrayUpdated(object.data(), current.bounds.data(), current.packed.data()) ==
+                    0x123456789abcdef0ULL && arrayCalls == 2 &&
+                    state.registry->ticket(proxy, 2) != beforeArray,
+                "Actual array callback did not advance lifetime or preserve result");
         void* unreadable = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
         require(unreadable != nullptr, "Protected-page fixture allocation");
         const bool forwarded = GlassFg::registered(unreadable);
@@ -97,7 +118,7 @@ int main()
         require(forwarded && state.rejected == 2, "Unreadable snapshot changed original result");
         printf("PASS engine_callbacks=1 original_results_preserved=1 actual_layout_copied=1 mixed_frame_rejected=1 "
                "later_recovery=1 retire_before_free=1 pointer_reuse=1 unreadable_memory_rejected=1 "
-               "game_hooks_installed=0\n");
+               "array_callback_gate=1 array_nested_forwarding=1 array_return_preserved=1 game_hooks_installed=0\n");
         return 0;
     }
     catch (const std::exception& error)

@@ -208,6 +208,34 @@ void fixtureRun(void*, void*, void*)
     fixture->registry->registered(proxy, 1, geometry.mesh, pose);
     flush();
     require(observed.empty(), "Reused array parent survived until draw");
+    storeInstance(0, 310, false, 2, true);
+    flush(false, 310);
+    std::uint32_t originalIndex = UINT32_MAX;
+    require(observed.size() == 1 && !observed[0].identity &&
+                observed[0].originalIndex(1, originalIndex) && originalIndex == 11,
+            "Native non-grouped array source offset missing");
+    require(!observed[0].originalIndex(2, originalIndex), "Outside array span admitted");
+    put(proxies[0].data(), 0xea, std::uint16_t(0x2000));
+    storeInstance(0, 310, false, 2, true);
+    flush(false, 310);
+    require(observed.size() == 1 && !observed[0].originalIndex(0, originalIndex),
+            "Grouped packed order became original identity");
+    put(proxies[0].data(), 0xea, std::uint16_t(0));
+    storeInstance(0, 310, false, 2, true);
+    auto mutation = fixture->registry->beginArrayUpdate(proxy, 1);
+    fixture->registry->endArrayUpdate(proxy, 1, mutation);
+    flush(false, 310);
+    require(observed.empty(), "Array replacement after append survived into draw");
+    mutation = fixture->registry->beginArrayUpdate(proxy, 1);
+    storeInstance(0, 310, false, 2, true);
+    flush(false, 310);
+    require(observed.size() == 1 && !observed[0].parent && !observed[0].originalIndex(0, originalIndex),
+            "Unfinished setter published array source identity");
+    fixture->registry->endArrayUpdate(proxy, 1, mutation);
+    storeInstance(0, 310, false, 2, true);
+    flush(false, 310);
+    require(observed.size() == 1 && observed[0].originalIndex(0, originalIndex) && originalIndex == 10,
+            "Current source failed to recover after completed mutation");
     put(proxies[0].data(), 0x110, std::uint32_t(0));
     put(proxies[0].data(), 0x114, UINT32_MAX);
     storeInstance(0, 33, false);
@@ -261,7 +289,7 @@ int main()
         GlassFg::activeDrawState.store(fixture.get());
         GlassFg::run(nullptr, nullptr, nullptr);
         require(!GlassFg::currentBatch && fixture->occupied == 0 && !GlassFg::currentFlush, "Scope cleanup");
-        require(forwardedAppends == 20 && forwardedFlushes == 13, "Original operations were dropped or repeated");
+        require(forwardedAppends == 25 && forwardedFlushes == 18, "Original operations were dropped or repeated");
         GlassFg::GeometryDrawBatch batch;
         for (unsigned i = 0; i < 2049; ++i)
             batch.append(i, i + 1, { {}, 0, 1, i, false });
@@ -277,7 +305,8 @@ int main()
         printf("PASS direct_packet_slots=1 coincident_objects=1 batch_reorder=1 rigid_and_skinned=1 "
                "unknown_intervals_preserved=1 global_range=1 failed_upload_rejected=1 lifetime_reuse_rejected=1 "
                "mixed_frame_rejected=1 borrowed_view_scope=1 bounded_pool=1 original_calls_preserved=1 "
-               "single_visible_cluster_rejected=1 array_parent_preserved=1 game_hooks_installed=0\n");
+               "single_visible_cluster_rejected=1 array_parent_preserved=1 native_array_source=1 "
+               "array_mutation_gate=1 grouped_source_rejected=1 game_hooks_installed=0\n");
         return 0;
     }
     catch (const std::exception& error)

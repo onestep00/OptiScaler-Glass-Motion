@@ -1,11 +1,44 @@
 # Engine object lifetime and pose candidates
 
 - Created: 2026-09-11
-- Updated: 2026-09-11
-- Status: lifetime-only default passes registry and production callback checks; live geometry MV incomplete
-- Deployment: latest cache reduction is source-only; installed host remains unchanged
+- Updated: 2026-09-13
+- Status: array setter invalidation and original-order draw indices pass owned callbacks; GPU publication and live MV incomplete
+- Deployment: array mutation hook and index propagation are source-only; installed host remains unchanged
 - Deprecated: no
-- Scope: audited Cyberpunk mesh-proxy registration, removal and one transform-update route
+- Scope: audited Cyberpunk mesh-proxy registration, removal, transform updater and array setter
+
+## Array mutation and source-index checkpoint
+
+The source hooks the actual array setter before it changes proxy+0x108/0x110/
+0x114. The registry advances the shared object generation and temporarily rejects
+its lifetime ticket. A nested setter retains the outer gate. Completion releases
+only its matching active scope; removal/re-registration prevents a stale setter
+from releasing the new occupant. Interleaved generation invalidation does not
+release an unfinished array. No source array, transform or GPU buffer is copied.
+
+The setter body is discovered by normalized instruction layout, with its registry
+and frame globals cross-checked against existing functions. No preferred RVA or
+driver code signature is required. The owned PE compatibility fixture moves all
+ten functions and both globals, changes image size/timestamp, and still resolves;
+layout/call/global corruption and ambiguity reject. This does not imply support
+for arbitrary changed instruction layouts or unaudited alternate writers.
+
+`CyberpunkDraws` brackets header reads with the mutation/lifetime ticket and
+rechecks that ticket when consuming the draw. The verified non-grouped global
+path carries its original source offset in existing span padding (64-byte span
+size unchanged). Grouped `0x2000` arrays remain unknown until their actual group
+indices are supplied. This changes native source metadata, not FG inputs.
+
+Three owned executables pass registry lifecycle, nested callback/return
+preservation and 25 append/18 flush operations. The latter includes an array
+setter between append and draw, an active setter at append, grouped rejection,
+and recovery after completion. These tests do not call or hook a running game.
+
+The new gate tracks **CPU setter completion**. A global upload may be queued by
+the setter: GPU application order, topology/view identity and preceding submitted
+VS output still require their own proof before history admission. Neither this
+counter nor `originalOrder` alone authorizes an MV correction. The installed
+host remains SHA-256 `997b5465fe872d65a816d206bbd57c8bffb1d61166a83f829ba3f61dad068204`.
 
 ## Implemented behavior
 
@@ -16,9 +49,10 @@ nodes or pose hash buckets, and performs no pose insertion/hash updates. Explici
 `indexPoses=true` retains the old diagnostic candidate index described below.
 Neither mode supplies previous vertices to FG or permits stale-frame motion.
 
-The eight-slot fixture measured 192 bytes of vector storage in lifetime mode
-versus 3,072 bytes with the pose index. At the configured 131,072 slots this
-corresponds to 3 MiB versus 48 MiB (45 MiB less), excluding vector/lock/allocator
+The current eight-slot fixture measures 256 bytes of vector storage in lifetime
+mode versus 3,136 bytes with the diagnostic pose index. Array writer/scope state
+adds eight bytes per slot (1 MiB at full capacity). At the configured 131,072 slots this
+corresponds to 4 MiB versus 49 MiB (45 MiB less), excluding vector/lock/allocator
 overhead. This is structural CPU storage accounting, not measured process memory
 or frame time. Existing engine callback snapshot reads and its update hook remain;
 they have not been removed by this change.

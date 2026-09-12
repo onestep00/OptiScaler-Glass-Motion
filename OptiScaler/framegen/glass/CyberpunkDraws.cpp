@@ -2,6 +2,7 @@
 #include "CyberpunkDraws.h"
 #include "CyberpunkObjects.h"
 #include "CyberpunkLayout.h"
+#include "CyberpunkInstanceSelection.h"
 #include "DetourThreads.h"
 #include <bit>
 #include <mutex>
@@ -182,27 +183,33 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                     std::uint64_t transforms = 0;
                     std::uint32_t count = 0, globalStart = UINT32_MAX;
                 } instances;
-                if (copyAt(proxy + 0x98, actualSlot) && actualSlot == index && copyAt(proxy + 0xd8, mesh) && mesh &&
-                    mesh == geometry.mesh && copyAt(proxy + 0x108, instances))
+                try
                 {
-                    // A culled cluster can emit count=1 while its proxy owns
-                    // many objects. Until its original sub-instance index is
-                    // available, proxy identity alone cannot authorize history.
-                    try
+                    // Bracket header reads with the lifetime/array mutation
+                    // ticket. A setter active or completed between these reads
+                    // cannot publish a mixed old header with a new generation.
+                    const auto generation = state->registry->ticket(proxy, index);
+                    std::uint16_t flags = 0;
+                    if (generation && copyAt(proxy + 0x98, actualSlot) && actualSlot == index &&
+                        copyAt(proxy + 0xd8, mesh) && mesh && mesh == geometry.mesh &&
+                        copyAt(proxy + 0x108, instances) && copyAt(proxy + 0xea, flags) &&
+                        state->registry->ticket(proxy, index) == generation)
                     {
-                        const auto generation = state->registry->ticket(proxy, index);
-                        if (generation)
+                        record.parent = { proxy, mesh, index, generation };
+                        if (record.count == 1 && source == reinterpret_cast<std::uint64_t>(transforms) &&
+                            !instances.transforms && !instances.count && instances.globalStart == UINT32_MAX)
+                            record.identity = record.parent;
+                        CyberpunkInstanceSelection selection;
+                        if (selection.resolveGlobalPacket(record.global, record.transformIndex, record.count,
+                            instances.globalStart, instances.count, flags))
                         {
-                            record.parent = { proxy, mesh, index, generation };
-                            if (record.count == 1 && source == reinterpret_cast<std::uint64_t>(transforms) &&
-                                !instances.transforms && !instances.count && instances.globalStart == UINT32_MAX)
-                                record.identity = record.parent;
+                            record.originalOrder = true;
+                            record.originalFirst = static_cast<std::uint16_t>(selection.linearFirst);
                         }
                     }
-                    catch (...)
-                    {
-                    }
                 }
+                catch (...) {}
+
             }
         }
     }

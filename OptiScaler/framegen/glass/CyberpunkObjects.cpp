@@ -10,9 +10,13 @@ namespace
 using Register = bool (*)(void*);
 using Remove = void (*)(void*);
 using Update = bool (*)(void*, void*, void*);
+// Observed callers ignore the result; preserve the original integer return
+// register as well as all three native arguments.
+using SetArray = uintptr_t (*)(void*, void*, void*);
 Register originalRegister = nullptr;
 Remove originalRemove = nullptr;
 Update originalUpdate = nullptr;
+SetArray originalSetArray = nullptr;
 struct State
 {
     std::shared_ptr<GeometryObjectRegistry> registry;
@@ -155,6 +159,31 @@ bool updated(void* proxy, void* bounds, void* transform)
     }
     return result;
 }
+uintptr_t arrayUpdated(void* proxy, void* bounds, void* source)
+{
+    struct Scope
+    {
+        State* state;
+        uint64_t proxy;
+        uint32_t index = UINT32_MAX, stamp = 0;
+        ~Scope()
+        {
+            if (!stamp) return;
+            try { state->registry->endArrayUpdate(proxy, index, stamp); }
+            catch (...) { activeState.store(nullptr, std::memory_order_release); }
+        }
+    } scope { activeState.load(std::memory_order_acquire), reinterpret_cast<uint64_t>(proxy) };
+    if (scope.state)
+    {
+        try
+        {
+            if (slot(proxy, scope.index))
+                scope.stamp = scope.state->registry->beginArrayUpdate(scope.proxy, scope.index);
+        }
+        catch (...) { activeState.store(nullptr, std::memory_order_release); }
+    }
+    return originalSetArray(proxy, bounds, source);
+}
 } // namespace
 
 bool InitializeCyberpunkObjects(HMODULE executable) noexcept
@@ -182,11 +211,14 @@ bool InitializeCyberpunkObjects(HMODULE executable) noexcept
         originalRegister = reinterpret_cast<Register>(base + layout->functions[CyberpunkLayout::Register]);
         originalRemove = reinterpret_cast<Remove>(base + layout->functions[CyberpunkLayout::Remove]);
         originalUpdate = reinterpret_cast<Update>(base + layout->functions[CyberpunkLayout::Update]);
+        originalSetArray = reinterpret_cast<SetArray>(base + layout->functions[CyberpunkLayout::SetArray]);
         bool okay =
             DetourAttach(reinterpret_cast<PVOID*>(&originalRegister), reinterpret_cast<PVOID>(&registered)) == NO_ERROR;
         okay = DetourAttach(reinterpret_cast<PVOID*>(&originalRemove), reinterpret_cast<PVOID>(&removed)) == NO_ERROR &&
                okay;
         okay = DetourAttach(reinterpret_cast<PVOID*>(&originalUpdate), reinterpret_cast<PVOID>(&updated)) == NO_ERROR &&
+               okay;
+        okay = DetourAttach(reinterpret_cast<PVOID*>(&originalSetArray), reinterpret_cast<PVOID>(&arrayUpdated)) == NO_ERROR &&
                okay;
         if (!okay || !threads.enlist())
         {

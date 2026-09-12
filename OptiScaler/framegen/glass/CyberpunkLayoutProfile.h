@@ -59,11 +59,29 @@ inline constexpr Reference backendReferences[] {
     { 0xb9, 0xbd, Target::Code },   { 0xd8, 0xdc, Target::Code },     { 0xe7, 0xeb, Target::Code },
     { 0x1d3, 0x1d7, Target::Code },
 };
+inline constexpr Reference arrayReferences[] {
+    { 0x29, 0x2d, Target::ReadOnly },
+    { 0x4d, 0x51, Target::ReadOnly },
+    { 0x73, 0x77, Target::Code },
+    { 0xfd, 0x101, Target::Writable },
+    { 0x134, 0x138, Target::Code },
+    { 0x165, 0x169, Target::Code },
+    { 0x179, 0x17d, Target::Writable },
+    { 0x19a, 0x19e, Target::Code },
+    { 0x1b8, 0x1bc, Target::Code },
+    { 0x1d5, 0x1d9, Target::Code },
+    { 0x1dd, 0x1e1, Target::Code },
+    { 0x21e, 0x222, Target::Code },
+    { 0x23b, 0x23f, Target::Code },
+    { 0x264, 0x268, Target::Code },
+    { 0x272, 0x276, Target::Code },
+};
 inline constexpr RelocatableCode::Profile functions[] {
     { 161, 0x8a953f8e5b8de2b7ull, registerReferences }, { 59, 0x6b1d0915dfa05790ull, removeReferences },
     { 521, 0x1114e8e80bbfb0e6ull, updateReferences },   { 1812, 0x1b01b46553f7def1ull, runReferences },
     { 953, 0x3a170baf4c2407e7ull, appendReferences },   { 237, 0xb2675ba60ce512baull, rigidReferences },
     { 214, 0x8c6d363d91a36eaull, skinnedReferences },   { 219, 0x73cfc17215913d02ull, uploadReferences },
     { 585, 0x62183a4a9eac8718ull, backendReferences },
+    { 630, 0x5bccf1fceae351f9ull, arrayReferences },
 };
 } // namespace GlassFg::CyberpunkProfile

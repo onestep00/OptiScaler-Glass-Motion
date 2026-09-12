@@ -119,7 +119,7 @@
 
 - [GeometryDraws.md](GeometryDraws.md): Acquisition build 32054cc staged in MO2; live validation and FG substitution pending. Public draw/root and written-slot invalidation checks pass. Internal multi-instance arrays and non-mesh routes remain unverified.
 
-- [GeometryObjects.md](GeometryObjects.md): Lifetime-only runtime default and optional diagnostic pose index pass three executables. Synthetic callback checks only; latest reduction not deployed, direct-provenance and MV gaps remain.
+- [GeometryObjects.md](GeometryObjects.md): Actual array setter invalidates lifetime during mutation; native non-grouped source indices, nested/reused scopes and ten-function relocation pass owned checks. GPU publication and game MV remain incomplete; source only.
 
 - [GeometryShaders.md](GeometryShaders.md): Original DXIL motion, separate contours and inactive-instance isolation/recovery pass eight-frame GPU checks through the public creation observer. The test hooks only its own device/process. Engine identity, draw ordering, boundary composition and game deployment remain incomplete.
 

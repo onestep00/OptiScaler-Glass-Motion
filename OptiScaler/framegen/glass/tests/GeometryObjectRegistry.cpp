@@ -91,9 +91,31 @@ int main()
         lifetime.pending(100, 2);
         require(lifetime.ticket(100, 2) && lifetime.registered(100, 2, 400, p), "Pending recovery");
         require(lifetime.storageBytes() < registry.storageBytes(), "Unused pose allocation retained");
+        const auto beforeArray = lifetime.ticket(100, 2);
+        const auto arrayScope = lifetime.beginArrayUpdate(100, 2);
+        require(arrayScope && !lifetime.ticket(100, 2), "Mutable array was admitted");
+        require(lifetime.beginArrayUpdate(100, 2) == arrayScope && !lifetime.ticket(100, 2),
+                "Nested array scope was not retained");
+        // Another observed mutation can advance the object generation while
+        // both array calls remain active. It must not release their gate.
+        lifetime.invalidate(100, 2, beforeArray + 2);
+        require(lifetime.endArrayUpdate(100, 2, arrayScope) && !lifetime.ticket(100, 2),
+                "Nested completion published unfinished data");
+        require(lifetime.endArrayUpdate(100, 2, arrayScope) && lifetime.ticket(100, 2) > beforeArray,
+                "Completed array did not acquire a new generation");
+        require(!lifetime.endArrayUpdate(100, 2, arrayScope), "Repeated completion accepted");
+        const auto oldScope = lifetime.beginArrayUpdate(100, 2);
+        lifetime.removed(100, 2);
+        require(lifetime.registered(100, 2, 400, p), "Array owner reuse registration");
+        const auto newScope = lifetime.beginArrayUpdate(100, 2);
+        require(newScope && newScope != oldScope && !lifetime.endArrayUpdate(100, 2, oldScope) &&
+                    !lifetime.ticket(100, 2), "Old setter released a reused object's gate");
+        require(lifetime.endArrayUpdate(100, 2, newScope) && lifetime.ticket(100, 2), "New setter completion");
+        require(!lifetime.beginArrayUpdate(999, 2) && !lifetime.beginArrayUpdate(100, 100), "Foreign array mutation");
         printf("storage_per_8_slots lifetime=%zu pose_index=%zu\n", lifetime.storageBytes(), registry.storageBytes());
         printf("PASS engine_slot_generation=1 pointer_reuse=1 duplicate_registration=1 ambiguous_objects_rejected=1 "
-               "mesh_replacement=1 recent_pose_lookup=1 fixed_point_bits=1 concurrent_updates=4096\n");
+               "mesh_replacement=1 recent_pose_lookup=1 fixed_point_bits=1 concurrent_updates=4096 "
+               "array_update_gate=1 nested_mutation=1 stale_array_completion_rejected=1\n");
         return 0;
     }
     catch (const std::exception& error)

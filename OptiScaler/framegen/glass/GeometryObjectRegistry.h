@@ -62,6 +62,7 @@ class GeometryObjectRegistry
     {
         std::uint64_t proxy = 0, mesh = 0;
         std::uint32_t generation = 0, cursor = 0;
+        std::uint32_t arrayWriters = 0, arrayScope = 0;
     };
     mutable std::shared_mutex mutex;
     std::vector<Slot> slots;
@@ -101,6 +102,7 @@ class GeometryObjectRegistry
             --counters.live;
         slot.proxy = slot.mesh = 0;
         slot.cursor = 0;
+        slot.arrayWriters = slot.arrayScope = 0;
     }
     bool activate(std::uint64_t proxy, std::uint32_t index, std::uint64_t mesh)
     {
@@ -166,7 +168,36 @@ class GeometryObjectRegistry
         if (!proxy || index >= slots.size())
             return 0;
         std::shared_lock lock(mutex);
-        return slots[index].proxy == proxy ? slots[index].generation : 0;
+        return slots[index].proxy == proxy && !slots[index].arrayWriters ? slots[index].generation : 0;
+    }
+    // Invalidate BEFORE the actual setter writes or reallocates the source.
+    // The shared object generation now also covers observed array replacement.
+    // A scope stamp survives nested pose invalidation but not slot retirement.
+    std::uint32_t beginArrayUpdate(std::uint64_t proxy, std::uint32_t index)
+    {
+        if (!proxy || index >= slots.size()) return 0;
+        std::unique_lock lock(mutex);
+        auto& slot = slots[index];
+        if (slot.proxy != proxy) return 0;
+        if (slot.generation == UINT32_MAX || slot.arrayWriters == UINT32_MAX)
+        { erase(index); return 0; }
+        for (unsigned i = 0; !nodes.empty() && i < History; ++i)
+            unlink(index * History + i);
+        slot.cursor = 0;
+        ++slot.generation;
+        if (!slot.arrayWriters) slot.arrayScope = slot.generation;
+        ++slot.arrayWriters;
+        ++counters.invalidations;
+        return slot.arrayScope;
+    }
+    bool endArrayUpdate(std::uint64_t proxy, std::uint32_t index, std::uint32_t scope)
+    {
+        if (!proxy || !scope || index >= slots.size()) return false;
+        std::unique_lock lock(mutex);
+        auto& slot = slots[index];
+        if (slot.proxy != proxy || slot.arrayScope != scope || !slot.arrayWriters) return false;
+        if (!--slot.arrayWriters) slot.arrayScope = 0;
+        return true;
     }
     bool update(std::uint64_t proxy, std::uint32_t index, std::uint32_t generation, std::uint64_t mesh,
                 const GeometryObjectPose& pose)
@@ -235,7 +266,8 @@ class GeometryObjectRegistry
             const auto& n = nodes[index];
             const auto slotIndex = index / History;
             const auto& slot = slots[slotIndex];
-            if (slot.mesh == mesh && n.pose.packed == packed && std::int32_t(frame - n.pose.frame) >= 0)
+            if (!slot.arrayWriters && slot.mesh == mesh && n.pose.packed == packed &&
+                std::int32_t(frame - n.pose.frame) >= 0)
             {
                 if (result && result.slot != slotIndex)
                 {

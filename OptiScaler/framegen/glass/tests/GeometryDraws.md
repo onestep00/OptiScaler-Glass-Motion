@@ -95,10 +95,12 @@ This source is not deployed and the resident census ABI does not expose the new
 parent field yet. No frame-key lookup or full transform copy is added to this
 production path.
 
-The owned callback test passes twenty appends and thirteen flushes, including
-CPU/global single-visible clusters, multi-instance parent preservation and
-parent reuse between append and draw. The latter rejects the borrowed draw.
-This is a source callback check, not fresh game evidence or an MV/FG result.
+The current owned callback test passes 25 appends and 18 flushes. It also
+carries verified non-grouped source offsets and rejects active/replaced array
+inputs plus grouped-order assumptions. Source fields reuse the span's existing
+alignment padding, preserving its 64-byte size. See [GeometryObjects.md](GeometryObjects.md)
+for the new setter/lifetime gate and its CPU-versus-GPU publication limit.
+These are source callback checks, not fresh game evidence or an MV/FG result.
 
 `ReadCyberpunkMeshShape` reads the actual chunk selected by the consumed engine
 draw. It is valid only inside that same borrowed callback. It copies the selected

@@ -200,7 +200,7 @@ int wmain(int argc, wchar_t** argv)
                 break;
             }
         require(duplicate && !resolve(relocated, actual), "Ambiguous function admitted");
-        printf("PASS current_profile=1 moved_functions=9 moved_globals=2 changed_timestamp=1 changed_image_size=1 "
+        printf("PASS current_profile=1 moved_functions=10 moved_globals=2 changed_timestamp=1 changed_image_size=1 "
                "moved_surface_patterns=2 object_layout_rejected=1 call_graph_rejected=1 registry_alias_rejected=1 "
                "ambiguity_rejected=1 executed_game_code=0 game_hooks=0\n");
         return 0;

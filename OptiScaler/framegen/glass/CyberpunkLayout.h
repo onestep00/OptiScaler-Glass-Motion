@@ -18,6 +18,7 @@ struct CyberpunkLayout
         Skinned,
         Upload,
         Backend,
+        SetArray,
         Count
     };
     std::array<std::uint32_t, Count> functions {};
@@ -38,6 +39,8 @@ struct CyberpunkLayout
         // unique body alone does not establish that it references our registry.
         if ((rendererGlobal & 7) || (tick & 3) || !image.contains(rendererGlobal, 8, Target::Writable) ||
             !image.contains(tick, 4, Target::Writable) || target(Remove, 0x17, Target::Writable) != rendererGlobal ||
+            target(SetArray, 0xfd, Target::Writable) != rendererGlobal ||
+            target(SetArray, 0x179, Target::Writable) + 8 != tick ||
             target(Run, 0x53, Target::Writable) != rendererGlobal ||
             target(Run, 0x12b, Target::Writable) != rendererGlobal ||
             target(Backend, 0x75, Target::Writable) + 8 != tick ||
