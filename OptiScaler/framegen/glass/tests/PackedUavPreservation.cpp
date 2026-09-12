@@ -65,8 +65,7 @@ int wmain(int argc, wchar_t** argv)
         auto capture = g.buffer(Pixels * 8, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, uav);
         auto current = g.buffer(sizeof(History) * 3, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, uav);
         auto previous = g.buffer(sizeof(History) * 3, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-        History history[3] {{{-1,-1,.5f,1},1,7,{}}, {{-1,3,.5f,1},1,7,{}}, {{3,-1,.5f,1},1,7,{}}};
-        upload(previous.Get(), history, sizeof(history));
+        const History baseHistory[3] {{{-1,-1,.5f,1},1,7,{}}, {{-1,3,.5f,1},1,7,{}}, {{3,-1,.5f,1},1,7,{}}};
         auto mapping = g.buffer(64, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         auto constants = g.buffer(256, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         GlassFg::MaterialCaptureConstants pc {0,0,1.f/W,1.f/H,0,0,2,0,0,0,W,H,0,W,Pixels,0};
@@ -80,10 +79,23 @@ int wmain(int argc, wchar_t** argv)
         auto crb = g.buffer(colorBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         std::vector<char> baselineColor;
         UINT64 verified = 0;
-        for (UINT pass = 0; pass < 3; ++pass)
+        struct Case { float dx, dy; bool captured; };
+        constexpr Case cases[] {{0,0,false}, {0,0,true}, {0,0,false}, {2,-1,true},
+                                {256,0,false}, {-256,0,false}, {0,256,false}, {0,-256,false},
+                                {127.75f,-128,true}, {0,0,false}, {0,0,false}};
+        for (UINT pass = 0; pass < std::size(cases); ++pass)
         {
+            History history[3]; memcpy(history, baseHistory, sizeof(history));
+            for (auto& vertex : history)
+            {
+                vertex.clip[0] += 2.f * cases[pass].dx / W;
+                vertex.clip[1] -= 2.f * cases[pass].dy / H;
+            }
+            upload(previous.Get(), history, sizeof(history));
             GlassFg::GeometryInstance map {0,3,0,7,0,0,W,H,1,W,Pixels+1,0,{1,0,0,0}};
             if (pass == 2) map = {}; // Missing identity must not suppress original writes/color.
+            if (pass == 9) map.reserved[0] = 32768; // Must not wrap to another object ID.
+            if (pass == 10) map.generation = 8; // Arena reuse must not read old generation 7.
             upload(mapping.Get(), &map, sizeof(map));
             g.begin();
             g.c->CopyBufferRegion(writes.Get(), 0, zeros.Get(), 0, OriginalBytes);
@@ -129,7 +141,13 @@ int wmain(int argc, wchar_t** argv)
                 bool covered = i % W >= 8 && i % W != 20;
                 require(words[1+i] == (covered ? i+1 : 0), "Original raw store/discard changed");
                 UINT64 packed; memcpy(&packed, static_cast<const char*>(data)+OriginalBytes+i*8, 8);
-                require(bool(packed) == (pass == 1 && covered), "Packed coverage or rejected-map write mismatch");
+                require(bool(packed) == (cases[pass].captured && covered), "Packed coverage or rejected input mismatch");
+                if (packed)
+                {
+                    const auto decode = [](UINT bits) { return float(bits & 1024 ? int(bits)-2048 : int(bits)) / 8.f; };
+                    require(decode(UINT((packed >> 35) & 2047)) == cases[pass].dx &&
+                            decode(UINT((packed >> 24) & 2047)) == cases[pass].dy, "Packed motion changed direction/magnitude");
+                }
                 ++verified;
             }
             rb->Unmap(0, nullptr);
@@ -138,7 +156,7 @@ int wmain(int argc, wchar_t** argv)
             else require(memcmp(baselineColor.data(), data, size_t(colorBytes)) == 0, "Original color changed");
             crb->Unmap(0, nullptr);
         }
-        printf("PACKED_UAV_PRESERVATION_OK pixels=%llu passes=3 original_atomic_exact=1 raw_store_exact=1 color_exact=1 discard_exact=1 missing_identity_preserved=1\n", verified);
+        printf("PACKED_UAV_PRESERVATION_OK pixels=%llu passes=%zu original_atomic_exact=1 raw_store_exact=1 color_exact=1 discard_exact=1 motion_range_checked=1 reused_generation_rejected=1\n", verified, std::size(cases));
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "%s\n", error.what()); return 1; }

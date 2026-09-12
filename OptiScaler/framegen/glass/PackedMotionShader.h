@@ -61,23 +61,26 @@ glass.packedvalue:
   %glass.idaddress = or i32 %glass.mapaddress, 48
   %glass.idrecord = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %glass.map, i32 %glass.idaddress, i32 undef, i8 1, i32 4)
   %glass.objectid = extractvalue %dx.types.ResRet.i32 %glass.idrecord, 0
-  %glass.idok = icmp ne i32 %glass.objectid, 0
+  %glass.idnonzero = icmp ne i32 %glass.objectid, 0
+  %glass.idinrange = icmp ule i32 %glass.objectid, 32767
+  %glass.idok = and i1 %glass.idnonzero, %glass.idinrange
   br i1 %glass.idok, label %glass.packedencode, label %glass.packedend
 glass.packedencode:
   %glass.mxpixels = fdiv float %glass.mv0, %glass.v2
   %glass.mypixels = fdiv float %glass.mv1, %glass.v3
   %glass.mxscaled = fmul float %glass.mxpixels, 8.000000e+00
   %glass.myscaled = fmul float %glass.mypixels, 8.000000e+00
-  %glass.mxlow = fcmp olt float %glass.mxscaled, -1.024000e+03
-  %glass.mxlower = select i1 %glass.mxlow, float -1.024000e+03, float %glass.mxscaled
-  %glass.mxhigh = fcmp ogt float %glass.mxlower, 1.023000e+03
-  %glass.mxclamped = select i1 %glass.mxhigh, float 1.023000e+03, float %glass.mxlower
-  %glass.mylow = fcmp olt float %glass.myscaled, -1.024000e+03
-  %glass.mylower = select i1 %glass.mylow, float -1.024000e+03, float %glass.myscaled
-  %glass.myhigh = fcmp ogt float %glass.mylower, 1.023000e+03
-  %glass.myclamped = select i1 %glass.myhigh, float 1.023000e+03, float %glass.mylower
-  %glass.mxi = fptosi float %glass.mxclamped to i32
-  %glass.myi = fptosi float %glass.myclamped to i32
+  %glass.mxlowerok = fcmp oge float %glass.mxscaled, -1.024000e+03
+  %glass.mxupperok = fcmp ole float %glass.mxscaled, 1.023000e+03
+  %glass.mylowerok = fcmp oge float %glass.myscaled, -1.024000e+03
+  %glass.myupperok = fcmp ole float %glass.myscaled, 1.023000e+03
+  %glass.mxrangeok = and i1 %glass.mxlowerok, %glass.mxupperok
+  %glass.myrangeok = and i1 %glass.mylowerok, %glass.myupperok
+  %glass.motionrangeok = and i1 %glass.mxrangeok, %glass.myrangeok
+  br i1 %glass.motionrangeok, label %glass.packedquantize, label %glass.packedend
+glass.packedquantize:
+  %glass.mxi = fptosi float %glass.mxscaled to i32
+  %glass.myi = fptosi float %glass.myscaled to i32
   %glass.mxbits = and i32 %glass.mxi, 2047
   %glass.mybits = and i32 %glass.myi, 2047
   %glass.alow = fcmp olt float %glass.alpha, 0.000000e+00

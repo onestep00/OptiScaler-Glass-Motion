@@ -31,15 +31,25 @@ Microsoft documents [early depth/stencil ordering](https://learn.microsoft.com/e
 Run `build_packed_uav.ps1` in an x64 developer shell. It uses its own D3D12 device
 and does not attach to the game. The fixture draws a 64x32 triangle with normal
 transparent blending, pixel discard, a raw-buffer store and an atomic counter.
-It compares original, instrumented-valid-identity and instrumented-missing-identity
-draws. Every draw runs once. Synthetic N-1 vertex history is supplied explicitly.
+It compares 11 original/instrumented cases with valid and missing identities,
+signed motion, motion outside the packed range, an overflowing object ID and a
+new allocation generation whose history storage still contains the old tag.
+Every draw runs once. Synthetic N-1 vertex history is supplied explicitly.
 
-All 6,144 samples passed: original counter values, per-pixel buffer values and
+All 22,528 samples passed: original counter values, per-pixel buffer values and
 color remained exact; discarded pixels produced no writes; the added packed
 coverage appeared only with valid identity. The production compiler's default
 path still rejected the original-UAV fixture. This checks raw-buffer writes and
 atomics, not typed textures, append counters, MSAA, depth export, occlusion,
 runtime identity, performance or actual DLSS-G quality.
+
+Packed motion is quantized at 1/8 pixel with a range of -128 to 127.875 pixels
+per axis at the capture viewport. Values outside the range now skip the added
+write instead of silently clamping to a wrong displacement. Ordered comparisons
+also reject nonfinite scaled values. Object IDs must fit 1..32767; higher bits
+cannot wrap to another object. Exact decoded signed displacements were checked
+inside the range. A skipped pixel is not a solved artifact or proof that this
+format has enough range at every resolution/camera speed.
 
 ## Recorded shader batch
 

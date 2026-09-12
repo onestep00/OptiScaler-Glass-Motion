@@ -12,7 +12,9 @@
 
 ## Document index
 
-- [tests/PackedUav.md](tests/PackedUav.md): Original-UAV in-place packed rewrite passes independent raw-write/atomic/color checks; 3,530 local shader pairs validate. Production activation, pixel-depth coverage and game FG remain incomplete.
+- [tests/VertexHistoryCache.md](tests/VertexHistoryCache.md): Fixed-budget geometry history keys, four-way lookup and GPU-retirement-gated reuse pass 300 CPU churn frames; no game capture connection.
+
+- [tests/PackedUav.md](tests/PackedUav.md): Original UAV/color preservation, signed MV/range and generation rejection pass 22,528 GPU samples; 3,530 local shader pairs validate. Production activation, pixel-depth coverage and game FG remain incomplete.
 
 - [NativeMaterialMotion.md](NativeMaterialMotion.md): Explicit clip inputs now support validated transparent blending/discard with read-only depth; independent GPU checks pass. Selected live pixel MV evidence remains diagnostic, not full-object/FG integration.
 

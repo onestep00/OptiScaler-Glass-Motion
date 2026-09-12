@@ -19,7 +19,9 @@
 
 ## Document index
 
-- [PackedUav.md](PackedUav.md): Explicit in-place packed PS rewrite preserves original raw writes/atomics/color/discard in a 6,144-sample GPU fixture. Default production admission stays off; depth exports, live coverage and FG remain incomplete.
+- [VertexHistoryCache.md](VertexHistoryCache.md): CPU identity, in-flight retention and fixed-budget arena tests. No game or GPU completion inference; capture-owner integration remains absent.
+
+- [PackedUav.md](PackedUav.md): In-place packed PS preserves original writes/color through 22,528 GPU samples, rejects out-of-range MV/IDs and reused history. Default production admission stays off; depth exports, live coverage and FG remain incomplete.
 
 - [../NativeMaterialMotion.md](../NativeMaterialMotion.md): `build_native_material.ps1` tests transparent native clip capture, original blended color/depth/discard/transmission and opaque/raw-input regressions on an independent device. Never attach it to the game.
 
