@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [EngineMotionSupply.md](EngineMotionSupply.md): Shared engine output matches 1,118 native and 1,800 missing-record private supplies live. Creation gates traced to the cache provider; array support, GPU binding and FG remain incomplete.
+
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Same-flush parents verified live; global storage offsets are separated from original indices after finding grouped repacking. Grouped/unknown flags reject linear identity; native lifetimes and MV/FG remain incomplete.
