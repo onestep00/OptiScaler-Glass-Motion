@@ -52,6 +52,9 @@ int wmain(int argc, wchar_t** argv)
         const bool mapped = mode.ends_with(L"-mapped");
         if (mapped)
             mode.resize(mode.size() - 7);
+        const bool preserveOriginalUavs = mode == L"packed-inplace";
+        if (preserveOriginalUavs)
+            mode = L"packed";
         const auto layout = mapped ? GlassFg::GeometryLayout::PerInstance : GlassFg::GeometryLayout::Contiguous;
         const bool cameraCapture = mode == L"rewrite-camera";
         const bool pairCapture = mode == L"rewrite-pair";
@@ -121,12 +124,13 @@ int wmain(int argc, wchar_t** argv)
                         : GlassFg::RewriteMaterialMotion(
                               assembly, GlassFg::MaterialSource::One,
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb
+                              : std::wstring(argv[5]) == L"coverage" ? GlassFg::MaterialDestination::CoverageOnly
                                                                : GlassFg::MaterialDestination::OneMinusAlpha,
                               mode == L"capture" ? GlassFg::MaterialMotionTarget::OriginalColorAndCapture
                               : mode == L"packed" ? GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion
                               : mode == L"coverage" ? GlassFg::MaterialMotionTarget::OriginalColorAndCoverage
                                                    : GlassFg::MaterialMotionTarget::SeparateTarget,
-                              historyRegister, layout);
+                              historyRegister, layout, nullptr, preserveOriginalUavs);
                 if (!patched)
                     throw std::runtime_error(patched.error);
                 check(library->CreateBlobWithEncodingOnHeapCopy(patched.assembly.data(),

@@ -7,7 +7,7 @@ namespace GlassFg::Detail
 // Append one global packed-layer write after the original material body. The
 // original color exports and discard stay intact. Missing history, inactive
 // mapping, empty contribution and invalid values skip only this extra write.
-inline std::string CapturePackedMotion(std::string instrumentation, unsigned instanceMapId)
+inline std::string CapturePackedMotion(std::string instrumentation, unsigned instanceMapId, unsigned captureUavId = 0)
 {
     for (const auto* condition : {"bad", "empty", "nonfinite"})
     {
@@ -17,9 +17,11 @@ inline std::string CapturePackedMotion(std::string instrumentation, unsigned ins
             instrumentation.erase(at, discard.size());
     }
     const auto firstOutput = instrumentation.find("  call void @dx.op.storeOutput.f32");
-    if (firstOutput == std::string::npos)
-        throw std::runtime_error("Missing rewritten material output");
-    instrumentation.erase(firstOutput);
+    // Known blend equations build temporary MV/opacity color stores which are
+    // removed before the original material return. Coverage-only fallback has
+    // no temporary color target; it still provides every value used below.
+    if (firstOutput != std::string::npos)
+        instrumentation.erase(firstOutput);
 
     return instrumentation + R"(  %glass.depthfinite = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.s2)
   %glass.recordok0 = and i1 %glass.ok, %glass.finite
@@ -99,8 +101,10 @@ glass.packedencode:
   %glass.mx64 = zext i32 %glass.mxbits to i64
   %glass.my64 = zext i32 %glass.mybits to i64
   %glass.weight64 = zext i32 %glass.weight to i64
-  %glass.idmasked = and i32 %glass.objectid, 65535
-  %glass.id64 = zext i32 %glass.idmasked to i64
+  %glass.idmasked = and i32 %glass.objectid, 32767
+  %glass.reversebit = select i1 %glass.isreverse, i32 32768, i32 0
+  %glass.idflags = or i32 %glass.idmasked, %glass.reversebit
+  %glass.id64 = zext i32 %glass.idflags to i64
   %glass.depthshift = shl i64 %glass.depth64, 46
   %glass.mxshift = shl i64 %glass.mx64, 35
   %glass.myshift = shl i64 %glass.my64, 24
@@ -109,7 +113,8 @@ glass.packedencode:
   %glass.pack1 = or i64 %glass.pack0, %glass.myshift
   %glass.pack2 = or i64 %glass.pack1, %glass.weightshift
   %glass.packed = or i64 %glass.pack2, %glass.id64
-  %glass.capturebuffer = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 1, i1 false)
+  %glass.capturebuffer = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 )" +
+           std::to_string(captureUavId) + R"(, i32 1, i1 false)
   %glass.byteaddress = shl i32 %glass.pixelindex, 3
   %glass.oldpacked = call i64 @dx.op.atomicBinOp.i64(i32 78, %dx.types.Handle %glass.capturebuffer, i32 7, i32 %glass.byteaddress, i32 undef, i32 undef, i64 %glass.packed)
   br label %glass.packedend

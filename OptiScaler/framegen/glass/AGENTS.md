@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/PackedUav.md](tests/PackedUav.md): Original-UAV in-place packed rewrite passes independent raw-write/atomic/color checks; 3,530 local shader pairs validate. Production activation, pixel-depth coverage and game FG remain incomplete.
+
 - [NativeMaterialMotion.md](NativeMaterialMotion.md): Explicit clip inputs now support validated transparent blending/discard with read-only depth; independent GPU checks pass. Selected live pixel MV evidence remains diagnostic, not full-object/FG integration.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Live original skinned input Z matches preceding X in three consecutive pairs; raw-word recorder is tested. Previous-position evaluation and dense MV/FG still absent.

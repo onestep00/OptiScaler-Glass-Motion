@@ -99,14 +99,19 @@ enum class MaterialDestination
     One,
     Alpha,
     OneMinusAlpha,
-    SecondSourceRgb
+    SecondSourceRgb,
+    // The original draw remains untouched, but its destination-dependent blend
+    // cannot be reduced to a source-only opacity. Preserve exact surviving
+    // coverage for boundary MV and give the interior zero object weight.
+    CoverageOnly
 };
 enum class MaterialMotionTarget
 {
     SeparateTarget,
     OriginalColorAndCapture,
     // Production candidate: retain original material/color and atomically keep
-    // the nearest layer's object MV, weight and frame-local ID in 8 bytes.
+    // the nearest layer's object MV, weight, depth direction and 15-bit
+    // frame-local ID in 8 bytes.
     OriginalColorAndPackedMotion,
     // Diagnostic object coverage only. No motion is produced or implied.
     OriginalColorAndCoverage,
@@ -147,7 +152,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                                           MaterialMotionTarget target = MaterialMotionTarget::SeparateTarget,
                                           unsigned firstHistoryRegister = UINT32_MAX,
                                           GeometryLayout layout = GeometryLayout::Contiguous,
-                                          const NativeClipInputs* nativeInputs = nullptr);
+                                          const NativeClipInputs* nativeInputs = nullptr,
+                                          bool preserveOriginalUavs = false);
+// preserveOriginalUavs is an explicit in-place packed instrumentation contract.
+// Never enable it for an additional/replayed draw: original UAV writes must run
+// exactly once with the unchanged original bindings. Runtime admission is separate.
 // A paired pipeline must pass the rewritten VS's previousRegister. The original
 // PS can omit VS-only outputs (for example SV_ClipDistance), so independently
 // appending to each stage's first free register does not produce a linked pair.

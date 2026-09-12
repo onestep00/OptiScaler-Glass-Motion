@@ -68,7 +68,8 @@ unsigned number(const std::string& value, const char* prefix)
     const std::string p(prefix);
     need(value.starts_with(p), "Unexpected metadata type");
     const auto digits = value.substr(p.size());
-    need(!digits.empty() && digits.find_first_not_of("0123456789") == std::string::npos, "Invalid metadata integer");
+    if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos)
+        throw std::runtime_error("Invalid metadata integer: " + value);
     const auto n = std::stoull(digits);
     need(n <= UINT32_MAX, "Metadata integer overflow");
     return static_cast<unsigned>(n);
@@ -826,7 +827,7 @@ VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsi
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
                                           MaterialDestination destinationFactor, MaterialMotionTarget target,
                                           unsigned firstHistoryRegister, GeometryLayout layout,
-                                          const NativeClipInputs* nativeInputs)
+                                          const NativeClipInputs* nativeInputs, bool preserveOriginalUavs)
 {
     VertexHistoryShader result;
     try
@@ -838,6 +839,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit,
              "Unsupported material target");
         const bool packedMotion = target == MaterialMotionTarget::OriginalColorAndPackedMotion;
+        need(!preserveOriginalUavs || (packedMotion && !nativeInputs),
+             "Original UAV preservation requires in-place packed instrumentation");
+        const bool packedCoverageOnly = packedMotion && destinationFactor == MaterialDestination::CoverageOnly;
         const bool depthCoverage = target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
         const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit || depthCoverage;
         const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage || auditCoverage;
@@ -912,10 +916,23 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             }
         }
         auto resources = entry[3] == "null" ? Parts { "null", "null", "null", "null" } : split(metadata.get(entry[3]));
-        need(resources.size() == 4 && resources[1] == "null", "Pixel UAV side effects unsupported");
-        for (const auto* op : { "dx.op.atomic", "dx.op.bufferStore", "dx.op.rawBufferStore", "dx.op.textureStore",
-                                "dx.op.barrier", "dx.op.traceRay", "dx.op.callShader" })
+        need(resources.size() == 4, "Malformed pixel resource lists");
+        need(preserveOriginalUavs || resources[1] == "null", "Pixel UAV side effects unsupported");
+        if (!preserveOriginalUavs)
+            for (const auto* op : { "dx.op.atomic", "dx.op.bufferStore", "dx.op.rawBufferStore", "dx.op.textureStore" })
+                need(source.find(op) == std::string::npos, "Pixel shader side effect unsupported");
+        for (const auto* op : { "dx.op.barrier", "dx.op.traceRay", "dx.op.callShader" })
             need(source.find(op) == std::string::npos, "Pixel shader side effect unsupported");
+        unsigned captureUavId = 0;
+        if (resources[1] != "null")
+            for (const auto& node : split(metadata.get(resources[1])))
+            {
+                const auto fields = split(metadata.get(node));
+                need(fields.size() >= 11 && fields[3] != "i32 31", "Reserved capture UAV space collision");
+                const auto id = number(fields[0], "i32 ");
+                need(id < UINT32_MAX, "Capture UAV range ID overflow");
+                captureUavId = std::max(captureUavId, id + 1);
+            }
         const auto zero = metadata.add("i32 0"), mask15 = metadata.add("i32 3, i32 15"),
                    mask1 = metadata.add("i32 3, i32 1");
         unsigned position = UINT32_MAX;
@@ -955,11 +972,14 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         std::array<std::array<std::string, 4>, 2> color;
         for (const auto& node : outputs)
         {
+            const auto outputFields = split(metadata.get(node));
+            need(outputFields.size() >= 2 && _stricmp(outputFields[1].c_str(), "!\"SV_Target\"") == 0,
+                 "Pixel depth/stencil exports require separate coverage validation");
             const Signature s(metadata.get(node));
             need(_stricmp(s.fields[1].c_str(), "!\"SV_Target\"") == 0 && s.rows == 1 && s.fields[9] == "i8 0",
                  "Only color-export pixel shaders are replayed");
             const auto semanticIndex = number(metadata.get(s.fields[4]), "i32 ");
-            if (semanticIndex >= color.size())
+            if (semanticIndex >= color.size() || coverageOnly || packedCoverageOnly)
                 continue;
             for (unsigned c = 0; c < s.columns; ++c)
             {
@@ -1025,7 +1045,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             const auto atomic64 = packedMotion ? metadata.add("i32 3, i32 1") : "null";
             metadata.append(resources[1],
                             metadata.add(packedMotion
-                                             ? "i32 0, %Glass.RawBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
+                                             ? "i32 " + std::to_string(captureUavId) + ", %Glass.RawBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
                                                "i32 1, i32 11, i1 false, i1 false, i1 false, " + atomic64
                                              : "i32 0, %Glass.RasterOrderedBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
                                                "i32 1, i32 11, i1 false, i1 false, i1 true, null"));
@@ -1123,9 +1143,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << "  %glass.j" << c << " = extractvalue %dx.types.CBufRet.f32 %glass.c1, " << c << "\n"
                  << "  %glass.mv" << c << " = fadd float %glass.raw" << c << ", %glass.j" << c << "\n";
         }
-        if (coverageOnly)
+        if (coverageOnly || packedCoverageOnly)
             code << "  %glass.hasall = icmp eq i32 0, 0\n";
-        for (unsigned c = 0; c < (coverageOnly ? 0u : 3u); ++c)
+        for (unsigned c = 0; c < ((coverageOnly || packedCoverageOnly) ? 0u : 3u); ++c)
         {
             std::string transmission;
             switch (destinationFactor)
@@ -1164,7 +1184,13 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << "  %glass.thas" << c << " = fcmp one float " << transmission << ", 1.000000e+00\n"
                  << "  %glass.has" << c << " = or i1 %glass.fhas" << c << ", %glass.thas" << c << "\n";
         }
-        if (!coverageOnly)
+        if (packedCoverageOnly)
+            code << R"(  %glass.alpha = fadd float 0.000000e+00, 0.000000e+00
+  %glass.finite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv0)
+  %glass.finite1 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv1)
+  %glass.finite = and i1 %glass.finite0, %glass.finite1
+)";
+        else if (!coverageOnly)
             code << R"(  %glass.has01 = or i1 %glass.has0, %glass.has1
   %glass.hasall = or i1 %glass.has01, %glass.has2
   %glass.empty = xor i1 %glass.hasall, true
@@ -1186,7 +1212,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
         body.replace(body.find("  ret void"), 10,
-                     packedMotion ? Detail::CapturePackedMotion(code.str(), instanceMapId)
+                     packedMotion ? Detail::CapturePackedMotion(code.str(), instanceMapId, captureUavId)
                      : retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly, auditCoverage)
                                    : code.str());
         if (mapped)

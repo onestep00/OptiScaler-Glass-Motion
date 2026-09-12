@@ -19,6 +19,8 @@
 
 ## Document index
 
+- [PackedUav.md](PackedUav.md): Explicit in-place packed PS rewrite preserves original raw writes/atomics/color/discard in a 6,144-sample GPU fixture. Default production admission stays off; depth exports, live coverage and FG remain incomplete.
+
 - [../NativeMaterialMotion.md](../NativeMaterialMotion.md): `build_native_material.ps1` tests transparent native clip capture, original blended color/depth/discard/transmission and opaque/raw-input regressions on an independent device. Never attach it to the game.
 
 - [GeometryObservation.md](GeometryObservation.md): Stream reconstruction tests use Microsoft's public parser and an independent D3D12 device. They do not prove a fresh game captured every live PSO.
