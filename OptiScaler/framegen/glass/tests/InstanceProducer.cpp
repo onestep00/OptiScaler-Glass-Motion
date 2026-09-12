@@ -1,4 +1,5 @@
 // Owned CPU memory only. No game, DLL installation or engine hook execution.
+#define GLASS_INSTANCE_LOOKUP
 #include "../ExperimentInstanceProducer.cpp"
 #include <iostream>
 #include <stdexcept>
@@ -66,6 +67,17 @@ int main()
     require(used == 2 && rows[1].producerHeaderValid && rows[1].producerHeader == header);
     require(rows[1].outerContext == reinterpret_cast<std::uint64_t>(groupData.data()));
     require(rows[1].producerContext == reinterpret_cast<std::uint64_t>(header.data()));
+    GlassExperimentInstanceSource lookup;
+    require(GlassInstanceSourceQuery(testTick, mesh, start, count, &lookup) == 1 &&
+            lookup.proxy == reinterpret_cast<std::uint64_t>(proxyData.data()) && lookup.indices[0] == 39 && lookup.indices[39] == 0 &&
+            lookup.renderer == header[0] && lookup.scene == header[2] && lookup.originalCount == 40);
+    require(GlassInstanceSourceQuery(testTick + 1, mesh, start, count, &lookup) == 0);
+    require(GlassInstanceSourceQuery(testTick, mesh, start, count - 1, &lookup) == 0);
+    GlassFg::DiagnosticInstanceSource duplicate;
+    require(instanceLookup.query(testTick, mesh, start, count, duplicate));
+    ++duplicate.scene;
+    require(!instanceLookup.publish(duplicate));
+    require(GlassInstanceSourceQuery(testTick, mesh, start, count, &lookup) == 0);
     Scope scope { reinterpret_cast<std::uint64_t>(proxyData.data()),
                   reinterpret_cast<std::uint64_t>(groupData.data()), testTick };
     current = &scope; ++testTick;
@@ -101,5 +113,6 @@ int main()
     std::cout << "PASS current_group_direct=1 wrong_caller_rejected=1 nested_scope=1 consumed_once=1 "
                  "frame_mismatch_rejected=1 original_return_preserved=1 linear_source=1 "
                  "no_missing_group_fallback=1 malformed_linear_rejected=1 source_query_once=1 "
-                 "source_mismatch_rejected=1 source_exception_contained=1 game_hooks_installed=0\n";
+                 "source_mismatch_rejected=1 source_exception_contained=1 direct_lookup=1 "
+                 "lookup_frame_count_bounds=1 ambiguous_scene_rejected=1 game_hooks_installed=0\n";
 }

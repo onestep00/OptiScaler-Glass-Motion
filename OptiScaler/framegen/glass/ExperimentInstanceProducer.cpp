@@ -2,6 +2,9 @@
 // Exports run outside DllMain. Stop disables recording; hooks/DLL stay resident.
 #include "CyberpunkInstanceSelection.h"
 #include "ExperimentSourceAbi.h"
+#ifdef GLASS_INSTANCE_LOOKUP
+#include "DiagnosticInstanceLookup.h"
+#endif
 #include "DetourThreads.h"
 #include <atomic>
 #include <filesystem>
@@ -51,6 +54,10 @@ struct Row
     std::array<unsigned, 64> indices {};
 };
 std::array<Row, 4096> rows;
+#ifdef GLASS_INSTANCE_LOOKUP
+GlassFg::DiagnosticInstanceLookup<> instanceLookup;
+std::atomic<std::uint64_t> lookupPublished = 0, lookupRejected = 0;
+#endif
 bool read(std::uint64_t address, void* out, unsigned bytes) noexcept
 {
     __try
@@ -136,9 +143,29 @@ void observe(void* owner, void* descriptor, bool linear = false)
     }
     if (row.valid && current->sourceOwner.count == row.originalCount)
         row.sourceOwner = current->sourceOwner;
+#ifdef GLASS_INSTANCE_LOOKUP
+    if (row.valid && row.producerHeaderValid)
+    {
+        GlassFg::DiagnosticInstanceSource value;
+        value.proxy = row.proxy; value.mesh = row.mesh;
+        value.renderer = row.producerHeader[0]; value.scene = row.producerHeader[2];
+        value.frame = row.frame; value.globalStart = row.descriptor.globalStart;
+        value.count = row.descriptor.count; value.originalCount = row.originalCount;
+        value.ownerSlot = row.ownerSlot; value.linear = row.linear;
+        for (unsigned i = 0; i < value.count; ++i) value.indices[i] = static_cast<std::uint16_t>(row.indices[i]);
+        try { if (instanceLookup.publish(value)) ++lookupPublished; else ++lookupRejected; }
+        catch (...) { ++lookupRejected; }
+    }
+#endif
     const auto index = used.fetch_add(1, std::memory_order_relaxed);
     if (index < rows.size()) rows[index] = row;
-    else { ++dropped; enabled.store(false, std::memory_order_release); }
+    else
+    {
+        ++dropped;
+#ifndef GLASS_INSTANCE_LOOKUP
+        enabled.store(false, std::memory_order_release);
+#endif
+    }
 }
 unsigned char packet(void* a, void* b, void* c, std::uint64_t d, void* e, void* f, void* g)
 {
@@ -230,6 +257,27 @@ bool connectSource()
     return true;
 }
 }
+// Queried by an explicitly connected replaceable diagnostic, never production FG.
+#ifdef GLASS_INSTANCE_LOOKUP
+extern "C" __declspec(dllexport) std::int32_t GlassInstanceSourceQuery(
+    std::uint32_t frame, std::uint64_t mesh, std::uint32_t globalStart, std::uint32_t count,
+    GlassExperimentInstanceSource* result)
+{
+    if (!result || result->size != sizeof(*result) || result->version != 1) return -1;
+    *result = {};
+    if (!enabled.load(std::memory_order_acquire)) return 0;
+    GlassFg::DiagnosticInstanceSource source;
+    try { if (!instanceLookup.query(frame, mesh, globalStart, count, source)) return 0; }
+    catch (...) { return -1; }
+    result->proxy = source.proxy; result->mesh = source.mesh;
+    result->renderer = source.renderer; result->scene = source.scene;
+    result->frame = source.frame; result->ownerSlot = source.ownerSlot;
+    result->originalCount = source.originalCount;
+    result->selectedCount = source.count; result->linear = source.linear;
+    if (!source.linear) memcpy(result->indices, source.indices.data(), source.count * sizeof(std::uint16_t));
+    return 1;
+}
+#endif
 extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory)
 {
     try
@@ -240,6 +288,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory
         if (!next.is_absolute() || std::filesystem::exists(next) || !connectSource() || !install()) return 2;
         if (!std::filesystem::create_directory(next)) return 3;
         output = next; used = dropped = 0;
+#ifdef GLASS_INSTANCE_LOOKUP
+        instanceLookup.clear(); lookupPublished = lookupRejected = 0;
+#endif
         enabled.store(true, std::memory_order_release); return 0;
     }
     catch (...) { return 4; }
@@ -273,6 +324,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
         file.close(); if (!file) return 2;
         std::ofstream(output / "status.txt") << "rows=" << count << "\ndropped=" << dropped.load()
             << "\nresident=1\nrecording=0\ngpu_copies=0\nlifetime_proven=0\nmotion_produced=0\n";
+#ifdef GLASS_INSTANCE_LOOKUP
+        std::ofstream(output / "lookup.txt") << "published=" << lookupPublished.load()
+            << "\nrejected=" << lookupRejected.load() << "\nrecording=0\nlookup=diagnostic_only\n";
+#endif
         output.clear(); return 0;
     }
     catch (...) { return 3; }

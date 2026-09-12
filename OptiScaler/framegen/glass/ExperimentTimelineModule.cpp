@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <d3d12.h>
 #include "ExperimentCensusAbi.h"
+#include "ExperimentSourceAbi.h"
 #include <array>
 #include <atomic>
 #include <filesystem>
@@ -21,6 +22,12 @@ struct TimelineRow
     uint32_t chunk, operation, indices, instances, objectFirst, objectCount, objectDeclared, flags;
 };
 static_assert(sizeof(TimelineRow) == 88 && sizeof(GlassExperimentObject) == 40);
+struct TimelineProvenance
+{
+    uint64_t objectIndex = 0;
+    GlassExperimentInstanceSource source;
+};
+static_assert(sizeof(TimelineProvenance) == 200);
 struct TimelinePipeline
 {
     uint64_t identity = 0;
@@ -38,6 +45,11 @@ class TimelineRecorder
     static_assert((PipelineCapacity & (PipelineCapacity - 1)) == 0);
     std::unique_ptr<TimelineRow[]> rows = std::make_unique<TimelineRow[]>(DrawCapacity);
     std::unique_ptr<GlassExperimentObject[]> objects = std::make_unique<GlassExperimentObject[]>(ObjectCapacity);
+    static constexpr unsigned ProvenanceCapacity = (ObjectCapacity + 3) / 4;
+    GlassExperimentInstanceQuery instanceQuery = nullptr;
+    std::unique_ptr<TimelineProvenance[]> provenance;
+    std::atomic<uint64_t> queryAttempts = 0, queryMatches = 0, provenanceCount = 0;
+    std::atomic<uint64_t> unmatchedPrevious = 0, unmatchedNext = 0;
     std::array<TimelinePipeline, PipelineCapacity> pipelines;
     std::array<std::atomic<uint64_t>, PipelineCapacity> published {};
     std::mutex pipelineMutex;
@@ -100,10 +112,12 @@ class TimelineRecorder
         file.close(); if (!file) throw std::runtime_error("Timeline write failed");
     }
   public:
-    explicit TimelineRecorder(std::filesystem::path path) : output(std::move(path))
+    explicit TimelineRecorder(std::filesystem::path path, GlassExperimentInstanceQuery query = nullptr)
+        : instanceQuery(query), output(std::move(path))
     {
         if (!output.is_absolute() || !std::filesystem::create_directory(output))
             throw std::runtime_error("Fresh output directory required");
+        if (instanceQuery) provenance = std::make_unique<TimelineProvenance[]>(ProvenanceCapacity);
     }
     int observe(const GlassExperimentEvent& event)
     {
@@ -136,6 +150,38 @@ class TimelineRecorder
             GlassExperimentObject object {};
             if (draw.objectAt(draw.source, i, &object) != 1) { row.flags |= 2; break; }
             objects[objectStart + i] = object; ++row.objectCount;
+            if (instanceQuery && event.frame && event.frame <= UINT32_MAX && (object.globalRange || object.count > 1))
+            {
+                ++queryAttempts;
+                GlassExperimentInstanceSource source;
+                const auto result = instanceQuery(static_cast<unsigned>(event.frame), draw.mesh,
+                                                  object.transformIndex, object.count, &source);
+                bool valid = result == 1 && source.size == sizeof(source) && source.version == 1 &&
+                    source.proxy && source.mesh == draw.mesh && source.renderer && source.scene &&
+                    source.frame == event.frame && source.selectedCount == object.count && !source.reserved &&
+                    source.originalCount && source.originalCount <= 65536 && source.selectedCount <= source.originalCount &&
+                    source.linear <= 1 && (source.linear ? source.selectedCount == source.originalCount : source.selectedCount <= 64);
+                if (valid && !source.linear)
+                    for (unsigned element = 0; element < source.selectedCount; ++element)
+                        valid &= source.indices[element] < source.originalCount;
+                if (valid)
+                {
+                    ++queryMatches;
+                    const auto index = provenanceCount.fetch_add(1, std::memory_order_relaxed);
+                    if (index < ProvenanceCapacity) provenance[index] = {objectStart + i, source};
+                }
+                else
+                {
+                    // Diagnostic counters only. Neighboring-frame observations
+                    // are never accepted as this draw's identity or motion.
+                    GlassExperimentInstanceSource neighbor;
+                    if (event.frame > 1 && instanceQuery(static_cast<unsigned>(event.frame - 1), draw.mesh,
+                        object.transformIndex, object.count, &neighbor) == 1) ++unmatchedPrevious;
+                    neighbor = {};
+                    if (event.frame < UINT32_MAX && instanceQuery(static_cast<unsigned>(event.frame + 1), draw.mesh,
+                        object.transformIndex, object.count, &neighbor) == 1) ++unmatchedNext;
+                }
+            }
         }
         return 1;
     }
@@ -147,6 +193,8 @@ class TimelineRecorder
         const auto savedObjects = (std::min)(objectCount.load(), uint64_t(ObjectCapacity));
         binary("draws.bin", rows.get(), size_t(savedRows) * sizeof(TimelineRow));
         binary("objects.bin", objects.get(), size_t(savedObjects) * sizeof(GlassExperimentObject));
+        const auto savedProvenance = (std::min)(provenanceCount.load(), uint64_t(ProvenanceCapacity));
+        if (instanceQuery) binary("provenance.bin", provenance.get(), size_t(savedProvenance) * sizeof(TimelineProvenance));
         unsigned retained = 0, selected = 0;
         for (const auto& entry : pipelines)
         {
@@ -169,6 +217,11 @@ class TimelineRecorder
              << "\npipeline_full=" << pipelineFull << "\npipelines=" << retained << "\nselected_pipelines=" << selected
              << "\nrow_storage_bytes=" << size_t(DrawCapacity) * sizeof(TimelineRow)
              << "\nobject_storage_bytes=" << size_t(ObjectCapacity) * sizeof(GlassExperimentObject)
+             << "\nprovenance_row_bytes=" << sizeof(TimelineProvenance) << "\nprovenance_rows=" << savedProvenance
+             << "\nquery_attempts=" << queryAttempts.load() << "\nquery_matches=" << queryMatches.load()
+             << "\nunmatched_previous_frame=" << unmatchedPrevious.load() << "\nunmatched_next_frame=" << unmatchedNext.load()
+             << "\nprovenance_full=" << (provenanceCount.load() - savedProvenance)
+             << "\nprovenance_storage_bytes=" << (instanceQuery ? size_t(ProvenanceCapacity) * sizeof(TimelineProvenance) : 0)
              << "\norder=cpu_observation\nframe_zero=unknown\ngpu_buffer_copies=0\nmotion_produced=0\n";
         done.close(); if (!done) throw std::runtime_error("Timeline completion write failed");
     }
@@ -188,7 +241,24 @@ int32_t timelineCreate(const GlassExperimentHost* host, void** context)
         std::ifstream file(config); std::string output;
         if (!std::getline(file, output) || file.peek() != std::char_traits<char>::eof()) return -1;
         if (!output.empty() && output.back() == '\r') output.pop_back();
-        *context = new RuntimeTimeline(std::filesystem::path(std::u8string(output.begin(), output.end())));
+        GlassExperimentInstanceQuery query = nullptr;
+        auto providerConfig = std::filesystem::path(path); providerConfig.replace_extension(L".provider");
+        if (std::filesystem::exists(providerConfig))
+        {
+            if (std::filesystem::file_size(providerConfig) > 32768) return -1;
+            std::ifstream providerFile(providerConfig); std::string providerPath;
+            if (!std::getline(providerFile, providerPath) || providerFile.peek() != std::char_traits<char>::eof()) return -1;
+            if (!providerPath.empty() && providerPath.back() == '\r') providerPath.pop_back();
+            const std::filesystem::path provider(std::u8string(providerPath.begin(), providerPath.end()));
+            if (!provider.is_absolute()) return -1;
+            const auto module = GetModuleHandleW(provider.c_str());
+            const auto address = module ? GetProcAddress(module, "GlassInstanceSourceQuery") : nullptr;
+            HMODULE pinned = nullptr;
+            if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(address), &pinned) || pinned != module) return -1;
+            query = reinterpret_cast<GlassExperimentInstanceQuery>(address);
+        }
+        *context = new RuntimeTimeline(std::filesystem::path(std::u8string(output.begin(), output.end())), query);
         return 0;
     }
     catch (...) { return -1; }

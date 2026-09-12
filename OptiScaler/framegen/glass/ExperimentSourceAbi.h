@@ -13,3 +13,16 @@ struct GlassExperimentSourceOwner
 using GlassExperimentSourceQuery = std::int32_t (*)(std::uint64_t proxy, std::uint64_t mesh,
                                                   std::uint32_t originalCount,
                                                   GlassExperimentSourceOwner* output);
+
+// Current recorded producer provenance only. Indices are relative to the
+// renderer input array, not a persistent baked source identity. No MV admission.
+struct GlassExperimentInstanceSource
+{
+    std::uint32_t size = sizeof(GlassExperimentInstanceSource), version = 1;
+    std::uint64_t proxy = 0, mesh = 0, renderer = 0, scene = 0;
+    std::uint32_t frame = 0, ownerSlot = 0, originalCount = 0, selectedCount = 0;
+    std::uint32_t linear = 0, reserved = 0;
+    std::uint16_t indices[64] {};
+};
+using GlassExperimentInstanceQuery = std::int32_t (*)(std::uint32_t frame, std::uint64_t mesh,
+    std::uint32_t globalStart, std::uint32_t count, GlassExperimentInstanceSource* output);

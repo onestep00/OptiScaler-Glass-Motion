@@ -172,8 +172,7 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
             std::uint64_t encoded = 0, mesh = 0;
             std::uint32_t actualSlot = UINT32_MAX;
             const auto source = batch->renderer + 0x574280 + std::uint64_t(record.transformIndex) * 48;
-            if (record.count == 1 && (words[1] & (1ull << 51)) && index < 131072 &&
-                source == reinterpret_cast<std::uint64_t>(transforms) &&
+            if ((words[1] & (1ull << 51)) && index < 131072 &&
                 before.entry == batch->renderer + 0x274248 + std::uint64_t(index) * 24 &&
                 copyAt(before.entry, encoded) && copyAt(before.geometry, geometry) && geometry.kind == 0)
             {
@@ -184,8 +183,7 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                     std::uint32_t count = 0, globalStart = UINT32_MAX;
                 } instances;
                 if (copyAt(proxy + 0x98, actualSlot) && actualSlot == index && copyAt(proxy + 0xd8, mesh) && mesh &&
-                    mesh == geometry.mesh && copyAt(proxy + 0x108, instances) &&
-                    !instances.transforms && !instances.count && instances.globalStart == UINT32_MAX)
+                    mesh == geometry.mesh && copyAt(proxy + 0x108, instances))
                 {
                     // A culled cluster can emit count=1 while its proxy owns
                     // many objects. Until its original sub-instance index is
@@ -194,7 +192,12 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                     {
                         const auto generation = state->registry->ticket(proxy, index);
                         if (generation)
-                            record.identity = { proxy, mesh, index, generation };
+                        {
+                            record.parent = { proxy, mesh, index, generation };
+                            if (record.count == 1 && source == reinterpret_cast<std::uint64_t>(transforms) &&
+                                !instances.transforms && !instances.count && instances.globalStart == UINT32_MAX)
+                                record.identity = record.parent;
+                        }
                     }
                     catch (...)
                     {
@@ -312,10 +315,14 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std:
     try
     {
         for (const auto& record : records)
-            if (record.identity && (record.identity.mesh != value->mesh ||
-                                    value->state->registry->ticket(record.identity.proxy, record.identity.slot) !=
-                                        record.identity.generation))
+        {
+            // Ordinary identity is copied from parent at append. Validate its
+            // lifetime once, rather than repeating the registry lookup.
+            const auto& owner = record.parent ? record.parent : record.identity;
+            if (owner && (owner.mesh != value->mesh ||
+                          value->state->registry->ticket(owner.proxy, owner.slot) != owner.generation))
                 return {};
+        }
     }
     catch (...)
     {

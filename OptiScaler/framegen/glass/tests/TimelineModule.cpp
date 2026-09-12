@@ -3,6 +3,22 @@
 #include <vector>
 #include <thread>
 #include <barrier>
+#include "../DiagnosticInstanceLookup.h"
+
+GlassFg::DiagnosticInstanceLookup<4, 4> fixtureLookup;
+int32_t fixtureQuery(uint32_t frame, uint64_t mesh, uint32_t first, uint32_t count,
+                     GlassExperimentInstanceSource* result)
+{
+    GlassFg::DiagnosticInstanceSource source;
+    if (!fixtureLookup.query(frame, mesh, first, count, source)) return 0;
+    result->proxy = source.proxy; result->mesh = source.mesh;
+    result->renderer = source.renderer; result->scene = source.scene;
+    result->frame = source.frame; result->ownerSlot = source.ownerSlot;
+    result->originalCount = source.originalCount; result->selectedCount = source.count;
+    result->linear = source.linear;
+    std::copy(source.indices.begin(), source.indices.end(), result->indices);
+    return 1;
+}
 
 struct TimelineFixture
 {
@@ -125,7 +141,37 @@ int wmain(int argc, wchar_t** argv)
         if (concurrent.retains != 1 || concurrent.releases) return 13;
     }
     if (concurrent.releases != 1) return 14;
+    {
+        TimelineFixture linked;
+        linked.descriptor = fixture.descriptor;
+        linked.objects[0] = {0, 0, 0, 0, 0, 2, 70, 1};
+        draw.source = &linked; draw.pipelineAccess.source = &linked;
+        draw.mesh = 0x20000; draw.objectCount = 1; event.frame = 500;
+        GlassFg::DiagnosticInstanceSource source;
+        source.proxy = 0x10000; source.mesh = draw.mesh;
+        source.renderer = 0x30000; source.scene = 0x40000;
+        source.frame = 500; source.globalStart = 70; source.count = 2;
+        source.originalCount = 40; source.ownerSlot = 19;
+        source.indices[0] = 39; source.indices[1] = 4;
+        if (!fixtureLookup.publish(source)) return 15;
+        TimelineRecorder<16, 16, 4> recorder(output / "linked", fixtureQuery);
+        if (recorder.observe(event) != 1) return 16;
+        ++event.frame; // A previous frame's lookup is never accepted.
+        if (recorder.observe(event) != 1) return 17;
+        --event.frame; ++source.scene;
+        if (fixtureLookup.publish(source) || recorder.observe(event) != 1) return 18;
+        recorder.save();
+        const auto saved = readTimeline<TimelineProvenance>(output / "linked/provenance.bin");
+        const auto original = readTimeline<GlassExperimentObject>(output / "linked/objects.bin");
+        if (saved.size() != 1 || saved[0].objectIndex != 0 || saved[0].source.indices[0] != 39 ||
+            saved[0].source.indices[1] != 4 || saved[0].source.proxy != 0x10000 || original.size() != 3)
+            return 19;
+        for (const auto& object : original)
+            if (object.proxy || object.generation || object.transformIndex != 70 || object.count != 2) return 20;
+    }
     std::puts("PASS timeline_consecutive_frames=12 caller_data_copied=1 address_generation_preserved=1 "
               "bounded_capacity=1 unknown_frame_preserved=1 pipeline_retained_once=1 "
-              "concurrent_draws=8000 concurrent_loss=0 object_slot_collisions=0 game_hooks=0 gpu_copies=0");
+              "concurrent_draws=8000 concurrent_loss=0 object_slot_collisions=0 "
+              "source_indices_preserved=1 stale_ambiguous_source_rejected=1 original_identity_unchanged=1 "
+              "game_hooks=0 gpu_copies=0");
 }

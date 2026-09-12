@@ -16,6 +16,8 @@ struct GeometryBatchSpan
     GeometryDrawIdentity identity;
     std::uint32_t first = 0, count = 0, transformIndex = 0;
     bool global = false;
+    // Packet owner provenance. An array parent is never a child-history key.
+    GeometryDrawIdentity parent;
 };
 // One span per actual engine append, including rejected identities. Dropping
 // an unknown span would shift every following object onto the wrong instance.

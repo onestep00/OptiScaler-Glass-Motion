@@ -1,13 +1,35 @@
 # Engine render packets and draw ownership
 
 - Created: 2026-09-11
-- Updated: 2026-09-11
-- Status: live packet/public draw observation verified; mesh allocation decoder added; continuous object history incomplete
+- Updated: 2026-09-12
+- Status: direct array-parent packet preservation passes callback checks; continuous object history incomplete
 - Deployment: 7769d34 coverage diagnostic loaded and saved seven nearly empty captures; see GeometryShaders.md. The mesh allocation decoder below is not deployed
 - Deprecated: no
 - Scope: direct indexed mesh batches in the audited Cyberpunk executable; broader routes remain incomplete
 
 ## Actual mesh allocation ranges
+
+The latest source preserves `GeometryBatchSpan::parent` separately from admitted
+single-object identity. In the owned array producer at RVA `1ea780`, instructions
+`1eb13d..1eb16f` read proxy+0x98, mask the slot to 18 bits and set packet bit 51;
+`1eb2e4..1eb303` write the actual array packet. The consumer at `1f1208` decodes
+the owner slot and transform range. The earlier parent producer's zero temporary
+word does not mean that the final array packet lacks its parent slot.
+
+`CyberpunkDraws::append` now preserves the validated packet parent for arrays as
+well as ordinary objects. Registry entry, proxy slot, mesh and lifetime ticket
+must agree. Draw consumption rechecks that ticket once. The child identity
+guard remains: a multi-instance span or one visible member of an array cannot
+use its parent as a child-history key. Per-element selection, array update
+generation and actual preceding GPU input still require their own evidence.
+This source is not deployed and the resident census ABI does not expose the new
+parent field yet. No frame-key lookup or full transform copy is added to this
+production path.
+
+The owned callback test passes twenty appends and thirteen flushes, including
+CPU/global single-visible clusters, multi-instance parent preservation and
+parent reuse between append and draw. The latter rejects the borrowed draw.
+This is a source callback check, not fresh game evidence or an MV/FG result.
 
 `ReadCyberpunkMeshShape` reads the actual chunk selected by the consumed engine
 draw. It is valid only inside that same borrowed callback. It copies the selected

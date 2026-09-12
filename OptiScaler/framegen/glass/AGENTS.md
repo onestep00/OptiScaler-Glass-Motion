@@ -12,7 +12,9 @@
 
 ## Document index
 
-- [tests/Timeline.md](tests/Timeline.md): Moving diagnostic saved 769 consecutive frames. All array/global object records lack owner identity; capacity and missing pipelines prevent full capture. No object MV or FG change.
+- [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
+
+- [tests/GeometryDraws.md](tests/GeometryDraws.md): Packet-direct array-parent preservation passes callback/lifetime-reuse checks. Parent is not child identity; source not deployed or exposed by resident census.
 
 - [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Bounded live caller-context capture resolves shared/destructible source ranges, with 2,686 source-element occurrences. Temporal ownership and actual MV/FG remain incomplete; diagnostic recording stopped.
 
