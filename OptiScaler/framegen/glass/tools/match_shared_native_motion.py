@@ -14,9 +14,21 @@ _parser.add_argument('--workspace', type=Path, required=True)
 p=_parser.parse_args().workspace.resolve(strict=True)
 var=re.compile(r'%(?:\d+|graft[\w.]*)\b')
 
+def modifier_key(contracts,row):
+    if not contracts:return ('RAW',row)
+    variants=[]
+    for contract in contracts:
+        earlier=[s for s in contract['slots'] if s['row']<=row]
+        if not earlier:variants.append(('RAW',row));continue
+        start=max(s['row'] for s in earlier)
+        variants.append(tuple(sorted((s['name'],s['kind'],row-start) for s in earlier if s['row']==start)))
+    if len(set(variants))!=1:raise ValueError('ambiguous named material slot')
+    return variants[0]
+
 class Shader:
-    def __init__(self,text):
+    def __init__(self,text,modifiers=None):
         self.text=text
+        self.modifiers=modifiers
         self.md=dict(re.findall(r'^!(\d+) = !\{(.*)\}$',text,re.M))
         entry=re.search(r'!dx.entryPoints = !\{!(\d+)\}',text)[1]
         sig=re.search(r'!"[^"]+", !(\d+),',self.md[entry])[1]
@@ -46,14 +58,17 @@ class Shader:
         self.cache={};self.active=set();self.handles={}
         self.blocks={};self.predecessors=defaultdict(list);self.value_block={}
         self.reach_cache={};self.reach_active=set()
+        self.entry_block='0'
+        self.return_blocks=set()
         block='0'
         for line in text.splitlines():
-            label=re.match(r'; <label>:(\d+)',line)
+            label=re.match(r'; <label>:(\d+)',line) or re.match(r'(graft\w+):',line)
             if label:block=label[1]
-            value=re.match(r'  (%\d+) = ',line)
+            value=re.match(r'  (%(?:\d+|graft[\w.]*)) = ',line)
             if value:self.value_block[value[1]]=block
-            branch=re.match(r'  br i1 ([^,]+), label %(\d+), label %(\d+)',line)
-            direct=re.match(r'  br label %(\d+)',line)
+            if line.strip()=='ret void':self.return_blocks.add(block)
+            branch=re.match(r'  br i1 ([^,]+), label %([\w.]+), label %([\w.]+)',line)
+            direct=re.match(r'  br label %([\w.]+)',line)
             if branch:
                 self.blocks[block]=[(branch[2],branch[1],True),(branch[3],branch[1],False)]
             elif direct:self.blocks[block]=[(direct[1],None,True)]
@@ -62,6 +77,25 @@ class Shader:
         for v,rhs in self.defs.items():
             m=re.search(r'@dx.op.createHandle\(i32 57, i8 (\d+), i32 (\d+), i32 (\d+), i1 (true|false)\)',rhs)
             if m:self.handles[v]=(int(m[1]),int(m[2]),int(m[3]),m[4])
+
+    def exit_dominators(self):
+        blocks={'0'}|set(self.blocks)|set(self.predecessors)|self.return_blocks
+        dom={b:({'0'} if b=='0' else set(blocks)) for b in blocks}
+        changed=True
+        while changed:
+            changed=False
+            for block in blocks-{'0'}:
+                parents=[dom[src] for src,_,_ in self.predecessors.get(block,[])]
+                value={block}|(set.intersection(*parents) if parents else set())
+                if value!=dom[block]:dom[block]=value;changed=True
+        if not self.return_blocks:raise ValueError('no shader exit')
+        return set.intersection(*(dom[b] for b in self.return_blocks))
+
+    def named_material_load(self,rhs):
+        m=re.search(r'@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle (%(?:\d+|graft[\w.]*)), i32 (\d+)\)',rhs)
+        if m and self.handles.get(m[1],())[:1]==(2,) and self.handles[m[1]][2]==7:
+            rhs=rhs[:m.start(2)]+'MODIFIER'+repr(modifier_key(self.modifiers,int(m[2])))+rhs[m.end(2):]
+        return rhs
 
     def digest(self,v):
         if not v.startswith('%'):return v
@@ -92,6 +126,7 @@ class Shader:
                 if row>=len(indices) or col>=int(f[7][3:]):raise ValueError('invalid semantic component')
                 contract=(f[1],f[2],f[3],indices[row],col)
                 rhs=rhs[:m.start()]+'INPUT'+repr(contract)+rhs[m.end():]
+            rhs=self.named_material_load(rhs)
             rhs=var.sub(lambda m:'['+self.digest(m[0])+']',rhs)
         value=hashlib.sha256(rhs.encode()).hexdigest()
         self.active.remove(v);self.cache[v]=value
@@ -121,8 +156,72 @@ class Shader:
         if set(roots)!={0,1,2,3}:raise ValueError('incomplete position')
         return tuple(self.digest(roots[i]) for i in range(4))
 
+    def position_graph(self,supplied_roots=None):
+        """Exact ordered graph with explicit predecessor edges, including loops.
+
+        Canonical traversal renames nodes; it never unrolls or approximates a loop.
+        Different incoming-edge orders conservatively remain different graphs.
+        """
+        if supplied_roots is None:
+            oid=next(i for i,f in self.outs.items() if f[1]=='!"SV_Position"')
+            if set(self.roots[oid])!={0,1,2,3}:raise ValueError('incomplete position')
+            supplied_roots=[self.roots[oid][i] for i in range(4)]
+        def describe(key):
+            kind=key[0]
+            if kind=='reach':
+                block=key[1]
+                if block in ('0',self.entry_block):return 'ENTRY',[]
+                incoming=self.predecessors.get(block,[])
+                if not incoming:raise ValueError('unknown block predecessor')
+                return 'REACH',[('edge',src,block) for src,_,_ in incoming]
+            if kind=='edge':
+                src,dst=key[1:]
+                edges=[e for e in self.blocks.get(src,[]) if e[0]==dst]
+                if len(edges)!=1:raise ValueError('ambiguous control edge')
+                _,condition,positive=edges[0]
+                return ('EDGE',positive,condition is not None), [('reach',src)]+([('value',condition)] if condition is not None else [])
+            v=key[1]
+            if not v.startswith('%'):return ('LITERAL',v),[]
+            if v not in self.defs:raise ValueError('unresolved value in position graph')
+            rhs=self.defs[v]
+            if rhs.startswith('phi '):
+                incoming=re.findall(r'\[ ([^,\]]+), %([\w.]+) \]',rhs)
+                if not incoming:raise ValueError('unsupported phi syntax')
+                edges=[]
+                for value,src in incoming:edges.extend([('value',value),('edge',src,self.value_block[v])])
+                return ('PHI',rhs.split(' [',1)[0],len(incoming)),edges
+            if v in self.handles:
+                k,rid,index,nonuniform=self.handles[v]
+                return ('HANDLE',k,self.resources[k,rid],index,nonuniform),[]
+            m=re.search(r'@dx.op.loadInput\.\w+\(i32 4, i32 (\d+), i32 (\d+), i8 (\d+),',rhs)
+            if m:
+                sid,row,col=map(int,m.groups());f=self.ins[sid]
+                indices=re.findall(r'i32 (\d+)',self.md[f[4][1:]])
+                if row>=len(indices) or col>=int(f[7][3:]):raise ValueError('invalid semantic component')
+                contract=(f[1],f[2],f[3],indices[row],col)
+                rhs=rhs[:m.start()]+'INPUT'+repr(contract)+rhs[m.end():]
+            rhs=self.named_material_load(rhs)
+            dependencies=var.findall(rhs)
+            return var.sub('@VALUE',rhs),[('value',d) for d in dependencies]
+        keys=[];ids={};nodes=[]
+        def add(key):
+            if key not in ids:
+                ids[key]=len(keys);keys.append(key)
+            return ids[key]
+        roots=[add(('value',value)) for value in supplied_roots]
+        index=0
+        while index<len(keys):
+            if len(keys)>100000:raise ValueError('position graph exceeds offline bound')
+            label,edges=describe(keys[index]);nodes.append([label,[add(e) for e in edges]])
+            index+=1
+        self.graph_data=(roots,nodes)
+        return hashlib.sha256(json.dumps([roots,nodes],separators=(',',':')).encode()).hexdigest(),keys
+
     def dependencies(self,oid):
-        seen=set();todo=list(self.roots[oid].values());cb=set();inputs=set();other=[]
+        return self.dependencies_values(self.roots[oid].values())
+
+    def dependencies_values(self,roots):
+        seen=set();todo=list(roots);cb=set();inputs=set();other=[]
         while todo:
             v=todo.pop()
             if v in seen or v not in self.defs:continue
@@ -138,24 +237,31 @@ class Shader:
 def main():
     native=json.loads((p/'opaque-velocity-audit/index.json').read_text())['shaders']
     transparent=json.loads((p/'all-transparent-input-routes.json').read_text())['shaders']
+    contracts=json.loads((p/'shader-modifier-contracts.json').read_text())['shaders']
     groups=defaultdict(list);reject=Counter();natives=[]
     for r in native:
         try:
-            s=Shader(Path(r['disassembly']).read_text());key=s.position()
-            prior=[]
+            s=Shader(Path(r['disassembly']).read_text(),contracts.get(r['sha256']));key,_=s.position_graph()
+            scalar=defaultdict(list)
             for oid,roots in s.roots.items():
-                if set(roots)!={0,1,2,3}:continue
-                d=s.dependencies(oid)
-                if all((1,row) in d['cb_rows'] for row in range(16,20)):
-                    prior.append(dict(output=oid,semantic=s.outs[oid][1],dependencies=d))
-            if not prior:raise ValueError('no complete native prior-projection output')
+                for col,value in roots.items():
+                    d=s.dependencies_values([value]);cb=set(map(tuple,d['cb_rows']))
+                    old={row for binding,row in cb if binding==1 and 16<=row<20}
+                    current={row for binding,row in cb if binding==1 and 28<=row<32}
+                    if len(old)==1 and not current:scalar[next(iter(old))-16].append((oid,col,value))
+            if set(scalar)!={0,1,2,3}:raise ValueError('no complete native prior-projection output')
+            if any(len({value for _,_,value in rows})!=1 for rows in scalar.values()):
+                raise ValueError('ambiguous prior-projection component')
+            components=[list(scalar[i][0][:2]) for i in range(4)]
+            d=s.dependencies_values([scalar[i][0][2] for i in range(4)])
+            prior=[dict(components=components,dependencies=d)]
             n=dict(sha256=r['sha256'],previous=prior,techniques=r['techniques'])
             groups[key].append(n);natives.append(n)
         except (ValueError,KeyError,StopIteration,TypeError,AttributeError) as e:reject[str(e)]+=1
     matches=[];miss=[]
     for r in transparent:
         try:
-            s=Shader((p/'all-transparent-vs'/(r['sha256']+'.ll')).read_text());key=s.position()
+            s=Shader((p/'all-transparent-vs'/(r['sha256']+'.ll')).read_text(),contracts.get(r['sha256']));key,_=s.position_graph()
             found=groups.get(key,[])
             if not found:raise ValueError('no exact native current-position match')
             matches.append(dict(sha256=r['sha256'],techniques=r['techniques'],native_candidates=found))
@@ -163,7 +269,7 @@ def main():
             miss.append(dict(sha256=r['sha256'],reason=str(e),techniques=r['techniques']))
     summary=dict(native_total=len(native),native_current_compared=len(natives),native_rejected=dict(reject),
         transparent_total=len(transparent),transparent_matched=len(matches),unmatched=dict(Counter(x['reason'] for x in miss)),
-        method='Exact referenced arithmetic after semantic/range id remapping; no material-name matching',
+        method='Exact ordered position/control graph including loops, after semantic/range id remapping; no material-name matching',
         live_bindings_verified=False,grafted=False)
     (p/'shared-native-motion-matches.json').write_text(json.dumps(dict(summary=summary,matches=matches,unmatched=miss),indent=2))
     print(json.dumps(summary,indent=2))

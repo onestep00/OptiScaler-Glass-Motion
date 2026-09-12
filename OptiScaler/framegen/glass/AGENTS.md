@@ -14,7 +14,7 @@
 
 - [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): Startup declaration consumption and original b7 GPU supply verified in process 43504. Forty native MV grafts pass offline checks; grouped instances, all-route supply, full-screen boundary MV and FG remain incomplete.
+- [EngineMotionSupply.md](EngineMotionSupply.md): Startup/original b7 supply verified in process 43504. Native split-output and control-flow reuse yields 69 checked offline grafts; 606 transparent candidates, grouped instances, all-route supply, full-screen boundary MV and FG remain incomplete.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 

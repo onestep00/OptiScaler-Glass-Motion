@@ -8,32 +8,54 @@ from pathlib import Path
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib,json,re,subprocess
-from match_shared_native_motion import Shader,var
+from match_shared_native_motion import Shader,var,modifier_key
 
 import argparse
 _parser=argparse.ArgumentParser(description=__doc__)
 _parser.add_argument('--workspace', type=Path, required=True)
 p=_parser.parse_args().workspace.resolve(strict=True)
 
-def graft(target,native,oid):
-    a,b=Shader(target),Shader(native)
-    if a.position()!=b.position():raise ValueError('current-position arithmetic differs')
-    deps=b.dependencies(oid)
-    motion_rows=sorted({r for binding,r in deps['cb_rows'] if binding==7})
+def graft(target,native,clip,target_contract=None,native_contract=None):
+    a,b=Shader(target,target_contract),Shader(native,native_contract)
+    ak,an=a.position_graph();bk,bn=b.position_graph()
+    if ak!=bk:raise ValueError('current-position arithmetic differs')
+    roots=[b.roots[oid][col] for oid,col in clip['components']]
+    deps=b.dependencies_values(roots)
+    current_id=next(i for i,f in b.outs.items() if f[1]=='!"SV_Position"')
+    current_cb=set(map(tuple,b.dependencies(current_id)['cb_rows']))
+    motion_rows=sorted({r for binding,r in deps['cb_rows'] if binding==7 and (binding,r) not in current_cb})
+    declared={s['row'] for c in native_contract or [] for s in c['slots'] if s['name']=='MatMod_MotionMatrix'}
+    if len(declared)==1:
+        start=next(iter(declared));motion_rows=[r for binding,r in deps['cb_rows'] if binding==7 and start<=r<start+3]
+        motion_rows=sorted(set(motion_rows))
     if len(motion_rows)!=3 or motion_rows!=list(range(motion_rows[0],motion_rows[0]+3)):
         raise ValueError('native previous dependency is not a three-row motion matrix')
     text=target.rstrip('\0\r\n')+'\n'
     if text.count('  ret void')!=1:raise ValueError('target needs a single exit')
     node=max(map(int,re.findall(r'^!(\d+) = ',text,re.M)))+1
     metadata=[];lines=[];mapping={};input_cols={};used_calls=set()
-    shared={digest:value for value,digest in a.cache.items()}
+    shared={src[1]:dst[1] for src,dst in zip(bn,an)
+            if src[0]==dst[0]=='value' and src[1] in b.defs and dst[1] in a.defs}
+    dominators=a.exit_dominators()
+    shared={src:dst for src,dst in shared.items() if a.value_block.get(dst) in dominators}
     material_dependent={}
+    def relocate_row(row):
+        if row in motion_rows:return 24+row-motion_rows[0]
+        key=modifier_key(native_contract,row)
+        candidates=[r for r in range(28) if modifier_key(target_contract,r)==key]
+        if len(candidates)!=1:raise ValueError('unresolved previous-only material modifier')
+        return candidates[0]
     def uses_motion(v):
         if v in material_dependent:return material_dependent[v]
-        if v not in b.defs:return False
-        if b.defs[v].startswith('phi '):raise ValueError('native prior position needs control-flow graft')
-        h=b.handles.get(v)
-        result=bool(h and h[0]==2 and h[2]==7) or any(uses_motion(x) for x in var.findall(b.defs[v]))
+        todo=[v];seen=set();result=False
+        while todo:
+            value=todo.pop()
+            if value in seen or value not in b.defs:continue
+            seen.add(value);rhs=b.defs[value]
+            m=re.search(r'@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle (%\d+), i32 (\d+)\)',rhs)
+            if m and b.handles.get(m[1],())[:1]==(2,) and b.handles[m[1]][2]==7 and int(m[2]) in motion_rows:
+                result=True;break
+            todo.extend(var.findall(rhs))
         material_dependent[v]=result;return result
     motion_handle=next((v for v,h in a.handles.items() if h[0]==2 and h[2]==7),None)
     if motion_handle:
@@ -53,20 +75,7 @@ def graft(target,native,oid):
         f=shader.ins[sid];indices=re.findall(r'i32 (\d+)',shader.md[f[4][1:]])
         return (f[1],f[2],f[3],indices[row])
     input_map={input_key(a,sid,row):(sid,row) for sid,f in a.ins.items() for row in range(int(f[6][4:]))}
-    def clone(v):
-        if v not in b.defs:return v
-        if v in mapping:return mapping[v]
-        dep=uses_motion(v)
-        if not dep:
-            digest=b.digest(v)
-            if digest in shared:mapping[v]=shared[digest];return mapping[v]
-        rhs=b.defs[v]
-        if v in b.handles:
-            h=b.handles[v]
-            if h[0]==2 and h[2]==7:mapping[v]=motion_handle;return motion_handle
-            candidates=[x for x,q in a.handles.items() if q[0]==h[0] and q[2:]==h[2:] and a.resources[q[0],q[1]]==b.resources[h[0],h[1]]]
-            if not candidates:raise ValueError('missing native resource contract')
-            mapping[v]=candidates[0];return mapping[v]
+    def rewrite(rhs):
         m=re.search(r'(@dx.op.loadInput\.\w+\(i32 4, i32 )(\d+), i32 (\d+), i8 (\d+),',rhs)
         if m:
             sid,row,col=map(int,m.groups()[1:]);dst,drow=input_map[input_key(b,sid,row)]
@@ -75,15 +84,79 @@ def graft(target,native,oid):
             rhs=rhs[:m.start()]+m[1]+f'{dst}, i32 {drow}, i8 {col},'+rhs[m.end():]
         m=re.search(r'(@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle )(%\d+), i32 (\d+)\)',rhs)
         if m and b.handles.get(m[2],())[:1]==(2,) and b.handles[m[2]][2]==7:
-            row=int(m[3]);assert row in motion_rows
-            rhs=rhs[:m.start(3)]+str(24+row-motion_rows[0])+rhs[m.end(3):]
+            rhs=rhs[:m.start(3)]+str(relocate_row(int(m[3])))+rhs[m.end(3):]
+        used_calls.update(re.findall(r'@(dx\.op\.[\w.]+)\(',rhs))
+        return rhs
+    def clone(v):
+        if v not in b.defs:return v
+        if v in mapping:return mapping[v]
+        dep=uses_motion(v)
+        if not dep and v in shared:mapping[v]=shared[v];return mapping[v]
+        rhs=b.defs[v]
+        if rhs.startswith('phi '):raise ValueError('native prior position needs new control-flow graft')
+        if v in b.handles:
+            h=b.handles[v]
+            if h[0]==2 and h[2]==7:mapping[v]=motion_handle;return motion_handle
+            candidates=[x for x,q in a.handles.items() if q[0]==h[0] and q[2:]==h[2:] and a.resources[q[0],q[1]]==b.resources[h[0],h[1]]]
+            if not candidates:raise ValueError('missing native resource contract')
+            mapping[v]=candidates[0];return mapping[v]
+        rhs=rewrite(rhs)
         replacements={x:clone(x) for x in var.findall(rhs)}
         rhs=var.sub(lambda m:replacements[m[0]],rhs)
         used_calls.update(re.findall(r'@(dx\.op\.[\w.]+)\(',rhs))
         mapping[v]='%graftPrevious'+v[1:]
         lines.append('  '+mapping[v]+' = '+rhs)
         return mapping[v]
-    previous=[clone(b.roots[oid][i]) for i in range(4)]
+    prefix=list(lines);mode='dag'
+    try:previous=[clone(value) for value in roots]
+    except ValueError as error:
+        if str(error)!='native prior position needs new control-flow graft':raise
+        mode='native-control-flow'
+        if native.count('  ret void')!=1:raise ValueError('native needs a single exit')
+        if re.search(r'@dx.op.(?:atomic|bufferStore|rawBufferStore|textureStore|barrier)',native):
+            raise ValueError('native position route has side effects')
+        # Keep original control flow and only its required SSA values. Shared
+        # target entry values dominate the entire appended native region.
+        mapping.clear();input_cols.clear();used_calls.clear();lines=list(prefix)
+        needed=set();todo=list(roots)
+        todo.extend(cond for edges in b.blocks.values() for _,cond,_ in edges if cond is not None)
+        while todo:
+            v=todo.pop()
+            if v in needed or v not in b.defs:continue
+            needed.add(v);todo.extend(re.findall(r'%\d+\b',b.defs[v]))
+        reused=set()
+        for v in needed:
+            if v in b.handles:
+                h=b.handles[v]
+                if h[0]==2 and h[2]==7:mapping[v]=motion_handle
+                else:
+                    matches=[x for x,q in a.handles.items() if q[0]==h[0] and q[2:]==h[2:] and a.resources[q[0],q[1]]==b.resources[h[0],h[1]]]
+                    if not matches:raise ValueError('missing native control-flow resource')
+                    mapping[v]=matches[0]
+                reused.add(v)
+            elif v in shared and not uses_motion(v):
+                mapping[v]=shared[v];reused.add(v)
+            else:mapping[v]='%graftPrevious'+v[1:]
+        lines.extend(['  br label %graftBlock0','','graftBlock0:'])
+        body=native.split('define void @',1)[1].split('\n}',1)[0].split('\n',1)[1]
+        for line in body.splitlines():
+            label=re.match(r'; <label>:(\d+)',line)
+            if label:lines.extend(['','graftBlock'+label[1]+':']);continue
+            definition=re.match(r'  (%\d+) = ',line)
+            if definition:
+                v=definition[1]
+                if v not in needed or v in reused:continue
+                rhs=rewrite(b.defs[v])
+                if rhs.startswith('phi '):rhs=re.sub(r', %(\d+) \]',r', %graftBlock\1 ]',rhs)
+                rhs=re.sub(r'%\d+\b',lambda m:mapping[m[0]],rhs)
+                lines.append('  '+mapping[v]+' = '+rhs)
+            elif re.match(r'  br ',line):
+                line=re.sub(r'label %(\d+)',r'label %graftBlock\1',line)
+                line=re.sub(r'%\d+\b',lambda m:mapping[m[0]],line)
+                line=re.sub(r', !llvm.loop !\d+','',line)
+                lines.append(line)
+            elif re.match(r'  (?:switch|indirectbr|invoke) ',line):raise ValueError('unsupported native terminator')
+        previous=[mapping.get(value,value) for value in roots]
     # Reuse the native camera jitter convention already verified by the paired
     # original input experiment; current clip remains the target's own position.
     current_id=next(i for i,f in a.outs.items() if f[1]=='!"SV_Position"')
@@ -130,10 +203,11 @@ def graft(target,native,oid):
     text+='\n'+'\n'.join(metadata)+'\n'
     return text,dict(current_output=first,previous_output=first+1,added_instructions=len(lines),
         shared_native_values=sum(v in shared.values() for v in mapping.values()),
-        original_motion_rows=motion_rows,required_engine_motion_rows=[24,25,26],gpu_verified=False)
+        original_motion_rows=motion_rows,required_engine_motion_rows=[24,25,26],graft_mode=mode,gpu_verified=False)
 
 def main():
     rows=json.loads((p/'shared-native-motion-matches.json').read_text())['matches']
+    contracts=json.loads((p/'shader-modifier-contracts.json').read_text())['shaders']
     out=p/'native-grafted';out.mkdir(exist_ok=True)
     tool=p.parent/'glass-native-material-buildcheck/GeometryShaderTool.exe'
     compiler=p.parent/'glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll'
@@ -143,7 +217,8 @@ def main():
         for n in candidates:
             try:
                 text,info=graft((p/'all-transparent-vs'/(r['sha256']+'.ll')).read_text(),
-                    (p/'opaque-velocity-audit'/(n['sha256']+'.ll')).read_text(),n['previous'][0]['output'])
+                    (p/'opaque-velocity-audit'/(n['sha256']+'.ll')).read_text(),n['previous'][0],
+                    contracts.get(r['sha256']),contracts.get(n['sha256']))
                 ll=out/(r['sha256']+'.ll');ll.write_text(text)
                 result=subprocess.run([str(tool),str(compiler),'assemble',str(ll),str(ll.with_suffix('.dxil')),'0'],capture_output=True,text=True)
                 if result.returncode:raise ValueError((result.stdout+result.stderr)[-1800:])

@@ -7,6 +7,7 @@
 
 ## Index
 
-- `match_shared_native_motion.py`: semantic/resource-aware native position graph matching; unresolved loops are reported.
+- `read_modifier_contracts.py`: cache-wide named modifier rows and shader aliases; no runtime reads.
+- `match_shared_native_motion.py`: semantic/resource-aware native position/control graph matching, including loops and split prior-clip outputs.
 - `graft_native_motion.py`: transplant native prior-position arithmetic and validate DXIL; engine slot admission remains separate.
-- `verify_native_grafts.py`: check original-output preservation and exact native prior-expression equivalence.
+- `verify_native_grafts.py`: check original-output preservation and cyclic expression/control equivalence after named-row relocation.

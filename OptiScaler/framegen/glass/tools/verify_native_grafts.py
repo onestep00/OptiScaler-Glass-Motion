@@ -1,12 +1,13 @@
 """Check exact original-output and transplanted native-expression preservation."""
 from pathlib import Path
 import json,re
-from match_shared_native_motion import Shader
+from match_shared_native_motion import Shader,modifier_key
 import argparse
 _parser=argparse.ArgumentParser(description=__doc__)
 _parser.add_argument('--workspace', type=Path, required=True)
 p=_parser.parse_args().workspace.resolve(strict=True)
 index=json.loads((p/'native-grafted/index.json').read_text())
+contracts=json.loads((p/'shader-modifier-contracts.json').read_text())['shaders']
 matches={r['sha256']:r for r in json.loads((p/'shared-native-motion-matches.json').read_text())['matches']}
 results=[]
 for r in index['shaders']:
@@ -24,15 +25,29 @@ for r in index['shaders']:
     def relocate(m):
         if m[2] not in handles:return m[0]
         row=int(m[3])
-        if row not in r['original_motion_rows']:return m[0]
-        return m[1]+m[2]+', i32 '+str(24+row-r['original_motion_rows'][0])+')'
+        if row in r['original_motion_rows']:dest=24+row-r['original_motion_rows'][0]
+        else:
+            key=modifier_key(contracts.get(r['native_sha256']),row)
+            candidates=[i for i in range(28) if modifier_key(contracts.get(r['sha256']),i)==key]
+            if len(candidates)!=1:return m[0]
+            dest=candidates[0]
+        return m[1]+m[2]+', i32 '+str(dest)+')'
     native=re.sub(r'(@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle )(%\d+), i32 (\d+)\)',relocate,native)
     reference=Shader(native)
     route=next(n for n in matches[r['sha256']]['native_candidates'] if n['sha256']==r['native_sha256'])
-    oid=route['previous'][0]['output']
-    expected=[reference.digest(reference.roots[oid][i]) for i in range(4)]
-    actual=[b.digest(b.roots[r['previous_output']][i]) for i in range(4)]
-    assert actual==expected, r['sha256']
+    components=route['previous'][0]['components']
+    if r.get('graft_mode')=='native-control-flow':b.entry_block='graftBlock0'
+    reference.position_graph([reference.roots[oid][col] for oid,col in components])
+    b.position_graph([b.roots[r['previous_output']][i] for i in range(4)])
+    ar,ag=reference.graph_data;br,bg=b.graph_data
+    pending=list(zip(ar,br));seen=set()
+    while pending:
+        pair=pending.pop()
+        if pair in seen:continue
+        seen.add(pair);x,y=ag[pair[0]],bg[pair[1]]
+        assert x[0]==y[0] and len(x[1])==len(y[1]), (r['sha256'],x[0],y[0])
+        pending.extend(zip(x[1],y[1]))
+        assert len(seen)<=100000,'expression comparison bound exceeded'
     results.append(dict(sha256=r['sha256'],original_outputs_unchanged=True,native_previous_expression_identical=True))
 result=dict(checked=len(results),passed=len(results),scope='Exact expression and original-output checks; not live material supply',results=results)
 (p/'native-grafted/verification.json').write_text(json.dumps(result,indent=2))

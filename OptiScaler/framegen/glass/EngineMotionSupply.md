@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: startup declaration consumption and original b7 GPU supply verified on a selected route; 40 native MV grafts validate offline; all-route coverage and FG integration incomplete
+- Status: startup declaration consumption and original b7 GPU supply verified on a selected route; 69 native MV grafts validate offline including native control flow; all-route coverage and FG integration incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -263,6 +263,54 @@ Local evidence: `startup-native-output-latest.json`,
 `native-grafted/verification.json`, and
 `native-graft-gpu-1789233454907652200/capture-1789233464654268300/analysis.json`.
 All paths in this paragraph are under `work/glass-native-material-v1/`.
+
+## Broader original shader reuse, 2026-09-13
+
+The preceding 40-graft result used an incomplete prior-output detector. Many
+native velocity VS pack previous clip components into different output semantics.
+The current component-level detector recovers prior clip from 837 of 879 native
+velocity VS; 42 still lack an admitted complete prior-projection result. No
+previous component is inferred from an output name alone.
+
+The matcher now compares ordered expression/control graphs, including loop
+backedges, without unrolling loops or estimating positions. The original cache's
+named modifier metadata provides row-relative identities for material constants.
+The extracted contracts cover 7,477 shader binaries and 1,019 parameter sets;
+1,281 shader binaries have multiple parameter-set aliases. Used rows must have
+consistent named meanings across aliases; ambiguity rejects that correspondence.
+Names are used to relocate constant fields, not to select material families.
+
+This identifies native reuse candidates for 69 of 675 transparent VS. All 69
+grafts pass DXIL validation: 49 use expression grafting and 20 retain original
+native control flow for previous deformation/garment calculations. The latter
+retain required original branch predicates and loop operations, remove irrelevant
+value computations, and do not introduce a replacement deformation algorithm.
+Target values that dominate the insertion point can be reused. This reduced
+generated instruction lines in 14 shaders by 510 lines in aggregate; it is a
+static source count, not a GPU instruction count or timing claim.
+
+All 69 pass the original-output preservation check and complete cyclic
+expression/control comparison against the native source after relocation. The
+comparison permits common-subexpression sharing but requires equal operations,
+inputs, branch polarity, predecessor dependencies and resource contracts. This
+supersedes the straight-line-only verifier. Native loop-control hints are omitted
+from the graft; arithmetic and control semantics remain checked.
+
+The remaining 606 transparent candidates are explicit gaps: 601 have no exact
+current-position correspondence under the current contracts, and five have
+multiple stores to the same output component. The last game check still covers
+only the earlier scoped declaration/b7 route. The 69 generated shaders are local
+offline artifacts, not globally deployed material flags or full-screen MV.
+Shader-specific constant semantics, independent grouped instances, particle
+inputs and final full-screen admission remain required. Do not equate this
+compiler result with support for every transparent object.
+
+Canonical tools are in `tools/`; local workspace wrappers forward to them so
+future runs do not silently use the preceding local implementation. Extracted
+game binaries remain outside Git. Current results are
+`shader-modifier-contracts.json`, `shared-native-motion-matches.json`,
+`native-grafted/index.json`, and `native-grafted/verification.json` under the
+local inventory workspace.
 
 ## Framework investigation
 
