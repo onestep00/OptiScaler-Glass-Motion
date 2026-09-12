@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Destructible source RTTI verified in the resident game. Packed array ordinals require source translation; source lifecycle and true MV/FG integration remain incomplete.
+- [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Bounded live caller-context capture resolves shared/destructible source ranges, with 2,686 source-element occurrences. Temporal ownership and actual MV/FG remain incomplete; diagnostic recording stopped.
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Original source-slot lookup now composes array history keys. Node-level ID lookup is documented separately from element identity; native lifetime/update supply remains incomplete.
 

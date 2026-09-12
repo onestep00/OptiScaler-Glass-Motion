@@ -1,5 +1,9 @@
 // Standalone CPU diagnostic; not linked into OptiScaler. Stop leaves the
 // forwarding hook pinned until process exit. No transform arrays/GPU copies.
+#ifdef GLASS_ARRAY_SOURCE_TRACE
+#define GLASS_ARRAY_WRAPPER
+#include "DiagnosticArraySource.h"
+#endif
 #include "DetourThreads.h"
 #include "GeometrySourceSlots.h"
 #ifdef GLASS_NODE_LIFETIME
@@ -53,7 +57,12 @@ constexpr unsigned profileMagic = 0x49555033;
 #elif defined(GLASS_ARRAY_WRAPPER)
 using EnqueueResult = unsigned char;
 using Enqueue = unsigned char (*)(void*, void*, void*);
+#ifdef GLASS_ARRAY_SOURCE_TRACE
+constexpr unsigned profileMagic = 0x49555036;
+std::uint64_t sourceImage = 0;
+#else
 constexpr unsigned profileMagic = 0x49555032;
+#endif
 #else
 using EnqueueResult = unsigned char;
 using Enqueue = unsigned char (*)(void*, void*);
@@ -73,6 +82,9 @@ struct Row
     std::array<std::uint64_t, 18> header {};
     unsigned thread = 0;
     bool valid = false;
+#ifdef GLASS_ARRAY_SOURCE_TRACE
+    GlassFg::DiagnosticArraySource source;
+#endif
 };
 std::array<Row, 4096> rows;
 bool read(std::uint64_t address, void* data, unsigned bytes) noexcept
@@ -240,6 +252,15 @@ EnqueueResult enqueue(void* a, void* b
                 row.caller = reinterpret_cast<std::uint64_t>(_ReturnAddress());
                 row.context = reinterpret_cast<std::uint64_t>(a);
                 row.thread = GetCurrentThreadId();
+#ifdef GLASS_ARRAY_SOURCE_TRACE
+                CONTEXT caller {};
+                unsigned steps = 0;
+                if (row.valid && row.caller >= sourceImage &&
+                    GlassFg::DiagnosticCallerContext(row.caller, caller, steps))
+                    row.source = GlassFg::ReadDiagnosticArraySource(row.caller - sourceImage, caller,
+                        row.context, begin, end, read);
+                row.source.steps = steps;
+#endif
                 rows[index] = row;
             }
             else recording.store(false, std::memory_order_release);
@@ -282,6 +303,24 @@ bool install()
     std::vector<char> expected(header[2]), actual(header[2]);
     if (!file.read(expected.data(), header[2]) ||
         !read(base + header[1], actual.data(), header[2]) || expected != actual) return false;
+#ifdef GLASS_ARRAY_SOURCE_TRACE
+    // This diagnostic decodes nonvolatile registers in these exact callers.
+    // An old wrapper-only profile cannot certify that interpretation.
+    constexpr std::array<unsigned, 8> callers {
+        0x3c8508, 0x2276c30, 0x579ab8, 0x57b114, 0xa040c0, 0x3a2038, 0x57a1f4, 0x579d78};
+    unsigned callerCount = 0;
+    if (!file.read(reinterpret_cast<char*>(&callerCount), 4) || callerCount != callers.size()) return false;
+    for (const auto caller : callers)
+    {
+        std::array<unsigned, 2> record {};
+        if (!file.read(reinterpret_cast<char*>(record.data()), sizeof(record)) || record[0] != caller ||
+            !record[1] || record[1] > 16384 || caller >= size || record[1] > size - caller) return false;
+        std::vector<char> expectedCaller(record[1]), actualCaller(record[1]);
+        if (!file.read(expectedCaller.data(), record[1]) || !read(base + caller, actualCaller.data(), record[1]) ||
+            expectedCaller != actualCaller) return false;
+    }
+    sourceImage = base;
+#endif
 #ifdef GLASS_NODE_LIFETIME
     std::array<unsigned, 2> destruction {};
     if (!file.read(reinterpret_cast<char*>(destruction.data()), sizeof(destruction)) ||
@@ -427,6 +466,23 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
             file << '\n';
         }
         file.close(); if (!file) return 2;
+#ifdef GLASS_ARRAY_SOURCE_TRACE
+        std::ofstream sources(output / "array-sources.csv");
+        sources << "row,caller_rva,kind,flags,steps,node,definition,definition_control,buffer,buffer_control,"
+                   "data,bytes,first,count,packed_count,mask0,mask1,mask2,mask3\n";
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const auto& row = rows[i]; const auto& s = row.source;
+            sources << i << ',' << (row.caller >= sourceImage ? row.caller - sourceImage : 0) << ','
+                << s.kind << ',' << s.flags << ',' << s.steps << ',' << s.node << ',' << s.definition << ','
+                << s.definitionControl << ',' << s.buffer << ',' << s.bufferControl << ',' << s.data << ','
+                << s.bytes << ',' << s.first << ',' << s.count << ','
+                << (row.header[13] >= row.header[12] ? (row.header[13] - row.header[12]) / 48 : 0);
+            for (const auto mask : s.mask) sources << ',' << mask;
+            sources << '\n';
+        }
+        sources.close(); if (!sources) return 2;
+#endif
         std::ofstream(output / "status.txt") << "rows=" << count << "\nrecording=0\nresident=1\n"
             << "arrays48_only=" << arraysOnly.load() << "\nfiltered_empty=" << filtered.load()
             << "\nmalformed=" << malformed.load() << '\n'

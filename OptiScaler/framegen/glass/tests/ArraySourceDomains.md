@@ -2,8 +2,8 @@
 
 - Created: 2026-09-12
 - Updated: 2026-09-12
-- Status: source classification and bounded resident RTTI audit; runtime correspondence incomplete
-- Deployment: no new game hook, DLL replacement, motion output or FG substitution
+- Status: bounded live source-range/selection capture; temporal correspondence incomplete
+- Deployment: optional source-trace observer loaded in PID 21760; recording stopped; no motion or FG substitution
 - Deprecated: no
 - Scope: upstream identities of instanced render arrays; not a material whitelist or complete world coverage
 
@@ -80,3 +80,48 @@ the resulting renderer indices under the same source lifetime. It must validate
 the actual internal calling contract before installing a hook. Do not reenable
 the quarantined range-accessor hook. Do not add per-frame full-array transform
 copies, per-object screen textures or image matching to establish identity.
+
+## Bounded caller-context source trace
+
+`GLASS_ARRAY_SOURCE_TRACE` extends the existing standalone array-wrapper
+diagnostic. A distinct profile magic, 0x49555036, requires the wrapper and all
+eight caller/type/accessor bodies to match before installing its single wrapper
+hook. It never installs the quarantined accessor hook. The diagnostic is not
+linked into OptiScaler's production build.
+
+`DiagnosticCallerContext.h` uses documented Windows `RtlCaptureContext` and
+`RtlVirtualUnwind` on its own thread, with an eight-frame limit and stack bounds.
+Only reconstructed nonvolatile registers are interpreted. It does not infer
+volatile arguments. `DiagnosticArraySource.h` uses the audited call site to
+select the original node register, reads bounded scalar range/handle/mask data,
+and repeats those headers. It does not read pointed-to transform contents or
+publish temporal generations. Foliage and dynamic-placeholder identities remain
+explicitly incomplete. This stack walk is diagnostic-only, not the proposed
+per-draw production acquisition cost.
+
+Independent assembly fixtures preserve known caller registers across real C++
+frames. Optimized and unoptimized builds recover all 300 register observations
+in two unwind steps. The actual wrapper callback also captures changed selection
+masks while retaining its original result. Other cases check unknown callers,
+changed metadata, misaligned shared ranges, wrong handles and deliberately
+unmapped transform storage. `build_array_source_trace.ps1 -OutputDirectory <path>`
+builds four independent tests and the diagnostic DLL from an MSVC shell. It never
+loads that DLL into a game.
+
+The current game preflight matched 6,260 resident code bytes across nine ranges.
+The staged observer SHA-256 is
+`f0e7ab7cefcf91edf14f0ca262b6941c43b480cc6fbb16f0ddb63418d757819c`.
+Load, Start and Save succeeded without a game restart. The third recording
+captured 697 wrapper calls: 540 shared-range records and 102 baked destructible
+selection records resolve to 2,686 source-element occurrences; 55 foliage records
+provide only node provenance. All recovered caller contexts took two steps.
+No malformed wrapper header occurred. The bounded sample contained no non-prefix
+active mask, so it does not demonstrate an actual shifted compaction in the game.
+
+Local files: `work/glass-array-source-live-v1/preflight.json` and
+`capture-3/{array-sources.csv,updates.csv,source-index-mapping.json,analysis.json}`.
+The reusable local analyzer is `work/glass-native-material-v1/analyze_array_source_trace.py`.
+Address tuples and same-invocation source ranges do not prove cross-frame
+lifetime, producer-to-draw frame matching or MV. Recording is stopped and the
+forwarding DLL remains pinned; the process was responding after Save. No new
+geometry MV was supplied to FG.

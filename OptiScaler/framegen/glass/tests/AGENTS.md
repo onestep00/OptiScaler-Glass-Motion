@@ -19,7 +19,7 @@
 
 ## Document index
 
-- [ArraySourceDomains.md](ArraySourceDomains.md): Resident RTTI identifies destructible compaction; six direct wrapper callers have distinct source domains. Renderer source indices need upstream translation; runtime lifetime/MV/FG remain incomplete.
+- [ArraySourceDomains.md](ArraySourceDomains.md): Caller-context diagnostics captured 697 game updates and resolved 2,686 source-element occurrences. Four independent tests cover real unwind/callback and scalar decoding. Cross-frame lifetime, foliage/particle identity and MV/FG remain incomplete.
 
 - [SourceSlots.md](SourceSlots.md): Source-slot to history lookup checks original index, owner, view and frame. Node IDs identify the parent setup; native array generations and game connection remain incomplete.
 
