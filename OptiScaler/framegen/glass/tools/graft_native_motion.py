@@ -15,9 +15,13 @@ _parser=argparse.ArgumentParser(description=__doc__)
 _parser.add_argument('--workspace', type=Path, required=True)
 p=_parser.parse_args().workspace.resolve(strict=True)
 
-def graft(target,native,clip,target_contract=None,native_contract=None):
-    a,b=Shader(target,target_contract),Shader(native,native_contract)
-    ak,an=a.position_graph();bk,bn=b.position_graph()
+def graft(target,native,clip,target_contract=None,native_contract=None,specializations=None,coverage_guard=None):
+    a,b=Shader(target,target_contract),Shader(native,native_contract,specializations)
+    geometric_roots=None
+    if coverage_guard:
+        geometric_roots,actual_guard=a.uncollapsed_position()
+        if actual_guard!=coverage_guard:raise ValueError('coverage guard changed')
+    ak,an=a.position_graph(geometric_roots);bk,bn=b.position_graph()
     if ak!=bk:raise ValueError('current-position arithmetic differs')
     roots=[b.roots[oid][col] for oid,col in clip['components']]
     deps=b.dependencies_values(roots)
@@ -58,9 +62,21 @@ def graft(target,native,clip,target_contract=None,native_contract=None):
             todo.extend(var.findall(rhs))
         material_dependent[v]=result;return result
     motion_handle=next((v for v,h in a.handles.items() if h[0]==2 and h[2]==7),None)
+    original_material_bytes=0
     if motion_handle:
         h=a.handles[motion_handle]
-        if a.resources[h[0],h[1]][3]!='i32 448':raise ValueError('existing b7 storage differs')
+        original_material_bytes=int(a.resources[h[0],h[1]][3][4:])
+        if not 0<original_material_bytes<=448:raise ValueError('existing b7 storage exceeds native uploader')
+        if original_material_bytes!=448:
+            resources=re.search(r'!dx.resources = !\{!(\d+)\}',text)[1]
+            cblist=a.md[resources].split(', ')[2][1:]
+            candidates=[ref for ref in re.findall(r'!(\d+)',a.md[cblist])
+                        if a.md[ref].split(', ')[0]=='i32 '+str(h[1])]
+            if len(candidates)!=1:raise ValueError('ambiguous b7 declaration')
+            ref=candidates[0];fields=a.md[ref].split(', ')
+            fields[1]='%GraftedMotionConstants* undef';fields[6]='i32 448'
+            text=text.replace(f'!{ref} = !{{{a.md[ref]}}}',f'!{ref} = !{{'+', '.join(fields)+'}')
+            text=text.replace('define void @','%GraftedMotionConstants = type { [28 x <4 x float>] }\n\ndefine void @',1)
     else:
         rid=max((rid for kind,rid in a.resources if kind==2),default=-1)+1
         resources=re.search(r'!dx.resources = !\{!(\d+)\}',text)[1]
@@ -88,6 +104,8 @@ def graft(target,native,clip,target_contract=None,native_contract=None):
         used_calls.update(re.findall(r'@(dx\.op\.[\w.]+)\(',rhs))
         return rhs
     def clone(v):
+        resolved=b.normalized_value(v)
+        if resolved!=v:return clone(resolved)
         if v not in b.defs:return v
         if v in mapping:return mapping[v]
         dep=uses_motion(v)
@@ -126,7 +144,9 @@ def graft(target,native,clip,target_contract=None,native_contract=None):
             needed.add(v);todo.extend(re.findall(r'%\d+\b',b.defs[v]))
         reused=set()
         for v in needed:
-            if v in b.handles:
+            if v in b.specializations:
+                mapping[v]=b.specializations[v];reused.add(v)
+            elif v in b.handles:
                 h=b.handles[v]
                 if h[0]==2 and h[2]==7:mapping[v]=motion_handle
                 else:
@@ -203,7 +223,9 @@ def graft(target,native,clip,target_contract=None,native_contract=None):
     text+='\n'+'\n'.join(metadata)+'\n'
     return text,dict(current_output=first,previous_output=first+1,added_instructions=len(lines),
         shared_native_values=sum(v in shared.values() for v in mapping.values()),
-        original_motion_rows=motion_rows,required_engine_motion_rows=[24,25,26],graft_mode=mode,gpu_verified=False)
+        original_motion_rows=motion_rows,required_engine_motion_rows=[24,25,26],graft_mode=mode,
+        coverage_guard=coverage_guard,original_material_bytes=original_material_bytes,
+        required_material_bytes=448,gpu_verified=False)
 
 def main():
     rows=json.loads((p/'shared-native-motion-matches.json').read_text())['matches']
@@ -218,11 +240,11 @@ def main():
             try:
                 text,info=graft((p/'all-transparent-vs'/(r['sha256']+'.ll')).read_text(),
                     (p/'opaque-velocity-audit'/(n['sha256']+'.ll')).read_text(),n['previous'][0],
-                    contracts.get(r['sha256']),contracts.get(n['sha256']))
+                    contracts.get(r['sha256']),contracts.get(n['sha256']),n.get('specializations'),r.get('coverage_guard'))
                 ll=out/(r['sha256']+'.ll');ll.write_text(text)
                 result=subprocess.run([str(tool),str(compiler),'assemble',str(ll),str(ll.with_suffix('.dxil')),'0'],capture_output=True,text=True)
                 if result.returncode:raise ValueError((result.stdout+result.stderr)[-1800:])
-                return dict(sha256=r['sha256'],native_sha256=n['sha256'],status='validated',**info)
+                return dict(sha256=r['sha256'],native_sha256=n['sha256'],status='validated',specializations=n.get('specializations',{}),**info)
             except (ValueError,KeyError,StopIteration,AssertionError) as e:errors.append(str(e))
         return dict(sha256=r['sha256'],status='unsupported',errors=sorted(set(errors)))
     with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(process,rows))

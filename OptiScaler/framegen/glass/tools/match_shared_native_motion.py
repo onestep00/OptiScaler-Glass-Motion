@@ -1,12 +1,12 @@
 """Match original position arithmetic across transparent and native velocity VS.
 
 Uses semantic inputs and referenced resource contracts, not material names.
-Rejects control-dependent position values. Matches are offline graft candidates;
+Compares position and control dependencies. Matches are offline graft candidates;
 they do not prove live resource contents, grouped identity, or temporal validity.
 """
 from pathlib import Path
 from collections import Counter, defaultdict
-import hashlib, json, re
+import hashlib, json, re,struct,zlib
 
 import argparse
 _parser=argparse.ArgumentParser(description=__doc__)
@@ -26,9 +26,10 @@ def modifier_key(contracts,row):
     return variants[0]
 
 class Shader:
-    def __init__(self,text,modifiers=None):
+    def __init__(self,text,modifiers=None,specializations=None):
         self.text=text
         self.modifiers=modifiers
+        self.specializations=specializations or {}
         self.md=dict(re.findall(r'^!(\d+) = !\{(.*)\}$',text,re.M))
         entry=re.search(r'!dx.entryPoints = !\{!(\d+)\}',text)[1]
         sig=re.search(r'!"[^"]+", !(\d+),',self.md[entry])[1]
@@ -97,6 +98,16 @@ class Shader:
             rhs=rhs[:m.start(2)]+'MODIFIER'+repr(modifier_key(self.modifiers,int(m[2])))+rhs[m.end(2):]
         return rhs
 
+    def normalized_value(self,v):
+        if v in self.specializations:return self.specializations[v]
+        rhs=self.defs.get(v,'')
+        m=re.fullmatch(r'fmul fast float ([^,]+), (.+)',rhs)
+        if m:
+            left=self.specializations.get(m[1],m[1]);right=self.specializations.get(m[2],m[2])
+            if left=='1.000000e+00':return right
+            if right=='1.000000e+00':return left
+        return v
+
     def digest(self,v):
         if not v.startswith('%'):return v
         if v in self.cache:return self.cache[v]
@@ -156,11 +167,52 @@ class Shader:
         if set(roots)!={0,1,2,3}:raise ValueError('incomplete position')
         return tuple(self.digest(roots[i]) for i in range(4))
 
+    def uncollapsed_position(self):
+        """Recognize a common terminal coverage collapse without removing it.
+
+        All four original output phis must choose the same geometry predecessor
+        or the literal clip position (0,0,0,1). The original shader, branches and
+        outputs stay intact; only the pre-collapse geometry is compared.
+        """
+        oid=next(i for i,f in self.outs.items() if f[1]=='!"SV_Position"')
+        roots=self.roots[oid]
+        if set(roots)!={0,1,2,3}:raise ValueError('incomplete position')
+        geometry=[];pair=None;join=None
+        for col in range(4):
+            value=roots[col];rhs=self.defs.get(value,'')
+            if not rhs.startswith('phi float '):raise ValueError('no terminal position collapse')
+            incoming=re.findall(r'\[ ([^,\]]+), %([\w.]+) \]',rhs)
+            literal='1.000000e+00' if col==3 else '0.000000e+00'
+            collapsed=[(v,src) for v,src in incoming if v==literal]
+            visible=[(v,src) for v,src in incoming if v.startswith('%')]
+            if len(incoming)!=2 or len(collapsed)!=1 or len(visible)!=1:
+                raise ValueError('position collapse has nonliteral or multiple branches')
+            current_pair=(collapsed[0][1],visible[0][1]);current_join=self.value_block[value]
+            if pair is not None and (pair!=current_pair or join!=current_join):
+                raise ValueError('position components have different coverage decisions')
+            pair,join=current_pair,current_join;geometry.append(visible[0][0])
+        collapsed,visible=pair
+        if self.blocks.get(collapsed)!=[(join,None,True)]:
+            raise ValueError('collapse predecessor has additional control flow')
+        edges=self.blocks.get(visible,[])
+        if len(edges)!=2 or {dst for dst,_,_ in edges}!={collapsed,join}:
+            raise ValueError('coverage decision is not one terminal branch')
+        conditions={condition for _,condition,_ in edges}
+        if len(conditions)!=1 or None in conditions:
+            raise ValueError('coverage branch condition is ambiguous')
+        # Geometry roots must be available on the visible predecessor, not
+        # computed only on an unrelated path behind the output phi.
+        if any(self.value_block.get(v)!=visible for v in geometry):
+            raise ValueError('coverage geometry is not defined before its decision')
+        return geometry,dict(condition=next(iter(conditions)),visible_predecessor=visible,
+                             collapsed_predecessor=collapsed,join=join,
+                             original_coverage_preserved=True)
+
     def position_graph(self,supplied_roots=None):
-        """Exact ordered graph with explicit predecessor edges, including loops.
+        """Exact graph with explicit predecessor edges, including loops.
 
         Canonical traversal renames nodes; it never unrolls or approximates a loop.
-        Different incoming-edge orders conservatively remain different graphs.
+        Commutative operands and paired phi inputs have a canonical order.
         """
         if supplied_roots is None:
             oid=next(i for i,f in self.outs.items() if f[1]=='!"SV_Position"')
@@ -201,10 +253,19 @@ class Shader:
                 contract=(f[1],f[2],f[3],indices[row],col)
                 rhs=rhs[:m.start()]+'INPUT'+repr(contract)+rhs[m.end():]
             rhs=self.named_material_load(rhs)
+            binary=re.fullmatch(r'(f(?:add|mul|sub) fast float) ([^,]+), (.+)',rhs)
+            if binary:
+                return binary[1]+' @VALUE, @VALUE',[('value',binary[2]),('value',binary[3])]
+            mad=re.fullmatch(r'(call float @dx.op.tertiary.f32\(i32 46), float ([^,]+), float ([^,]+), float ([^)]+)\)',rhs)
+            if mad:
+                return mad[1]+', float @VALUE, float @VALUE, float @VALUE)',[('value',mad[i]) for i in (2,3,4)]
             dependencies=var.findall(rhs)
             return var.sub('@VALUE',rhs),[('value',d) for d in dependencies]
         keys=[];ids={};nodes=[]
         def add(key):
+            if key[0]=='value':
+                value=self.normalized_value(key[1])
+                if value!=key[1]:return add(('value',value))
             if key not in ids:
                 ids[key]=len(keys);keys.append(key)
             return ids[key]
@@ -214,6 +275,30 @@ class Shader:
             if len(keys)>100000:raise ValueError('position graph exceeds offline bound')
             label,edges=describe(keys[index]);nodes.append([label,[add(e) for e in edges]])
             index+=1
+        # Order only semantically unordered operands/phi pairs. Fingerprints are
+        # sorting hints; final matching still compares the complete canonical graph.
+        labels=[json.dumps(n[0],separators=(',',':')).encode() for n in nodes]
+        colors=[zlib.crc32(x) for x in labels]
+        def ordered(label,edges,colors):
+            if isinstance(label,(tuple,list)) and label[0]=='PHI':
+                pairs=[edges[i:i+2] for i in range(0,len(edges),2)]
+                return [x for pair in sorted(pairs,key=lambda pair:tuple(colors[v] for v in pair)) for x in pair]
+            if label in ('fmul fast float @VALUE, @VALUE','fadd fast float @VALUE, @VALUE'):
+                return sorted(edges,key=lambda v:colors[v])
+            if isinstance(label,str) and label.startswith('call float @dx.op.tertiary.f32(i32 46,'):
+                return sorted(edges[:2],key=lambda v:colors[v])+edges[2:]
+            return edges
+        for _ in range(16):
+            colors=[zlib.crc32(labels[i]+b''.join(struct.pack('<I',colors[v]) for v in ordered(n[0],n[1],colors))) for i,n in enumerate(nodes)]
+        nodes=[[label,ordered(label,edges,colors)] for label,edges in nodes]
+        order=[];remap={}
+        def include(old):
+            if old not in remap:remap[old]=len(order);order.append(old)
+            return remap[old]
+        roots=[include(old) for old in roots];new_nodes=[];index=0
+        while index<len(order):
+            label,edges=nodes[order[index]];new_nodes.append([label,[include(v) for v in edges]]);index+=1
+        keys=[keys[old] for old in order];nodes=new_nodes
         self.graph_data=(roots,nodes)
         return hashlib.sha256(json.dumps([roots,nodes],separators=(',',':')).encode()).hexdigest(),keys
 
@@ -241,7 +326,7 @@ def main():
     groups=defaultdict(list);reject=Counter();natives=[]
     for r in native:
         try:
-            s=Shader(Path(r['disassembly']).read_text(),contracts.get(r['sha256']));key,_=s.position_graph()
+            s=Shader(Path(r['disassembly']).read_text(),contracts.get(r['sha256']));key,graph_keys=s.position_graph()
             scalar=defaultdict(list)
             for oid,roots in s.roots.items():
                 for col,value in roots.items():
@@ -257,19 +342,45 @@ def main():
             prior=[dict(components=components,dependencies=d)]
             n=dict(sha256=r['sha256'],previous=prior,techniques=r['techniques'])
             groups[key].append(n);natives.append(n)
+            # Specialize a native material amplitude to the target's literal one
+            # only when the entire resulting position graph matches exactly.
+            # No value is sampled or guessed from a frame/image.
+            values={item[1] for item in graph_keys if item[0]=='value' and item[1] in s.defs}
+            multiplied={v for value in values if s.defs[value].startswith('fmul fast float ')
+                        for v in var.findall(s.defs[value])}
+            eligible=[]
+            for value in values&multiplied:
+                m=re.fullmatch(r'extractvalue %dx.types.CBufRet.f32 (%\d+), [0-3]',s.defs[value])
+                if not m:continue
+                load=s.defs.get(m[1],'')
+                h=re.search(r'@dx.op.cbufferLoadLegacy.f32\(i32 59, %dx.types.Handle (%\d+), i32 \d+\)',load)
+                if h and s.handles.get(h[1],())[:1]==(2,) and s.handles[h[1]][2]==4:eligible.append(value)
+            if len(eligible)>8:continue
+            for value in sorted(eligible):
+                s.specializations={value:'1.000000e+00'};special_key,_=s.position_graph()
+                if special_key!=key:groups[special_key].append(dict(n,specializations=dict(s.specializations)))
         except (ValueError,KeyError,StopIteration,TypeError,AttributeError) as e:reject[str(e)]+=1
     matches=[];miss=[]
     for r in transparent:
         try:
             s=Shader((p/'all-transparent-vs'/(r['sha256']+'.ll')).read_text(),contracts.get(r['sha256']));key,_=s.position_graph()
             found=groups.get(key,[])
+            coverage=None
+            if not found:
+                try:
+                    geometry,coverage=s.uncollapsed_position();key,_=s.position_graph(geometry)
+                    found=groups.get(key,[])
+                except ValueError:pass
             if not found:raise ValueError('no exact native current-position match')
-            matches.append(dict(sha256=r['sha256'],techniques=r['techniques'],native_candidates=found))
+            matches.append(dict(sha256=r['sha256'],techniques=r['techniques'],native_candidates=found,
+                                coverage_guard=coverage))
         except (ValueError,KeyError,StopIteration,TypeError,AttributeError) as e:
             miss.append(dict(sha256=r['sha256'],reason=str(e),techniques=r['techniques']))
     summary=dict(native_total=len(native),native_current_compared=len(natives),native_rejected=dict(reject),
         transparent_total=len(transparent),transparent_matched=len(matches),unmatched=dict(Counter(x['reason'] for x in miss)),
-        method='Exact ordered position/control graph including loops, after semantic/range id remapping; no material-name matching',
+        native_templates=sum(map(len,groups.values())),
+        coverage_preserved_matches=sum(bool(r['coverage_guard']) for r in matches),
+        method='Exact position/control graph with named rows and validated unit-amplitude specialization; no material-name matching',
         live_bindings_verified=False,grafted=False)
     (p/'shared-native-motion-matches.json').write_text(json.dumps(dict(summary=summary,matches=matches,unmatched=miss),indent=2))
     print(json.dumps(summary,indent=2))

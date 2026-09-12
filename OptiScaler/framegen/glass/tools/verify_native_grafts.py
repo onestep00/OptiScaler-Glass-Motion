@@ -20,6 +20,10 @@ for r in index['shaders']:
     # the very same SSA value. Metadata changes only add the required usage.
     assert all(b.defs.get(v)==rhs for v,rhs in a.defs.items())
     assert all(b.roots[oid]==roots for oid,roots in a.roots.items())
+    assert all(b.blocks.get(block)==edges for block,edges in a.blocks.items())
+    if r.get('coverage_guard'):
+        _,guard=a.uncollapsed_position()
+        assert guard==r['coverage_guard']
     src=Shader(native)
     handles={v for v,h in src.handles.items() if h[0]==2 and h[2]==7}
     def relocate(m):
@@ -33,8 +37,8 @@ for r in index['shaders']:
             dest=candidates[0]
         return m[1]+m[2]+', i32 '+str(dest)+')'
     native=re.sub(r'(@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle )(%\d+), i32 (\d+)\)',relocate,native)
-    reference=Shader(native)
-    route=next(n for n in matches[r['sha256']]['native_candidates'] if n['sha256']==r['native_sha256'])
+    reference=Shader(native,specializations=r.get('specializations'))
+    route=next(n for n in matches[r['sha256']]['native_candidates'] if n['sha256']==r['native_sha256'] and n.get('specializations',{})==r.get('specializations',{}))
     components=route['previous'][0]['components']
     if r.get('graft_mode')=='native-control-flow':b.entry_block='graftBlock0'
     reference.position_graph([reference.roots[oid][col] for oid,col in components])
@@ -48,7 +52,8 @@ for r in index['shaders']:
         assert x[0]==y[0] and len(x[1])==len(y[1]), (r['sha256'],x[0],y[0])
         pending.extend(zip(x[1],y[1]))
         assert len(seen)<=100000,'expression comparison bound exceeded'
-    results.append(dict(sha256=r['sha256'],original_outputs_unchanged=True,native_previous_expression_identical=True))
+    results.append(dict(sha256=r['sha256'],original_outputs_unchanged=True,
+                        original_branches_unchanged=True,native_previous_expression_identical=True))
 result=dict(checked=len(results),passed=len(results),scope='Exact expression and original-output checks; not live material supply',results=results)
 (p/'native-grafted/verification.json').write_text(json.dumps(result,indent=2))
 print(json.dumps({k:result[k] for k in ('checked','passed','scope')}))

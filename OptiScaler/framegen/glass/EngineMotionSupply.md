@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: startup declaration consumption and original b7 GPU supply verified on a selected route; 69 native MV grafts validate offline including native control flow; all-route coverage and FG integration incomplete
+- Status: selected startup/b7 supply verified; 209 native MV grafts validate offline with original coverage preserved; 3,780 shared-stage shader footprints audited; all-route supply and FG incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -311,6 +311,63 @@ game binaries remain outside Git. Current results are
 `shader-modifier-contracts.json`, `shared-native-motion-matches.json`,
 `native-grafted/index.json`, and `native-grafted/verification.json` under the
 local inventory workspace.
+
+## Preserved coverage, specialization and shared slots, 2026-09-13
+
+The matcher now canonicalizes only commutative add/multiply operands and paired
+phi inputs. CRC32 graph colors are sorting hints; acceptance still compares the
+complete graph. Unit-amplitude specialization of a native material scalar is
+allowed only when the resulting complete current-position graph equals the
+target graph. This first raised the checked graft count from 69 to 86.
+
+An additional recognized target pattern chooses either its computed clip position
+or exactly `(0,0,0,1)` through four phis sharing the same terminal decision. The
+matcher compares the pre-collapse geometry. It does not remove the branch,
+change SV_Position, expand the original material coverage, or substitute a
+different visibility test. Nonliteral collapse and different component decisions
+are rejected. Previous visibility/history validity still requires runtime proof.
+
+The complete inventory now yields 215 candidates out of 675 transparent VS.
+Of these, 209 compile and pass original-definition, original-output,
+original-branch and native previous-expression checks. There are 168 DAG and
+41 native-control-flow grafts; 123 retain the target's terminal coverage collapse.
+Fifteen have an originally shorter b7 declaration, expanded to the known native
+448-byte supply requirement in the generated shader metadata. This does not
+establish the actual bound resource size for every game draw.
+
+Six matched candidates remain rejected because their native previous path requires
+t9 and b3 contracts absent from the target shader. The other 460 inventory entries
+remain unmatched or have multiple stores per position component. No missing
+binding is silently synthesized, and no image-derived motion is substituted.
+The 209 generated VS resolve to 83 provider metadata keys; none of their audited
+partner contexts already declares a conflicting MotionMatrix slot.
+
+`tools/plan_motion_slots.py` joins every stage of every technique sharing any
+target provider key, including nontransparent aliases. For the 675 target VS,
+151 metadata keys affect 2,071 shader aliases and 10,689 technique combinations.
+The tool extracted and disassembled 3,780 unique VS/PS binaries. No unresolved or
+dynamic b7 load occurred, and none read b7 rows 24..27. Native MotionMatrix writes
+four rows, so reserving only the three rows read by the VS is insufficient.
+The cache, compiler and analysis source identities accompany the saved results;
+cached footprints avoid repeated disassembly when those inputs are unchanged.
+
+Read-free storage is not full producer admission. The provider name table mixes
+constant rows with resource binding indices. Static native inspection confirms
+that `MatMod_GarmentMorphOffsetScales` feeds the resource-binding helper while
+`MatMod_GarmentMorphOffsetScalesIsBound` writes one b7 row; the same separation
+applies to `MatMod_CullObjectsCB` versus `MatMod_DismParams`. The conservative
+planner does not yet classify every writer, so its 103 tail candidates are not
+103 approved declarations. Actual writer spans, grouped proxy capabilities,
+previous deformation inputs and upload/draw ownership still gate expansion.
+
+Local evidence in `work/glass-native-material-v1/`: `motion-slot-plan.json`,
+`motion-slot-audit/footprints.json`, `modifier-writer-audit/constructors.json`,
+`native-grafted/index.json`, `native-grafted/verification.json` and
+`native-grafted/admission-checks.json`. The latter checks reject malformed
+coverage decisions, dynamic/out-of-range b7 accesses and unresolved handles.
+The native constructor/supplier map covers the original 32 modifier categories;
+it is static inspection, not runtime coverage. Process 43504 was still responsive
+at this checkpoint. No new DLL or full-screen FG input was deployed in this step.
 
 ## Framework investigation
 
