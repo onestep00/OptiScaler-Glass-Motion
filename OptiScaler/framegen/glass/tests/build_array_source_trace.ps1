@@ -13,7 +13,7 @@ function Run-Checked([string]$Program, [string[]]$Arguments) {
 foreach ($name in @('DiagnosticCallerContext','ArraySourceTrace')) {
     Run-Checked 'ml64.exe' @('/nologo','/c',"/Fo$destination/${name}Asm.obj",(Join-Path $PSScriptRoot "$name.asm"))
 }
-foreach ($name in @('DiagnosticCallerContext','DiagnosticArraySource','ArraySourceTrace','ArrayWrapper')) {
+foreach ($name in @('DiagnosticCallerContext','DiagnosticArraySource','ArraySourceTrace','ArrayWrapper','SourceIndexMap')) {
     $objects = @()
     if ($name -in @('DiagnosticCallerContext','ArraySourceTrace')) { $objects += "$destination/${name}Asm.obj" }
     Run-Checked 'cl.exe' ($common + @((Join-Path $PSScriptRoot "$name.cpp")) + $objects +
@@ -23,4 +23,4 @@ foreach ($name in @('DiagnosticCallerContext','DiagnosticArraySource','ArraySour
 Run-Checked 'cl.exe' ($common + @('/LD','/DGLASS_ARRAY_SOURCE_TRACE',
     (Join-Path $module 'ExperimentInstanceUpdates.cpp'),"/Fo$destination/ArraySourceTraceDll.obj",
     "/Fe$destination/ArraySourceTrace.dll",'/link',$detours,"/IMPLIB:$destination/ArraySourceTraceDll.lib"))
-Write-Output 'PASS source_trace_build=1 independent_tests=4 game_injection=0'
+Write-Output 'PASS source_trace_build=1 independent_tests=5 game_injection=0'

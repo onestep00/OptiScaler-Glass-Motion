@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [tests/Timeline.md](tests/Timeline.md): Moving diagnostic saved 769 consecutive frames. All array/global object records lack owner identity; capacity and missing pipelines prevent full capture. No object MV or FG change.
+
 - [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Bounded live caller-context capture resolves shared/destructible source ranges, with 2,686 source-element occurrences. Temporal ownership and actual MV/FG remain incomplete; diagnostic recording stopped.
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Original source-slot lookup now composes array history keys. Node-level ID lookup is documented separately from element identity; native lifetime/update supply remains incomplete.

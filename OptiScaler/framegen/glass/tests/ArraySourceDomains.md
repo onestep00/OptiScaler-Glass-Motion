@@ -63,6 +63,21 @@ previous motion on the basis of its existence or this update path.
 
 ## Implementation consequence
 
+`GeometrySourceIndexMap` now composes the renderer's packed selection with a
+linear or bitset-compacted original source domain. The default map occupies
+524 bytes; lookup does not scan the mask, allocate storage or copy transforms.
+The caller constructs it when the applied source layout changes. It does not
+discover update application or owner lifetime. The same-count replacement test
+also passes the translated IDs through the existing source slots and history
+allocator: surviving elements keep their history while a new member receives
+separate storage. The diagnostic decoder uses this map for mask/count validation.
+`build_array_source_trace.ps1` now runs five tests, including `SourceIndexMap`.
+This source change is not installed in the pinned game wrapper observer.
+
+The subsequent moving capture and the still-missing array-owner bridge are
+recorded in [Timeline.md](Timeline.md). Source addresses are reused with different
+source tuples; recorded source metadata alone is not temporal identity.
+
 Retain source identity metadata at the upstream update/creation event, before
 enqueue and compaction. Compose it with the later render selection once in its
 proven frame/view domain. Position changes alone must not reset a surviving

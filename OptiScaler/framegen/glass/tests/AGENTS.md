@@ -19,6 +19,8 @@
 
 ## Document index
 
+- [Timeline.md](Timeline.md): Bounded per-draw recorder, 8,000 concurrent-event checks and a 769-frame moving capture. Parent array provenance is zero in the current bridge; no GPU-input replay or MV/FG proof.
+
 - [ArraySourceDomains.md](ArraySourceDomains.md): Caller-context diagnostics captured 697 game updates and resolved 2,686 source-element occurrences. Four independent tests cover real unwind/callback and scalar decoding. Cross-frame lifetime, foliage/particle identity and MV/FG remain incomplete.
 
 - [SourceSlots.md](SourceSlots.md): Source-slot to history lookup checks original index, owner, view and frame. Node IDs identify the parent setup; native array generations and game connection remain incomplete.

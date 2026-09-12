@@ -1,6 +1,7 @@
 #pragma once
 #include "DiagnosticCallerContext.h"
 #include "GeometrySourceSlots.h"
+#include "GeometrySourceIndexMap.h"
 #include <array>
 
 namespace GlassFg
@@ -79,10 +80,9 @@ template<class Read> DiagnosticArraySource ReadDiagnosticArraySource(
     }
     else if (result.kind == 2 && result.count <= 256)
     {
-        unsigned selected = 0;
-        for (unsigned i = 0; i < result.count; ++i)
-            selected += unsigned((result.mask[i / 64] >> (i % 64)) & 1);
-        if (selected == packedCount) result.flags |= 16;
+        GeometrySourceIndexMap<> mapping;
+        if (mapping.compact(result.first, result.count, result.mask) &&
+            mapping.packedCount() == packedCount) result.flags |= 16;
     }
     else if (result.kind == 4 && packedCount == result.count) result.flags |= 16;
     // Kind 3: placeholder records are not certified baked-element identities.
