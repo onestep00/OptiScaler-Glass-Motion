@@ -72,6 +72,10 @@ struct NativeClipInputs
     // Diagnostic only: reserve capture bytes 0..31 and start pixels at >=1.
     // Adds an invocation counter at byte 16 before object/motion rejection.
     bool countInvocations = false;
+    // Explicit material capture: preserve supported blending/discard and derive
+    // transmission from the original blend equation. Requires read-only depth.
+    // The caller still proves the supplied clip inputs are actual current/previous positions.
+    bool material = false;
 };
 // Keep an explicitly identified native float4 render target as SV_Target0.
 // Preserves native inputs/calculation/discard; does not identify motion semantics,

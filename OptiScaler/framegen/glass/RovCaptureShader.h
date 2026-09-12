@@ -21,7 +21,13 @@ inline std::string CaptureOriginalColor(std::string instrumentation, bool mapped
         if (at != std::string::npos)
             instrumentation.erase(at, discard.size());
     }
-    instrumentation.erase(instrumentation.find("  call void @dx.op.storeOutput.f32"));
+    if (!coverageOnly)
+    {
+        const auto firstOutput = instrumentation.find("  call void @dx.op.storeOutput.f32");
+        if (firstOutput == std::string::npos)
+            throw std::runtime_error("Missing rewritten material output");
+        instrumentation.erase(firstOutput);
+    }
     if (mapped && !auditCoverage)
     {
         const auto mapInput = instrumentation.find("  %glass.mapindex =");

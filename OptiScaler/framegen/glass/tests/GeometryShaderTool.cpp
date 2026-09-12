@@ -87,9 +87,11 @@ int wmain(int argc, wchar_t** argv)
             check(compiler->Disassemble(input.Get(), &disassembly));
             output = disassembly;
         }
-        else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"native-motion")
+        else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material" || mode == L"capture" ||
+                 mode == L"coverage" || mode == L"native-motion")
         {
-            if (mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"native-motion")
+            if (mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"coverage" ||
+                mode == L"native-motion")
             {
                 ComPtr<IDxcCompiler> compiler;
                 check(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
@@ -98,7 +100,7 @@ int wmain(int argc, wchar_t** argv)
                 const auto assembly =
                     std::string_view((const char*) disassembly->GetBufferPointer(), disassembly->GetBufferSize());
                 unsigned historyRegister = UINT32_MAX;
-                if (argc == 7 && (mode == L"material" || mode == L"capture"))
+                if (argc == 7 && (mode == L"material" || mode == L"capture" || mode == L"coverage"))
                 {
                     ComPtr<IDxcBlobEncoding> vertexBytes, vertexText;
                     check(library->CreateBlobFromFile(argv[6], &codepage, &vertexBytes));
@@ -120,7 +122,8 @@ int wmain(int argc, wchar_t** argv)
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb
                                                                : GlassFg::MaterialDestination::OneMinusAlpha,
                               mode == L"capture" ? GlassFg::MaterialMotionTarget::OriginalColorAndCapture
-                                                 : GlassFg::MaterialMotionTarget::SeparateTarget,
+                              : mode == L"coverage" ? GlassFg::MaterialMotionTarget::OriginalColorAndCoverage
+                                                   : GlassFg::MaterialMotionTarget::SeparateTarget,
                               historyRegister, layout);
                 if (!patched)
                     throw std::runtime_error(patched.error);

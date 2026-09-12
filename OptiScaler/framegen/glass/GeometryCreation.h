@@ -8,6 +8,7 @@ struct GeometryCreationStats
 {
     bool active = false;
     std::uint64_t roots = 0, graphics = 0, streams = 0;
+    std::uint64_t streamGraphics = 0, streamNonGraphics = 0, streamRejected = 0;
     GeometryCacheStats cache;
 };
 

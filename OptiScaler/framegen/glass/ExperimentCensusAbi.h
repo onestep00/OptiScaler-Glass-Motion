@@ -13,7 +13,8 @@ enum GlassExperimentRasterFlags
 };
 // CPU-only observation before the original API call. No GPU work/retention is
 // permitted. Sequence is CPU observation order, not submission/execution order.
-// Frame zero means no engine frame was established. Unknown recording stays zero.
+// Frame is the validated engine draw tick for Cyberpunk, including non-mesh
+// draws. Zero means no engine frame was established. Unknown recording stays zero.
 struct GlassExperimentCensusInput
 {
     uint32_t size, operation, rasterFlags, reserved;

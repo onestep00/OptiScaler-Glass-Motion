@@ -6,6 +6,10 @@ namespace GlassFg
 {
 // Startup-only acquisition of audited renderer batch/append/flush paths.
 bool InitializeCyberpunkDraws(HMODULE executable) noexcept;
+// Current engine render tick resolved through the validated relocatable layout.
+// This labels non-mesh draws recorded in the same engine frame. It is still a
+// CPU recording identity, not proof of GPU submission or FG consumption.
+std::uint32_t ReadCyberpunkDrawFrame() noexcept;
 // Called only from an actual public DrawIndexedInstanced observer. The source
 // return address must be the audited engine call site. The borrowed result is
 // valid only inside this callback; a GPU owner must copy admitted identities.

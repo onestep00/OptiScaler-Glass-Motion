@@ -12,6 +12,8 @@
 
 ## Document index
 
+- [NativeMaterialMotion.md](NativeMaterialMotion.md): Explicit clip inputs now support validated transparent blending/discard with read-only depth; independent GPU checks pass. Selected live pixel MV evidence remains diagnostic, not full-object/FG integration.
+
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Live original skinned input Z matches preceding X in three consecutive pairs; raw-word recorder is tested. Previous-position evaluation and dense MV/FG still absent.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Optional submission capability forwards actual queue/list/recording order to retained diagnostic modules. Independent GPU and legacy tests pass; not deployed, history/MV/FG incomplete.
@@ -25,6 +27,8 @@
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Bounded two-slot shape sampling yielded two exact consecutive original-VS pairs. No continuous history, dense boundary MV or FG substitution.
 
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Bounded observation and failed-material to vertex-only recovery pass independent checks without duplicate shader storage. Missing live mesh-chunk pipeline, host deployment and FG remain incomplete.
+
+- [tests/GeometryObservation.md](tests/GeometryObservation.md): Public pipeline-state streams are reconstructed through the Microsoft parser; real graphics, compute, duplicate and view-instancing cases pass independent checks. Fresh game census and FG remain incomplete.
 
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped slots no longer all fill from the first chunk. Both chunks captured in 32 live frames; differing proxy identities remain separate. Complete outlines and temporal/FG remain incomplete.
 

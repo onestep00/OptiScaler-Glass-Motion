@@ -1,6 +1,7 @@
 #include "GeometryTestDevice.h"
 #include "../GeometryPipelineCache.h"
 #include "../GeometryCreation.h"
+#include "../GeometryPipelineStream.h"
 #include "../GeometryCommands.h"
 #include "../GeometryDrawCapture.h"
 #include "../GeometryCoverageRecorder.h"
@@ -11,6 +12,7 @@
 extern bool geometryFixturePacket;
 extern bool geometryFixtureMissingIdentity;
 extern std::uint32_t geometryFixtureFrame;
+extern std::uint32_t geometryFixtureCurrentFrame;
 struct CaptureOwner final : GlassFg::GeometryDrawCaptureOwner
 {
     GlassFg::GeometryPreparedDraw prepared;
@@ -80,15 +82,48 @@ observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D1
     check(device->QueryInterface(IID_PPV_ARGS(&device2)));
     CD3DX12_PIPELINE_STATE_STREAM state(extra);
     D3D12_PIPELINE_STATE_STREAM_DESC stream { sizeof(state), &state };
+    const auto direct = GlassFg::ParseGeometryPipelineStream(stream);
+    require(direct.kind == GlassFg::GeometryPipelineStreamKind::Graphics &&
+                direct.graphics.SampleMask == 0x7fffffff,
+            "Public graphics stream parser changed state");
+    D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc {};
+    computeDesc.pRootSignature = desc.pRootSignature;
+    computeDesc.CS = desc.VS;
+    CD3DX12_PIPELINE_STATE_STREAM computeState(computeDesc);
+    D3D12_PIPELINE_STATE_STREAM_DESC computeStream { sizeof(computeState), &computeState };
+    require(GlassFg::ParseGeometryPipelineStream(computeStream).kind ==
+                GlassFg::GeometryPipelineStreamKind::NonGraphics,
+            "Compute stream was labeled graphics");
+    struct DuplicateMasks
+    {
+        CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK first { 1 };
+        CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK second { 2 };
+    } duplicateMasks;
+    D3D12_PIPELINE_STATE_STREAM_DESC duplicateStream { sizeof(duplicateMasks), &duplicateMasks };
+    require(GlassFg::ParseGeometryPipelineStream(duplicateStream).kind ==
+                GlassFg::GeometryPipelineStreamKind::Invalid,
+            "Duplicate stream subobjects were admitted");
+    CD3DX12_PIPELINE_STATE_STREAM1 viewState(extra);
+    D3D12_VIEW_INSTANCE_LOCATION viewLocation {};
+    D3D12_VIEW_INSTANCING_DESC viewDescription { 1, &viewLocation, D3D12_VIEW_INSTANCING_FLAG_NONE };
+    viewState.ViewInstancingDesc = CD3DX12_VIEW_INSTANCING_DESC(viewDescription);
+    D3D12_PIPELINE_STATE_STREAM_DESC viewStream { sizeof(viewState), &viewState };
+    require(GlassFg::ParseGeometryPipelineStream(viewStream).kind ==
+                GlassFg::GeometryPipelineStreamKind::Unsupported,
+            "Non-default view instancing lost its semantic state");
     ComPtr<ID3D12PipelineState> streamPso, excessPso, invalidPso;
     check(device2->CreatePipelineState(&stream, IID_PPV_ARGS(&streamPso)));
+    const auto streamObserved = GlassFg::FindObservedGeometryPipeline(streamPso.Get());
+    require(streamObserved && streamObserved->description.SampleMask == 0x7fffffff &&
+                streamObserved->description.pRootSignature == desc.pRootSignature,
+            "Public graphics pipeline stream was not reconstructed");
     extra.SampleMask = 1;
     check(device->CreateGraphicsPipelineState(&extra, IID_PPV_ARGS(&excessPso)));
     extra.NumRenderTargets = 9;
     require(FAILED(device->CreateGraphicsPipelineState(&extra, IID_PPV_ARGS(&invalidPso))) && !invalidPso,
             "Invalid original PSO creation result was changed");
     require(!GlassFg::FindGeometryPipeline(streamPso.Get()) && !GlassFg::FindGeometryPipeline(excessPso.Get()),
-            "Stream or over-budget PSO unexpectedly admitted");
+            "Over-budget stream or legacy PSO unexpectedly admitted");
     const auto deadline = GetTickCount64() + 10000;
     while (GlassFg::GetGeometryCreationStats().cache.pending && GetTickCount64() < deadline)
         Sleep(1);
@@ -97,7 +132,9 @@ observedPipeline(ID3D12Device* device, ID3D12PipelineState* original, const D3D1
     if (!lease)
         throw std::runtime_error(stats.cache.lastError.empty() ? "Creation observer did not build pipeline"
                                                                : stats.cache.lastError);
-    require(stats.active && stats.roots == 1 && stats.graphics == 2 && stats.streams == 1 && stats.cache.roots == 1 &&
+    require(stats.active && stats.roots == 1 && stats.graphics == 2 && stats.streams == 1 &&
+                stats.streamGraphics == 1 && !stats.streamNonGraphics && !stats.streamRejected &&
+                stats.cache.roots == 1 &&
                 stats.cache.pipelines == 1 && stats.cache.ready == 1 && !stats.cache.rejected && !stats.cache.pending,
             "Creation observer missed or recursively captured a call");
     if (!keepActive)
@@ -470,6 +507,7 @@ int wmain(int argc, wchar_t** argv)
             if (recorder)
             {
                 geometryFixtureFrame = frame;
+                geometryFixtureCurrentFrame = frame;
                 geometryFixtureMissingIdentity = frame >= recorderSplitFrame;
             }
             UINT order[10] {};

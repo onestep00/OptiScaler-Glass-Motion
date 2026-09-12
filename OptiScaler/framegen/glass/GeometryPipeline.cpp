@@ -299,15 +299,17 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         nativeBlend = nativeBlend && !rt.BlendEnable && !rt.LogicOpEnable;
     }
     const bool depthCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit && nativeBlend;
+    const bool nativeOpaque = nativeInputs && !nativeInputs->material;
+    const bool material = !vertexOnly && !nativeOpaque && !depthCoverage;
     if (depthCoverage) target = MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
     if (!device || !root.extended || !root.original || root.original.Get() != original.pRootSignature ||
         !original.NumRenderTargets || original.NumRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
         original.SampleDesc.Count != 1 || original.GS.BytecodeLength || original.HS.BytecodeLength ||
         original.DS.BytecodeLength || original.StreamOutput.NumEntries || original.StreamOutput.NumStrides ||
-        (!vertexOnly && !nativeInputs && !depthCoverage && !readOnly(original.DepthStencilState)) ||
+        (material && !readOnly(original.DepthStencilState)) ||
         original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
-        (nativeInputs && !nativeBlend) ||
-        (!vertexOnly && !nativeInputs && !depthCoverage && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend)))
+        (nativeOpaque && !nativeBlend) ||
+        (material && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend)))
         return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
     // Vertex capture replaces the original draw once. Its unmodified PS and
     // depth/stencil/blend state retain native writes. Unblended coverage audit
@@ -318,10 +320,10 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     if (!vertexOnly && (FAILED(hr) || !options.ROVsSupported))
         return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
     const auto& blend = original.BlendState.RenderTarget[0];
-    const auto source = depthCoverage ? MaterialSource::One : nativeInputs ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
+    const auto source = depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
                         : blend.SrcBlend == D3D12_BLEND_ONE ? MaterialSource::One
                                                             : MaterialSource::Alpha;
-    const auto destination = (nativeInputs || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
+    const auto destination = (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
                              : blend.DestBlend == D3D12_BLEND_ONE           ? MaterialDestination::One
                              : blend.DestBlend == D3D12_BLEND_SRC_ALPHA     ? MaterialDestination::Alpha
                              : blend.DestBlend == D3D12_BLEND_INV_SRC_ALPHA ? MaterialDestination::OneMinusAlpha

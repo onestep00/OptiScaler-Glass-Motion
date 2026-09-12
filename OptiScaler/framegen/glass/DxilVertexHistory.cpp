@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -129,6 +130,86 @@ std::string single(const std::string& source, const std::regex& pattern, size_t 
     const auto value = (*it)[group].str();
     need(++it == end, reason);
     return value;
+}
+std::array<std::string, 4> outputValuesAtReturn(std::string& body, unsigned output, const char* reason)
+{
+    struct Store
+    {
+        std::string block, value;
+    };
+    std::array<std::vector<Store>, 4> stores;
+    const std::regex label(R"(^; <label>:(\d+).*(?:; preds = (.*))$)"),
+                     ordinaryLabel(R"(^(\d+):.*(?:; preds = (.*))$)"),
+                     predecessor(R"(%(\d+))"),
+                     outputStore("call void @dx.op.storeOutput.f32\\(i32 5, i32 " + std::to_string(output) +
+                                 R"(, i32 0, i8 ([0-3]), float ([^\)]+)\))");
+    std::string block = "0", mergeBlock, mergePredecessors;
+    size_t mergeInsert = std::string::npos;
+    bool inEntry = false;
+    std::istringstream lines(body);
+    std::string line;
+    size_t offset = 0;
+    while (std::getline(lines, line))
+    {
+        const auto lineBytes = line.size() + 1;
+        if (line.starts_with("define void "))
+        {
+            inEntry = true;
+            block = "0";
+        }
+        if (!inEntry)
+        {
+            offset += lineBytes;
+            continue;
+        }
+        std::smatch match;
+        if (std::regex_match(line, match, label) || std::regex_match(line, match, ordinaryLabel))
+        {
+            block = match[1].str();
+            mergePredecessors = match[2].matched ? match[2].str() : std::string {};
+            mergeInsert = offset + lineBytes;
+        }
+        if (std::regex_search(line, match, outputStore))
+            stores[unsigned(match[1].str()[0] - '0')].push_back({ block, trim(match[2].str()) });
+        if (line == "  ret void")
+            mergeBlock = block;
+        if (line == "}")
+            inEntry = false;
+        offset += lineBytes;
+    }
+    std::array<std::string, 4> values;
+    if (std::all_of(stores.begin(), stores.end(), [](const auto& component) { return component.size() == 1; }))
+    {
+        for (unsigned component = 0; component < values.size(); ++component)
+            values[component] = stores[component][0].value;
+        return values;
+    }
+    need(!mergeBlock.empty() && mergeInsert != std::string::npos && !mergePredecessors.empty(), reason);
+    std::set<std::string> predecessors;
+    for (std::sregex_iterator it(mergePredecessors.begin(), mergePredecessors.end(), predecessor), end; it != end; ++it)
+        predecessors.insert((*it)[1].str());
+    need(!predecessors.empty(), reason);
+    std::string phis;
+    for (unsigned component = 0; component < values.size(); ++component)
+    {
+        std::map<std::string, std::string> incoming;
+        for (const auto& store : stores[component])
+            need(store.block != mergeBlock && incoming.emplace(store.block, store.value).second, reason);
+        need(incoming.size() == predecessors.size(), reason);
+        for (const auto& predecessorBlock : predecessors)
+            need(incoming.contains(predecessorBlock), reason);
+        values[component] = "%glass.output" + std::to_string(output) + "." + std::to_string(component);
+        phis += "  " + values[component] + " = phi float ";
+        bool first = true;
+        for (const auto& [predecessorBlock, value] : incoming)
+        {
+            phis += (first ? "" : ", ") + std::string("[ ") + value + ", %" + predecessorBlock + " ]";
+            first = false;
+        }
+        phis += "\n";
+    }
+    body.insert(mergeInsert, phis);
+    return values;
 }
 } // namespace
 
@@ -277,12 +358,7 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
             }
         }
         need(position != UINT32_MAX, "No clip position output");
-        std::array<std::string, 4> values;
-        for (unsigned c = 0; c < 4; ++c)
-            values[c] = single(source,
-                               std::regex("call void @dx.op.storeOutput.f32\\(i32 5, i32 " + std::to_string(position) +
-                                          ", i32 0, i8 " + std::to_string(c) + ", float ([^\\)]+)\\)"),
-                               1, "Position must have one scalar store per component");
+        auto values = outputValuesAtReturn(body, position, "Position stores do not converge at the return block");
         auto recorded = values;
         std::array<std::string, 4> nativePrevious;
         if (clipPair)
@@ -679,8 +755,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         need(entry.size() == 5, "Unsupported entry point");
         auto signatures = split(metadata.get(entry[2]));
         need(signatures.size() == 3 && signatures[2] == "null", "Unsupported pixel signature");
-        auto inputs = split(metadata.get(signatures[0])), outputs = split(metadata.get(signatures[1]));
-        if (nativeInputs || depthCoverage)
+        auto inputs = split(metadata.get(signatures[0]));
+        auto outputs = signatures[1] == "null" ? Parts {} : split(metadata.get(signatures[1]));
+        if ((nativeInputs && !nativeInputs->material) || depthCoverage)
         {
             need(source.find("@dx.op.discard") == std::string::npos,
                  "Native depth-writing capture rejects discard");
@@ -908,7 +985,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << "  %glass.j" << c << " = extractvalue %dx.types.CBufRet.f32 %glass.c1, " << c << "\n"
                  << "  %glass.mv" << c << " = fadd float %glass.raw" << c << ", %glass.j" << c << "\n";
         }
-        for (unsigned c = 0; c < 3; ++c)
+        if (coverageOnly)
+            code << "  %glass.hasall = icmp eq i32 0, 0\n";
+        for (unsigned c = 0; c < (coverageOnly ? 0u : 3u); ++c)
         {
             std::string transmission;
             switch (destinationFactor)
@@ -947,7 +1026,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << "  %glass.thas" << c << " = fcmp one float " << transmission << ", 1.000000e+00\n"
                  << "  %glass.has" << c << " = or i1 %glass.fhas" << c << ", %glass.thas" << c << "\n";
         }
-        code << R"(  %glass.has01 = or i1 %glass.has0, %glass.has1
+        if (!coverageOnly)
+            code << R"(  %glass.has01 = or i1 %glass.has0, %glass.has1
   %glass.hasall = or i1 %glass.has01, %glass.has2
   %glass.empty = xor i1 %glass.hasall, true
   call void @dx.op.discard(i32 82, i1 %glass.empty)
@@ -1009,6 +1089,12 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                "void @dx.op.discard(i32, i1)", "i1 @dx.op.isSpecialFloat.f32(i32, float)" })
         {
             const auto text = std::string("declare ") + declaration;
+            const std::string_view signature(declaration);
+            const auto nameStart = signature.find('@'), nameEnd = signature.find('(', nameStart);
+            need(nameStart != std::string_view::npos && nameEnd != std::string_view::npos, "Malformed declaration");
+            const auto call = signature.substr(nameStart, nameEnd - nameStart + 1);
+            if (body.find(call) == std::string::npos)
+                continue;
             if (retainColor && std::string_view(declaration) == "void @dx.op.discard(i32, i1)" &&
                 body.find("@dx.op.discard(") == std::string::npos)
                 continue;

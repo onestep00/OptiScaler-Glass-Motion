@@ -158,12 +158,13 @@ class ModuleRecorderCheck
                 if (value(1) == GlassCensusIndexed)
                 {
                     ++indexed;
-                    if (!value(11)) { ++missing; require(!value(2), "Missing packet invented frame"); }
+                    if (!value(11)) { ++missing; require(value(2) >= 1 && value(2) <= 8, "Missing packet lost engine frame"); }
                     else require(value(2) >= 1 && value(2) <= 8, "Mapped census frame absent");
                 }
                 else
                 {
-                    require(!value(2) && !value(11), "Non-indexed observation invented engine identity");
+                    require(value(2) >= 1 && value(2) <= 8 && !value(11),
+                            "Non-indexed observation lost engine frame or invented identity");
                     if (value(1) == GlassCensusInstanced) { ++direct; require(!value(12) && value(13) == 1, "Raw vertex args lost"); }
                     else
                     {

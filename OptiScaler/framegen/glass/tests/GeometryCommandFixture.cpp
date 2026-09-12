@@ -5,8 +5,10 @@
 bool geometryFixturePacket = false;
 bool geometryFixtureMissingIdentity = false;
 std::uint32_t geometryFixtureFrame = 42;
+std::uint32_t geometryFixtureCurrentFrame = 0;
 namespace GlassFg
 {
+std::uint32_t ReadCyberpunkDrawFrame() noexcept { return geometryFixtureCurrentFrame; }
 // This independent device has no engine mesh allocation. Do not manufacture
 // production mesh provenance from the fixture's synthetic object IDs.
 CyberpunkMeshShape ReadCyberpunkMeshShape(const GeometryDrawView&) noexcept { return {}; }

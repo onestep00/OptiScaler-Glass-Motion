@@ -243,6 +243,7 @@ void censusDraw(const ExperimentCensusObserver& observer, Command* command, Reco
                 GlassExperimentCensusInput& input, const GeometryDrawView& draw,
                 const GeometryIndexedArguments& args, const ExperimentPipelineLease& pipeline) noexcept
 {
+    const auto frame = draw.frame ? draw.frame : ReadCyberpunkDrawFrame();
     if (record)
         input.draw = MakeExperimentDrawInput(command, record->epoch, draw, args, record->raster, record->bindings, pipeline);
     else
@@ -252,10 +253,10 @@ void censusDraw(const ExperimentCensusObserver& observer, Command* command, Reco
         const GeometryRasterState raster {};
         const GraphicsRootBindings bindings {};
         input.draw = MakeExperimentDrawInput(command, 0, draw, args, raster, bindings, {});
-        ObserveExperimentCensus(observer, input, draw.frame, nullptr);
+        ObserveExperimentCensus(observer, input, frame, nullptr);
         return;
     }
-    ObserveExperimentCensus(observer, input, draw.frame, record ? &record->raster : nullptr);
+    ObserveExperimentCensus(observer, input, frame, record ? &record->raster : nullptr);
 }
 MethodType<&Command::DrawInstanced> originalInstanced = nullptr;
 void WINAPI instanced(Command* command, UINT vertices, UINT instances, UINT startVertex, UINT startInstance)

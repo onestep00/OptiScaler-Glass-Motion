@@ -3,12 +3,13 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 3 || (argc == 4 && wcscmp(argv[3], L"--input-words") == 0),
-                "Expected fixture directory and dxcompiler.dll [--input-words]");
-        const bool inputWords = argc == 4;
+        require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--input-words") == 0 || wcscmp(argv[3], L"--material") == 0)),
+                "Expected fixture directory and dxcompiler.dll [--input-words|--material]");
+        const bool inputWords = argc == 4 && wcscmp(argv[3], L"--input-words") == 0;
+        const bool material = argc == 4 && wcscmp(argv[3], L"--material") == 0;
         Device g;
         const auto vs = read(std::filesystem::path(argv[1]) / (inputWords ? "input-words-vs.dxil" : "native-pair-vs.dxil"));
-        const auto ps = read(std::filesystem::path(argv[1]) / "native-pair-ps.dxil");
+        const auto ps = read(std::filesystem::path(argv[1]) / (material ? "native-material-ps.dxil" : "native-pair-ps.dxil"));
         D3D12_ROOT_SIGNATURE_DESC desc {};
         desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ComPtr<ID3DBlob> bytes, errors;
@@ -28,6 +29,11 @@ int wmain(int argc, wchar_t** argv)
         pd.BlendState.RenderTarget[0].SrcBlend = pd.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
         pd.BlendState.RenderTarget[0].DestBlend = pd.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
         pd.BlendState.RenderTarget[0].BlendOp = pd.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        if (material) {
+            pd.BlendState.RenderTarget[0].BlendEnable = TRUE;
+            pd.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            pd.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        }
         pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
         GlassFg::GeometryCompiler compiler {std::filesystem::path(argv[2])};
         const GlassFg::VertexClipPair pair {1,2};
@@ -102,7 +108,7 @@ int wmain(int argc, wchar_t** argv)
             puts("INPUT_WORDS_GPU_OK unused_uint_components=6 raw_bits_exact=1 current_position_and_tags=1 guards=1 invalid_inputs_rejected=1");
             return 0;
         }
-        const GlassFg::NativeClipInputs inputs {1,2};
+        const GlassFg::NativeClipInputs inputs {1,2,false,material};
         ComPtr<ID3D12PipelineState> motionPipeline;
         if (FAILED(compiler.createNativeMotionCapture(g.d.Get(), root, pd, motionPipeline, error, inputs)))
             throw std::runtime_error("Native pixel compiler: "+error);
@@ -150,13 +156,18 @@ int wmain(int argc, wchar_t** argv)
             const double difference=std::max(std::abs(samples[i].motion[0]-expectedX),std::abs(samples[i].motion[1]-expectedY));
             maxError=std::max(maxError,difference);
             require(difference<1.e-6,"Native pixel perspective/jitter mismatch");
+            if (material) {
+                require(!(y>8 && y<10), "Discarded material pixel captured");
+                for (float transmission : samples[i].transmission)
+                    require(std::abs(transmission-float(1-x/32))<1.e-6f,"Original material transmission changed");
+            }
             ++count;
         }
         require(count>0 && count<256,"Native pixel coverage empty or unbounded");
         pixelBack->Unmap(0,&noWrite);
         printf("NATIVE_PIXEL_GPU_OK pixels=%u max_normalized_error=%.9g native_previous_without_history=1\n",count,maxError);
         pd.DepthStencilState.DepthEnable=TRUE;
-        pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
+        pd.DepthStencilState.DepthWriteMask=material ? D3D12_DEPTH_WRITE_MASK_ZERO : D3D12_DEPTH_WRITE_MASK_ALL;
         pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS;
         pd.DSVFormat=DXGI_FORMAT_D32_FLOAT;
 #ifdef GLASS_TEST_DEPTH_COVERAGE
@@ -177,7 +188,13 @@ int wmain(int argc, wchar_t** argv)
         const GlassFg::GeometryInstance instance {0,0,0,1,0,0,16,16,1,16,257,0};
         upload(instanceMap.Get(),&instance,sizeof(instance));
         const GlassFg::InstanceHistoryConstants mappedConstants {0,1,0,0,1,0,11,0};
-        const GlassFg::NativeClipInputs auditedInputs {1,2,true};
+        const GlassFg::NativeClipInputs auditedInputs {1,2,true,material};
+        if (material) {
+            auto invalid=pd; invalid.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
+            ComPtr<ID3D12PipelineState> rejected;
+            require(FAILED(compiler.createNativeMotionCapture(g.d.Get(),mappedRoot,invalid,rejected,error,auditedInputs)),
+                    "Depth-writing material capture admitted");
+        }
         if(FAILED(compiler.createNativeMotionCapture(g.d.Get(),mappedRoot,pd,depthCaptured,error,auditedInputs)))
             throw std::runtime_error(error);
 #ifdef GLASS_TEST_DEPTH_COVERAGE
@@ -225,7 +242,7 @@ int wmain(int argc, wchar_t** argv)
 #endif
         for(unsigned variant=0;variant<2;++variant) {
             g.begin();
-            const float clearColor[4]{}; const D3D12_RECT occluder{0,0,8,16};
+            const float clearColor[4]{.13f,.27f,.39f,0}; const D3D12_RECT occluder{0,0,8,16};
             g.c->ClearRenderTargetView(rtv,clearColor,0,nullptr);
             g.c->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
             g.c->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,.25f,0,1,&occluder);
@@ -337,6 +354,7 @@ int wmain(int argc, wchar_t** argv)
         pixelBack->Unmap(0,&noWrite); comparison->Unmap(0,&noWrite);
         printf("NATIVE_DEPTH_GPU_OK exact_color_depth=256 occluded_pixels=%u visible_pixels=%u\n",count-visible,visible);
         puts("NATIVE_PAIR_GPU_OK three_vertices full_clip_w tags guards raster_jitter_distinct");
+        if (material) puts("NATIVE_MATERIAL_GPU_OK original_blended_color_depth_discard_transmission_and_motion");
         return 0;
     }
     catch (const std::exception& e) { fprintf(stderr,"%s\n",e.what()); return 1; }

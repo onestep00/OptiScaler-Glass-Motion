@@ -10,6 +10,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryPipelineCache.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)DetourThreads.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCreation.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GeometryPipelineStream.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCreation.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryHost.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCommands.h" />

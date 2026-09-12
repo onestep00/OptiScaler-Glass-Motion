@@ -64,8 +64,9 @@ class GeometryCompiler
                                 const VertexConstantPair* capture = nullptr,
                                 const VertexClipPair* clipPair = nullptr,
                                 const VertexInputPair* inputPair = nullptr);
-    // Original native PS without discard/depth exports; added same-draw MV UAV.
-    // Explicit native clip inputs, original color/depth state, no second draw.
+    // Explicit native clip inputs and added same-draw MV UAV, no second draw.
+    // Default: unblended PS without discard/depth exports. inputs.material opts
+    // into supported material blending/discard with read-only depth/stencil.
     HRESULT createNativeMotionCapture(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,

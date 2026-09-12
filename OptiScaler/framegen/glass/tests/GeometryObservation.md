@@ -224,3 +224,25 @@ retained bytes/entry count, unchanged original PS bytes and duplicate suppressio
 It passes with `VERTEX_RECOVERY_OK` and `GEOMETRY_OBSERVATION_OK` under `/O2 /W4 /WX`.
 This compiles real D3D12 PSOs but does not submit game draws or prove live recovery.
 Local binary: `work/glass-observation-general-v1/retry.exe`.
+
+## Public pipeline-state stream reconstruction
+
+The game creates many PSOs through `ID3D12Device2::CreatePipelineState`. The
+old hook counted these successful calls but only retained descriptors created by
+`CreateGraphicsPipelineState`; a live census therefore reported 324,264 missing
+pipeline descriptors among 417,065 draw events. `GeometryPipelineStream.h` now
+uses Microsoft's public `D3DX12ParsePipelineStream` helper after the original
+runtime call succeeds. Graphics streams feed the same bounded immutable
+observation/compiler caches as legacy descriptors. The hook never changes the
+application stream or returned PSO.
+
+The conversion accepts a non-null VS graphics stream that can be represented by
+`D3D12_GRAPHICS_PIPELINE_STATE_DESC`. Compute is counted separately. Parser
+errors, unknown/newer subobjects, mixed graphics/compute shaders, mesh/future
+graphics streams and non-default view instancing remain explicit rejections.
+This preserves semantics across driver and game changes rather than guessing a
+private byte layout. The full independent GPU suite passes a real stream-created
+graphics PSO and checks compute classification, duplicate-subobject rejection,
+view-instancing rejection and unchanged original rendering. Fresh Cyberpunk
+startup/census validation is still pending; no MV or FG admission follows from
+the standalone result.

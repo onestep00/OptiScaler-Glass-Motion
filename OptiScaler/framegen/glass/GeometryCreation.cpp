@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GeometryCreation.h"
 #include "GeometryObservationCache.h"
+#include "GeometryPipelineStream.h"
 #include "ExperimentPipelineService.h"
 #include "DetourThreads.h"
 #include <hooks/Hook_Utils.h>
@@ -24,6 +25,7 @@ struct Capture
     GeometryPipelineCache cache;
     GeometryObservationCache observations;
     std::atomic<std::uint64_t> roots = 0, graphics = 0, streams = 0;
+    std::atomic<std::uint64_t> streamGraphics = 0, streamNonGraphics = 0, streamRejected = 0;
     Capture(ID3D12Device* d, const std::filesystem::path& path, GeometryCacheLimits limits)
         : device(d), cache(d, path, limits)
     {
@@ -85,10 +87,27 @@ HRESULT WINAPI stream(ID3D12Device2* device, const D3D12_PIPELINE_STATE_STREAM_D
     {
         auto capture = control().active.load(std::memory_order_acquire);
         if (capture && capture->device2.Get() == device)
+        {
             ++capture->streams;
+            const auto parsed = desc ? ParseGeometryPipelineStream(*desc) : GeometryPipelineStreamResult {};
+            if (parsed.kind == GeometryPipelineStreamKind::Graphics)
+            {
+                ++capture->streamGraphics;
+                ComPtr<ID3D12PipelineState> pipeline;
+                if (SUCCEEDED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&pipeline))))
+                {
+                    capture->cache.pipelineCreated(pipeline.Get(), parsed.graphics);
+                    capture->observations.observe(pipeline.Get(), parsed.graphics);
+                }
+            }
+            else if (parsed.kind == GeometryPipelineStreamKind::NonGraphics)
+                ++capture->streamNonGraphics;
+            else
+                ++capture->streamRejected;
+        }
     }
-    // Stream variants are counted, never silently labeled supported or parsed
-    // as the older graphics descriptor. They retain the original pipeline.
+    // Observation happens only after the runtime accepts the original stream.
+    // The application's descriptor and returned pipeline are never changed.
     return status;
 }
 bool install(Control& r, Capture& capture)
@@ -234,6 +253,9 @@ GeometryCreationStats GetGeometryCreationStats()
         result.roots = capture->roots.load();
         result.graphics = capture->graphics.load();
         result.streams = capture->streams.load();
+        result.streamGraphics = capture->streamGraphics.load();
+        result.streamNonGraphics = capture->streamNonGraphics.load();
+        result.streamRejected = capture->streamRejected.load();
         result.cache = capture->cache.stats();
     }
     return result;
@@ -249,6 +271,9 @@ bool TryGeometryCreationCounters(GeometryCreationStats& result)
         result.roots = capture->roots.load();
         result.graphics = capture->graphics.load();
         result.streams = capture->streams.load();
+        result.streamGraphics = capture->streamGraphics.load();
+        result.streamNonGraphics = capture->streamNonGraphics.load();
+        result.streamRejected = capture->streamRejected.load();
         return capture->cache.tryCounters(result.cache);
     }
     return true;

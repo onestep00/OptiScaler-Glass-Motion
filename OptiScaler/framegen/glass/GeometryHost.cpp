@@ -24,7 +24,7 @@ void refreshHealth() noexcept
         if (TryGeometryCreationCounters(creation))
         {
             health.counts[GeometryRoots] = creation.roots;
-            health.counts[GeometryPipelines] = creation.graphics;
+            health.counts[GeometryPipelines] = creation.graphics + creation.streamGraphics;
             health.counts[GeometryCompiled] = creation.cache.ready;
             health.counts[GeometryPending] = creation.cache.pending;
             health.counts[GeometryCompileRejected] = creation.cache.rejected;
@@ -105,7 +105,7 @@ void ReportGeometryHost(FILE* log) noexcept
         const auto commands = GetGeometryCommandStats();
         auto health = ReadGeometryHealth();
         health.counts = { creation.roots,
-                          creation.graphics,
+                          creation.graphics + creation.streamGraphics,
                           creation.cache.ready,
                           creation.cache.pending,
                           creation.cache.rejected,
@@ -132,13 +132,15 @@ void ReportGeometryHost(FILE* log) noexcept
                 health.capabilities, health.frame, health.counts[GeometryCaptureDraws],
                 health.counts[GeometryFgReplacements], health.reason(health.sampledMs));
         fprintf(log,
-                "GEOMETRY_OBSERVE roots=%llu graphics=%llu compiled=%llu pending=%llu rejected=%llu "
+                "GEOMETRY_OBSERVE roots=%llu graphics=%llu streams=%llu stream_graphics=%llu "
+                "stream_compute=%llu stream_rejected=%llu compiled=%llu pending=%llu rejected=%llu "
                 "batches=%llu appends=%llu identities=%llu engine_draws=%llu packet_rejected=%llu "
                 "recordings=%llu capacity_rejected=%llu indexed=%llu packets=%llu instances=%llu "
                 "draw_identities=%llu pipeline_ready=%llu bindings_ready=%llu frame=%u "
                 "object_snapshot_rejected=%llu signatures=%llu indirect_known=%llu indirect_unknown=%llu "
                 "actual_draw_replacement=0 fg_substitution=0\n",
-                creation.roots, creation.graphics, creation.cache.ready, creation.cache.pending,
+                creation.roots, creation.graphics, creation.streams, creation.streamGraphics,
+                creation.streamNonGraphics, creation.streamRejected, creation.cache.ready, creation.cache.pending,
                 creation.cache.rejected, packets.batches, packets.appends, packets.identities, packets.draws,
                 packets.rejected, commands.recordings, commands.capacityRejected, commands.indexed, commands.packets,
                 commands.instances, commands.identities, commands.pipelinesReady, commands.bindingsReady,

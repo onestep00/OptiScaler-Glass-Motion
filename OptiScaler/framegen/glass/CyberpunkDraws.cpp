@@ -436,4 +436,9 @@ CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept
                                          state->rejected.load() }
                  : CyberpunkDrawStatus {};
 }
+std::uint32_t ReadCyberpunkDrawFrame() noexcept
+{
+    auto* state = activeDrawState.load(std::memory_order_acquire);
+    return state && state->tick ? *state->tick : 0;
+}
 } // namespace GlassFg

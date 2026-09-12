@@ -1,20 +1,28 @@
 # Experimental transparent-surface motion correction
 
 - Created: 2026-09-10
-- Updated: 2026-09-11
+- Updated: 2026-09-12
 - Status: experimental; deployed native host, controls and actual moving-frame input substitution verified; paired 4x replay still shows glass ghosting, not visually accepted
-- Deployment: acquisition build 32054cc staged in MO2 Root with both shaders and DXC; fresh-process verification pending. Last verified correction remains the b59aa86 static-world algorithm, locally enabled at strength 100
+- Deployment: the 2026-09-12 stream-PSO acquisition build is staged in MO2 Root with a rollback copy; the currently running process still has the previous DLL mapped, so fresh-process verification is pending. Last verified correction remains the b59aa86 static-world algorithm, locally enabled at strength 100
 - Deprecated: no
 - Scope: all Cyberpunk 2077 in-world transparency, excluding HUD; native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
 
 This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. The native FG Evaluate branch now calls `NativeHost`; native creation/release/shutdown provide lifecycle notifications. ASI/MFG unlock behavior remains upstream-owned. Correction defaults off and requires the two HLSL assets beside the DLL in `Glass/`.
 
-[EngineGeometry.md](EngineGeometry.md) records the broader geometry scope and latest engine-input evidence. Cups/railings are test samples. Vehicle glass, eyewear, moving world icons, holograms, skinning, deformation and particles remain in scope. A 32-route inventory guides missing-input work; it is not a list of completed support. Verified rigid history and the newly correlated skinning-buffer binding have not yet been connected to the production correction.
+[EngineGeometry.md](EngineGeometry.md) records the broader geometry scope and latest engine-input evidence. Cups/railings are test samples. Vehicle glass, eyewear, moving world icons, holograms, skinning, deformation and particles remain in scope. A cache-wide inventory now contains 146 candidate material families, 3,746 named transparency techniques, 592 unique vertex shaders and 938 unique pixel shaders. It is an offline coverage inventory, not a list of completed runtime support. Verified rigid history and the newly correlated skinning-buffer binding have not yet been connected to the production correction.
 
 [The shader-history implementation](tests/GeometryShaders.md) reuses actual original VS positions and material coverage. Independent GPU checks preserve original color/position outputs, object masks through batch reordering, and perspective-correct motion with frame/generation rejection. A bounded compiler worker and public PSO/root creation observer also pass the GPU checks. The upstream device hook now starts acquisition and forwards final root bytes after sampler overrides; packaged DXC files stay in `Glass/`. Live engine identity, draw insertion, ordering and per-object boundary composition remain incomplete. This source has not replaced the installed correction.
 
 [The engine packet adapter](tests/GeometryDraws.md) now obtains direct proxy-slot provenance through the original rigid/skinned instance append and flush paths. The public draw/root consumer passes independent GPU tests and the full Release build. Internal multi-instance arrays keep their intervals without inferred identities. Build 32054cc is staged in MO2 Root for a user-launched validation run; live game validation and the new geometry-to-FG connection remain incomplete. This does not establish support for every transparent rendering route.
+
+## Cache-wide and runtime transparency inventory
+
+`work/glass-native-material-v1/audit_workflow.py materials` rebuilds the shader-cache inventory and runs the bounded 16-worker rewrite checks. All 592 candidate VS binaries pass the history rewrite and DXIL validator. All 2,455 ordinary screen-transparency techniques have a validated color-capture or geometric-coverage route: 2,429 retain color/transmission and 26 use coverage fallback. The 448 rejected VS/PS pairs all contain existing pixel-UAV side effects; 432 are distortion passes. Every one of the 33 distortion material families also has an ordinary screen-transparency route, so the runtime acquisition path uses that visible-material draw rather than duplicating a side-effectful distortion pass. None of these counts proves previous-frame identity or FG input admission.
+
+`GeometryPipelineStream.h` reconstructs successful public `ID3D12Device2::CreatePipelineState` graphics streams through Microsoft's `D3DX12ParsePipelineStream`. Compute streams are counted separately. Duplicate, unknown/newer and non-default view-instancing subobjects are rejected instead of guessed. The original creation call, stream and returned PSO stay unchanged. Independent D3D12 tests cover a real graphics stream, compute classification, duplicate rejection and view-instancing rejection.
+
+The replaceable census observer now selects engine-identified world draws by their actual blend state in constant time, then joins VS/PS hashes to the static catalog after capture. It retains at most 4,096 PSOs and one draw sample per PSO, performs no GPU copy, and reports runtime-blended shaders absent from the name-based cache set. A previous run missed 324,264 of 417,065 draw events because stream-created PSOs were counted but never reconstructed. The staged build addresses that acquisition gap; only a fresh-process capture can establish the new live count.
 
 ## Boundaries
 
