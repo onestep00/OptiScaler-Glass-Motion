@@ -9,6 +9,7 @@ $dxc = Join-Path $repository 'OptiScaler/shaders/shader_tools/dxcompiler.dll'
 $tool = Join-Path $build 'GeometryShaderTool.exe'
 $gpu = Join-Path $build 'GeometryShaderGpu.exe'
 $instances = Join-Path $build 'GeometryInstances.exe'
+$packed = Join-Path $build 'PackedMotion.exe'
 $common = @('/nologo','/std:c++20','/EHsc','/O2','/MD','/W4','/WX','/DNOMINMAX',"/Fo$($build.TrimEnd('\'))\")
 & cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryShaderTool.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') "/Fe$tool"
@@ -26,6 +27,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
     (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
+& cl.exe @common "/I$PSScriptRoot" (Join-Path $PSScriptRoot 'PackedMotion.cpp') "/Fe$packed" /link d3d12.lib dxgi.lib
+if ($LASTEXITCODE -ne 0) { throw 'Packed motion GPU test build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryTargetViews.cpp') `
     "$build/GeometryViews.obj" "$build/GeometryCommands.obj" "$build/GeometryCommandFixture.obj" `
     "$build/GeometryPipelineCache.obj" "$build/GeometryCreation.obj" "$build/GeometryPipeline.obj" "$build/DxilVertexHistory.obj" `
@@ -55,6 +58,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Indirect binding GPU test failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Vertex fixture compilation failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterial.hlsl') (Join-Path $build 'fixture-pixel.dxil') ps_6_0
 if ($LASTEXITCODE -ne 0) { throw 'Material fixture compilation failed' }
+& $tool $dxc compile (Join-Path $PSScriptRoot 'PackedMotion.hlsl') (Join-Path $build 'packed-motion.dxil') cs_6_6
+if ($LASTEXITCODE -ne 0) { throw 'Packed motion shader compilation failed' }
+& $packed (Join-Path $build 'packed-motion.dxil')
+if ($LASTEXITCODE -ne 0) { throw 'Packed nearest-layer arbitration failed' }
 & $tool $dxc rewrite (Join-Path $build 'fixture.dxil') (Join-Path $build 'fixture-history.dxil') '-'
 if ($LASTEXITCODE -ne 0) { throw 'Vertex rewriting or DXIL validation failed' }
 & $tool $dxc material (Join-Path $build 'fixture-pixel.dxil') (Join-Path $build 'fixture-motion.dxil') '-' (Join-Path $build 'fixture.dxil')

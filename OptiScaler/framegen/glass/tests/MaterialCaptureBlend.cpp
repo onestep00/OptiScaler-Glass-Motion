@@ -139,6 +139,12 @@ int main()
         if (GlassFg::tryMaterialCaptureBlend(unsupported, GlassFg::MaterialCapture::SourceColor, unchanged) ||
             memcmp(&unsupported, &unchanged, sizeof(unchanged)))
             return 9;
+        unsupported = pd.BlendState;
+        unsupported.IndependentBlendEnable = TRUE;
+        unchanged = unsupported;
+        if (GlassFg::tryMaterialCaptureBlend(unsupported, GlassFg::MaterialCapture::SourceColor, unchanged) ||
+            !GlassFg::tryMaterialCaptureBlend(unsupported, GlassFg::MaterialCapture::SourceColor, unchanged, true))
+            return 10;
         D3D12_DESCRIPTOR_HEAP_DESC hd {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         hd.NumDescriptors = TargetCount;

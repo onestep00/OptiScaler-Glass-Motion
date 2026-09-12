@@ -31,7 +31,8 @@ inline D3D12_BLEND_DESC materialCaptureBlend(MaterialCapture mode)
 // Classify the observed RGB equation rather than a material name. These source
 // and destination factors do not depend on the owned destination's contents.
 // Success only validates the blend algebra, not the draw or its pipeline.
-inline bool tryMaterialCaptureBlend(const D3D12_BLEND_DESC& original, MaterialCapture mode, D3D12_BLEND_DESC& capture)
+inline bool tryMaterialCaptureBlend(const D3D12_BLEND_DESC& original, MaterialCapture mode,
+                                    D3D12_BLEND_DESC& capture, bool allowIndependent = false)
 {
     const auto& rt = original.RenderTarget[0];
     const bool source =
@@ -40,7 +41,8 @@ inline bool tryMaterialCaptureBlend(const D3D12_BLEND_DESC& original, MaterialCa
                              rt.DestBlend == D3D12_BLEND_SRC_ALPHA || rt.DestBlend == D3D12_BLEND_INV_SRC_ALPHA ||
                              rt.DestBlend == D3D12_BLEND_SRC1_COLOR;
     constexpr UINT rgb = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE;
-    if (!rt.BlendEnable || rt.LogicOpEnable || original.AlphaToCoverageEnable || original.IndependentBlendEnable ||
+    if (!rt.BlendEnable || rt.LogicOpEnable || original.AlphaToCoverageEnable ||
+        (original.IndependentBlendEnable && !allowIndependent) ||
         rt.BlendOp != D3D12_BLEND_OP_ADD || (rt.RenderTargetWriteMask & rgb) != rgb || !source || !destination)
         return false;
     auto result = materialCaptureBlend(mode);

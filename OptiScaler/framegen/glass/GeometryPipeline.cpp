@@ -298,7 +298,8 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         const auto& rt = original.BlendState.RenderTarget[original.BlendState.IndependentBlendEnable ? i : 0];
         nativeBlend = nativeBlend && !rt.BlendEnable && !rt.LogicOpEnable;
     }
-    const bool depthCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit && nativeBlend;
+    const bool coverageAudit = target == MaterialMotionTarget::OriginalColorAndCoverageAudit;
+    const bool depthCoverage = coverageAudit && nativeBlend;
     const bool nativeOpaque = nativeInputs && !nativeInputs->material;
     const bool material = !vertexOnly && !nativeOpaque && !depthCoverage;
     if (depthCoverage) target = MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
@@ -309,7 +310,8 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         (material && !readOnly(original.DepthStencilState)) ||
         original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
         (nativeOpaque && !nativeBlend) ||
-        (material && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend)))
+        (material && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend,
+                                              coverageAudit)))
         return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
     // Vertex capture replaces the original draw once. Its unmodified PS and
     // depth/stencil/blend state retain native writes. Unblended coverage audit
