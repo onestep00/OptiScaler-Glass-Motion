@@ -27,7 +27,7 @@ struct Capture
     std::atomic<std::uint64_t> roots = 0, graphics = 0, streams = 0;
     std::atomic<std::uint64_t> streamGraphics = 0, streamNonGraphics = 0, streamRejected = 0;
     Capture(ID3D12Device* d, const std::filesystem::path& path, GeometryCacheLimits limits)
-        : device(d), cache(d, path, limits)
+        : device(d), cache(d, path, limits), observations(2048, 32 * 1024 * 1024, true)
     {
         d->QueryInterface(IID_PPV_ARGS(&device2));
     }
@@ -257,6 +257,7 @@ GeometryCreationStats GetGeometryCreationStats()
         result.streamNonGraphics = capture->streamNonGraphics.load();
         result.streamRejected = capture->streamRejected.load();
         result.cache = capture->cache.stats();
+        result.observation = capture->observations.stats();
     }
     return result;
 }
@@ -274,6 +275,7 @@ bool TryGeometryCreationCounters(GeometryCreationStats& result)
         result.streamGraphics = capture->streamGraphics.load();
         result.streamNonGraphics = capture->streamNonGraphics.load();
         result.streamRejected = capture->streamRejected.load();
+        result.observation = capture->observations.stats();
         return capture->cache.tryCounters(result.cache);
     }
     return true;

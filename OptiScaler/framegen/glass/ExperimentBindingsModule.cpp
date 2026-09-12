@@ -34,36 +34,72 @@ struct Row
 class Recorder
 {
     static constexpr unsigned Capacity = 2048;
+    static constexpr unsigned PipelineCapacity = 256;
+    static constexpr unsigned LookupCapacity = PipelineCapacity * 4;
+    static_assert((LookupCapacity & (LookupCapacity - 1)) == 0);
+    struct PipelineLookup
+    {
+        uint64_t identity = 0;
+        const void* original = nullptr;
+        unsigned index = UINT_MAX;
+    };
     std::unique_ptr<Row[]> rows = std::make_unique<Row[]>(Capacity);
-    std::array<Pipeline, 256> pipelines;
+    std::array<Pipeline, PipelineCapacity> pipelines;
+    std::array<PipelineLookup, LookupCapacity> pipelineLookup {};
     unsigned count = 0, pipelineCount = 0;
     std::mutex mutex;
     std::atomic<uint64_t> dropped = 0;
     std::filesystem::path output;
     uint64_t prepareIdentity = 0, preparedIdentity = 0;
     unsigned prepareIndex = UINT_MAX;
-    bool stopping = false, prepareQueued = false;
+    std::array<unsigned, PipelineCapacity> prepareQueue {};
+    unsigned prepareRead = 0, prepareWrite = 0, prepareRequested = 0, prepareAccepted = 0, preparedObserved = 0;
+    bool stopping = false, prepareAll = false;
     int32_t prepareResult = 0;
     std::condition_variable changed;
     std::thread worker;
+    PipelineLookup* lookup(uint64_t identity, const void* original) noexcept
+    {
+        uint64_t hash = identity ^ (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(original)) >> 4);
+        hash ^= hash >> 33; hash *= 0xff51afd7ed558ccdULL;
+        hash ^= hash >> 33;
+        for (unsigned probe = 0; probe < LookupCapacity; ++probe)
+        {
+            auto& entry = pipelineLookup[(static_cast<unsigned>(hash) + probe) & (LookupCapacity - 1)];
+            if (!entry.identity || (entry.identity == identity && entry.original == original)) return &entry;
+        }
+        return nullptr;
+    }
     void prepare()
     {
         std::unique_lock lock(mutex);
-        changed.wait(lock, [&] { return stopping || prepareQueued; });
-        if (stopping) return;
-        auto& p = pipelines[prepareIndex];
-        lock.unlock();
-        const auto result = p.view.requestVertexCapture ? p.view.requestVertexCapture(p.token) : 0;
-        lock.lock(); prepareResult = result;
+        for (;;)
+        {
+            changed.wait(lock, [&] { return stopping || prepareRead != prepareWrite; });
+            if (prepareRead == prepareWrite)
+            {
+                if (stopping) return;
+                continue;
+            }
+            const auto index = prepareQueue[prepareRead++];
+            auto& p = pipelines[index];
+            lock.unlock();
+            const auto result = p.view.requestVertexCapture ? p.view.requestVertexCapture(p.token) : 0;
+            lock.lock();
+            ++prepareRequested;
+            if (result) ++prepareAccepted;
+            if (!prepareAll && index == prepareIndex) prepareResult = result;
+        }
     }
   public:
     uint64_t observedMesh = 0;
-    explicit Recorder(std::filesystem::path path, uint64_t preparePipeline, uint64_t mesh = 0)
-        : output(std::move(path)), prepareIdentity(preparePipeline), observedMesh(mesh)
+    explicit Recorder(std::filesystem::path path, uint64_t preparePipeline, uint64_t mesh = 0,
+                      bool prepareEveryPipeline = false)
+        : output(std::move(path)), prepareIdentity(preparePipeline), prepareAll(prepareEveryPipeline), observedMesh(mesh)
     {
         if (!output.is_absolute() || !std::filesystem::create_directory(output))
             throw std::runtime_error("Fresh absolute output directory required");
-        if (prepareIdentity) worker = std::thread([this] { prepare(); });
+        if (prepareIdentity || prepareAll) worker = std::thread([this] { prepare(); });
     }
     void stop()
     {
@@ -83,8 +119,9 @@ class Recorder
             return 0;
         std::unique_lock lock(mutex, std::try_to_lock);
         if (!lock || count == Capacity) { ++dropped; return 0; }
-        unsigned index = 0;
-        while (index < pipelineCount && pipelines[index].identity != d.pipelineIdentity) ++index;
+        auto* lookupEntry = lookup(d.pipelineIdentity, d.originalPipeline);
+        if (!lookupEntry) { ++dropped; return 0; }
+        unsigned index = lookupEntry->identity ? lookupEntry->index : pipelineCount;
         if (index == pipelineCount)
         {
             if (pipelineCount == pipelines.size()) { ++dropped; return 0; }
@@ -99,13 +136,21 @@ class Recorder
             { d.pipelineAccess.release(token); return 0; }
             p.identity = d.pipelineIdentity; p.original = d.originalPipeline;
             p.access = d.pipelineAccess; p.access.source = nullptr;
-            p.token = token; p.view = view; ++pipelineCount;
-            if (prepareIdentity == p.identity && !prepareQueued && view.requestVertexCapture)
-            { prepareIndex = index; prepareQueued = true; changed.notify_one(); }
+            p.token = token; p.view = view;
+            lookupEntry->identity = d.pipelineIdentity; lookupEntry->original = d.originalPipeline;
+            lookupEntry->index = index; ++pipelineCount;
+            if (view.vertexOnlyCapture) ++preparedObserved;
+            else if ((prepareAll || prepareIdentity == p.identity) && view.requestVertexCapture &&
+                     prepareWrite < prepareQueue.size())
+            {
+                if (!prepareAll) prepareIndex = index;
+                prepareQueue[prepareWrite++] = index;
+                changed.notify_one();
+            }
         }
         const auto& p = pipelines[index];
         if (p.view.originalRoot != d.originalRoot) return 0;
-        if (prepareQueued && p.view.vertexOnlyCapture && p.view.extendedRoot &&
+        if (prepareIndex != UINT_MAX && p.view.vertexOnlyCapture && p.view.extendedRoot &&
             p.original == pipelines[prepareIndex].original) preparedIdentity = p.identity;
         auto& row = rows[count++];
         row.sequence = input.sequence; row.frame = event.frame; row.recording = d.recording;
@@ -194,7 +239,9 @@ class Recorder
         std::ofstream done(output / "bindings.done");
         done << "format=1\nrows=" << count << "\npipelines=" << pipelineCount << "\ndropped=" << dropped.load()
              << "\nrow_storage_bytes=" << Capacity * sizeof(Row)
-             << "\nprepare_selected=" << prepareIdentity << "\nprepare_queued=" << prepareQueued
+             << "\nprepare_selected=" << prepareIdentity << "\nprepare_all=" << prepareAll
+             << "\nprepare_queued=" << prepareWrite << "\nprepare_requested=" << prepareRequested
+             << "\nprepare_accepted=" << prepareAccepted << "\nprepared_observed=" << preparedObserved
              << "\nprepare_request_result=" << prepareResult << "\nprepared_pipeline_observed=" << preparedIdentity
              << "\norder=cpu_observation\nframe_zero=unknown\ngpu_buffer_copies=0\nprevious_transform_verified=0\n";
         done.close(); if (!done) throw std::runtime_error("Completion write failed");
@@ -216,14 +263,16 @@ int32_t create(const GlassExperimentHost* host, void** context)
         if (!output.empty() && output.back() == '\r') output.pop_back();
         uint64_t prepareIdentity = 0;
         uint64_t observedMesh = 0;
+        bool prepareAll = false;
         if (input.peek() != std::char_traits<char>::eof())
         {
             std::string line, format; uint32_t process = 0;
             if (!std::getline(input, line)) return -1;
             std::istringstream selection(line);
             uint64_t identity = 0;
-            if (!(selection >> format >> process >> identity) ||
-                process != GetCurrentProcessId() || !identity) return -1;
+            if (!(selection >> format >> process) || process != GetCurrentProcessId()) return -1;
+            if (format == "prepare-all-v1") prepareAll = true;
+            else if (!(selection >> identity) || !identity) return -1;
             if (format == "prepare-vertex-v1")
             {
                 prepareIdentity = identity;
@@ -231,11 +280,12 @@ int32_t create(const GlassExperimentHost* host, void** context)
                 if (!selection.eof() && (!(selection >> observedMesh) || !observedMesh)) return -1;
             }
             else if (format == "observe-mesh-v1") observedMesh = identity;
-            else return -1;
+            else if (format != "prepare-all-v1") return -1;
             selection >> std::ws;
             if (!selection.eof() || input.peek() != std::char_traits<char>::eof()) return -1;
         }
-        *context = new Recorder(std::filesystem::path(std::u8string(output.begin(), output.end())), prepareIdentity, observedMesh);
+        *context = new Recorder(std::filesystem::path(std::u8string(output.begin(), output.end())), prepareIdentity,
+                                observedMesh, prepareAll);
         return 0;
     }
     catch (...) { return -1; }

@@ -3,7 +3,7 @@
 - Created: 2026-09-10
 - Updated: 2026-09-12
 - Status: experimental; deployed native host, controls and actual moving-frame input substitution verified; paired 4x replay still shows glass ghosting, not visually accepted
-- Deployment: the 2026-09-12 stream-PSO acquisition build is staged in MO2 Root with a rollback copy; the currently running process still has the previous DLL mapped, so fresh-process verification is pending. Last verified correction remains the b59aa86 static-world algorithm, locally enabled at strength 100
+- Deployment: process 62764 loaded the 2026-09-12 stream-PSO acquisition build 6ca25d2 from MO2 Root; loaded `dxgi.dll` SHA-256 is `997b5465fe872d65a816d206bbd57c8bffb1d61166a83f829ba3f61dad068204`. The later blended-only catalog source is not deployed. Last verified correction remains the b59aa86 static-world algorithm, locally enabled at strength 100
 - Deprecated: no
 - Scope: all Cyberpunk 2077 in-world transparency, excluding HUD; native D3D12 FG, recorded 2x/4x conventions
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
@@ -23,6 +23,19 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 `GeometryPipelineStream.h` reconstructs successful public `ID3D12Device2::CreatePipelineState` graphics streams through Microsoft's `D3DX12ParsePipelineStream`. Compute streams are counted separately. Duplicate, unknown/newer and non-default view-instancing subobjects are rejected instead of guessed. The original creation call, stream and returned PSO stay unchanged. Independent D3D12 tests cover a real graphics stream, compute classification, duplicate rejection and view-instancing rejection.
 
 The replaceable census observer now selects engine-identified world draws by their actual blend state in constant time, then joins VS/PS hashes to the static catalog after capture. It retains at most 4,096 PSOs and one draw sample per PSO, performs no GPU copy, and reports runtime-blended shaders absent from the name-based cache set. A previous run missed 324,264 of 417,065 draw events because stream-created PSOs were counted but never reconstructed. The staged build addresses that acquisition gap; only a fresh-process capture can establish the new live count.
+
+Fresh process 62764 established that this scene used 5,224 legacy graphics PSO
+creations and zero pipeline streams. Its three-second census retained 46 blended
+pipelines but still lacked a pipeline identity on 308,238 of 404,294 total draw
+events. The active 32 MiB observation cache retained opaque PSOs and exposed no
+filter/capacity counters, so that run cannot separate budget exhaustion from
+invalid descriptors. Current source removes the known opaque-budget path with a
+blended-only 2,048-entry catalog and adds explicit filter/invalid/capacity
+counters. A dynamic batch request accepted all
+47 visible candidates and observed nine newly prepared vertex-only identities;
+the compiler later reported 831 ready and 136 rejected. The catalog change is
+tested but needs a fresh-process deployment. None of these counts is object MV
+or FG quality evidence.
 
 ## Boundaries
 

@@ -3,9 +3,16 @@
 #include <mutex>
 #include <unordered_map>
 #include <cstring>
+#include <atomic>
 
 namespace GlassFg
 {
+struct GeometryObservationStats
+{
+    std::uint64_t attempted = 0, retained = 0, filtered = 0, invalid = 0, capacityRejected = 0;
+    std::size_t retainedBytes = 0;
+};
+
 // Immutable diagnostic descriptors only. No compiler, GPU allocation, replay
 // permission or dependency on driver-private PSO storage.
 class GeometryObservationCache
@@ -15,10 +22,28 @@ class GeometryObservationCache
     std::unordered_map<ID3D12RootSignature*, std::shared_ptr<const GeometryRoot>> roots;
     std::size_t used = 0;
     const std::size_t maxEntries, maxBytes;
+    const bool blendedOnly;
+    std::atomic<std::uint64_t> attempted = 0, filtered = 0, invalid = 0, capacityRejected = 0;
+
+    static bool blended(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) noexcept
+    {
+        if (d.BlendState.AlphaToCoverageEnable) return true;
+        for (UINT target = 0; target < d.NumRenderTargets && target < 8; ++target)
+        {
+            const auto& value = d.BlendState.RenderTarget[d.BlendState.IndependentBlendEnable ? target : 0];
+            const bool opaqueReplace = value.SrcBlend == D3D12_BLEND_ONE && value.DestBlend == D3D12_BLEND_ZERO &&
+                value.BlendOp == D3D12_BLEND_OP_ADD && value.SrcBlendAlpha == D3D12_BLEND_ONE &&
+                value.DestBlendAlpha == D3D12_BLEND_ZERO && value.BlendOpAlpha == D3D12_BLEND_OP_ADD;
+            if (value.RenderTargetWriteMask && value.BlendEnable && !value.LogicOpEnable && !opaqueReplace)
+                return true;
+        }
+        return false;
+    }
 
   public:
-    explicit GeometryObservationCache(std::size_t count = 1024, std::size_t bytes = 32 * 1024 * 1024)
-        : maxEntries(count), maxBytes(bytes) {}
+    explicit GeometryObservationCache(std::size_t count = 1024, std::size_t bytes = 32 * 1024 * 1024,
+                                      bool onlyBlended = false)
+        : maxEntries(count), maxBytes(bytes), blendedOnly(onlyBlended) {}
 
     bool rootCreated(ID3D12RootSignature* identity, const void* bytes, SIZE_T size, UINT node = 0) noexcept
     {
@@ -71,6 +96,7 @@ class GeometryObservationCache
 
     bool observe(ID3D12PipelineState* identity, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) noexcept
     {
+        ++attempted;
         // Observation must also retain passes rejected by material compilation.
         // Depth/blend state identifies neither transparency nor replay permission.
         if (!identity || !d.pRootSignature ||
@@ -80,7 +106,15 @@ class GeometryObservationCache
             d.DS.BytecodeLength || d.StreamOutput.NumEntries || d.StreamOutput.NumStrides ||
             d.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
             d.InputLayout.NumElements > 32 || (d.InputLayout.NumElements && !d.InputLayout.pInputElementDescs))
+        {
+            ++invalid;
             return false;
+        }
+        if (blendedOnly && !blended(d))
+        {
+            ++filtered;
+            return false;
+        }
         try
         {
             std::lock_guard lock(mutex);
@@ -88,7 +122,11 @@ class GeometryObservationCache
             const auto cost = sizeof(GeometryPipelineEntry) + sizeof(GeometryRoot) +
                 d.VS.BytecodeLength + d.PS.BytecodeLength +
                 d.InputLayout.NumElements * (sizeof(D3D12_INPUT_ELEMENT_DESC) + sizeof(std::string) + 128);
-            if (entries.size() >= maxEntries || used > maxBytes || cost > maxBytes - used) return false;
+            if (entries.size() >= maxEntries || used > maxBytes || cost > maxBytes - used)
+            {
+                ++capacityRejected;
+                return false;
+            }
             auto entry = std::make_shared<GeometryPipelineEntry>();
             const auto knownRoot = roots.find(d.pRootSignature);
             if (knownRoot != roots.end()) entry->root = knownRoot->second;
@@ -135,6 +173,12 @@ class GeometryObservationCache
         std::lock_guard lock(mutex);
         const auto it = entries.find(identity);
         return it == entries.end() ? nullptr : it->second;
+    }
+
+    GeometryObservationStats stats() const
+    {
+        std::lock_guard lock(mutex);
+        return { attempted.load(), entries.size(), filtered.load(), invalid.load(), capacityRejected.load(), used };
     }
 };
 } // namespace GlassFg

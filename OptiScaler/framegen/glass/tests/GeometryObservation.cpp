@@ -134,7 +134,12 @@ int main()
         d.DepthStencilState.DepthEnable = TRUE;
         d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
         d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        auto& blend = d.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = D3D12_BLEND_SRC_ALPHA; blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE; blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         d.NumRenderTargets = 1; d.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         d.DSVFormat = DXGI_FORMAT_D32_FLOAT; d.SampleDesc.Count = 1; d.SampleMask = UINT_MAX;
         d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -204,6 +209,15 @@ int main()
             }
             require(!cache.find(noDepthPso.Get())->description.DepthStencilState.DepthEnable,
                     "Observation changed depth enable");
+            GlassFg::GeometryObservationCache filtered(4, 1024 * 1024, true);
+            auto opaque = readOnly;
+            opaque.BlendState.RenderTarget[0].BlendEnable = FALSE;
+            require(!filtered.observe(readOnlyPso.Get(), opaque), "Opaque descriptor entered blended-only cache");
+            require(filtered.observe(noDepthPso.Get(), noDepth), "Blended descriptor missed filtered cache");
+            const auto stats = filtered.stats();
+            require(stats.attempted == 2 && stats.retained == 1 && stats.filtered == 1 && !stats.invalid &&
+                        !stats.capacityRejected && stats.retainedBytes,
+                    "Blended-only observation counters mismatch");
         }
 #ifdef GLASS_OBSERVATION_HOST
         observedOriginal = original.Get();

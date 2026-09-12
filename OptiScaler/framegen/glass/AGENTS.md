@@ -30,6 +30,8 @@
 
 - [tests/GeometryObservation.md](tests/GeometryObservation.md): Public pipeline-state streams are reconstructed through the Microsoft parser; real graphics, compute, duplicate and view-instancing cases pass independent checks. Fresh game census and FG remain incomplete.
 
+- [tests/GeometryObservation.md](tests/GeometryObservation.md): Blended-only bounded catalog and batch preparation prevent opaque-budget exhaustion in source; 47/47 live requests were accepted. New catalog deployment, dense MV and FG remain incomplete.
+
 - [tests/SourceBootstrap.md](tests/SourceBootstrap.md): Mesh-scoped slots no longer all fill from the first chunk. Both chunks captured in 32 live frames; differing proxy identities remain separate. Complete outlines and temporal/FG remain incomplete.
 
 - [tests/CoverageLayout.md](tests/CoverageLayout.md): Packed geometry rectangles preserve original-material coverage in independent GPU checks; runtime bounds producer and FG connection remain absent.

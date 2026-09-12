@@ -134,6 +134,7 @@ void ReportGeometryHost(FILE* log) noexcept
         fprintf(log,
                 "GEOMETRY_OBSERVE roots=%llu graphics=%llu streams=%llu stream_graphics=%llu "
                 "stream_compute=%llu stream_rejected=%llu compiled=%llu pending=%llu rejected=%llu "
+                "observed=%llu observation_filtered=%llu observation_invalid=%llu observation_capacity_rejected=%llu observation_bytes=%llu "
                 "batches=%llu appends=%llu identities=%llu engine_draws=%llu packet_rejected=%llu "
                 "recordings=%llu capacity_rejected=%llu indexed=%llu packets=%llu instances=%llu "
                 "draw_identities=%llu pipeline_ready=%llu bindings_ready=%llu frame=%u "
@@ -141,7 +142,10 @@ void ReportGeometryHost(FILE* log) noexcept
                 "actual_draw_replacement=0 fg_substitution=0\n",
                 creation.roots, creation.graphics, creation.streams, creation.streamGraphics,
                 creation.streamNonGraphics, creation.streamRejected, creation.cache.ready, creation.cache.pending,
-                creation.cache.rejected, packets.batches, packets.appends, packets.identities, packets.draws,
+                creation.cache.rejected, creation.observation.retained, creation.observation.filtered,
+                creation.observation.invalid, creation.observation.capacityRejected,
+                static_cast<unsigned long long>(creation.observation.retainedBytes),
+                packets.batches, packets.appends, packets.identities, packets.draws,
                 packets.rejected, commands.recordings, commands.capacityRejected, commands.indexed, commands.packets,
                 commands.instances, commands.identities, commands.pipelinesReady, commands.bindingsReady,
                 commands.lastFrame, objects.snapshotsRejected, commands.signatures, commands.indirectKnown,

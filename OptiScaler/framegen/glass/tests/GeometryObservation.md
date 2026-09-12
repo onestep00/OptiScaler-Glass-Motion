@@ -1,8 +1,8 @@
 # Original-only graphics pipeline observation
 
 - Created: 2026-09-11
-- Updated: 2026-09-11
-- Status: depth-independent observation and failed-material to vertex-only recovery pass independent tests; live missing-pipeline recovery remains incomplete
+- Updated: 2026-09-12
+- Status: blended-only bounded observation and batch vertex preparation pass independent tests; fresh-process source is not deployed and complete live transparency coverage remains incomplete
 - Deployment: not installed in the running game
 - Deprecated: no
 - Scope: bounded diagnostic census of VS/PS triangle graphics pipelines, independent of depth-write state
@@ -12,11 +12,20 @@ PS and input-layout bytes from successful public PSO creation. It makes no GPU
 buffer, modified shader, extended root or command. Names, hashes and render-target
 indices do not classify these observations as velocity or transparent materials.
 
-The separate cache admits at most 1,024 entries and 32 MiB of accounted CPU
+The generic separate cache admits at most 1,024 entries and 32 MiB of accounted CPU
 payload. Container/allocator and driver-owned COM storage are additional; this
 is not a total process or VRAM bound. Exhaustion rejects new observations and
 does not evict active leases or consume the existing material compiler's budget.
-Unsupported shader stages and pipeline streams remain unobserved.
+Unsupported shader stages and invalid pipeline streams remain unobserved.
+
+The Cyberpunk host constructs the same cache in blended-only mode with at most
+2,048 entries and the same 32 MiB payload limit. Admission examines the actual
+render-target blend state and alpha-to-coverage state once at successful public
+PSO creation. Opaque replacements are filtered before any shader copy. This
+prevents early opaque PSOs from consuming the diagnostic payload budget while
+keeping material names out of admission. Attempted, retained, filtered, invalid,
+capacity-rejected and retained-byte counters are reported. The generic default
+remains unfiltered for independent callers and tests.
 
 Original root creation also records up to 128 root layouts in the same CPU
 payload budget. The official versioned deserializer converts to the 1.1 layout;
@@ -39,6 +48,8 @@ owned shader bytes after source mutation, duplicate admission, entry/byte bounds
 admission of read-only and depth-disabled passes, absence of replay objects and descriptor
 lease survival after cache destruction. It does not execute a velocity shader,
 observe game bindings, validate N-1 history or replace an FG input.
+It also verifies that blended-only mode rejects an opaque descriptor, retains a
+blended descriptor and reports exact filter/capacity counters.
 
 Build the single test with MSVC C++20, linking d3d12, dxgi, d3dcompiler and dxguid.
 Run the resulting executable without arguments. The observed result was
@@ -225,12 +236,29 @@ It passes with `VERTEX_RECOVERY_OK` and `GEOMETRY_OBSERVATION_OK` under `/O2 /W4
 This compiles real D3D12 PSOs but does not submit game draws or prove live recovery.
 Local binary: `work/glass-observation-general-v1/retry.exe`.
 
+## Batch native preparation
+
+The replaceable binding recorder also accepts `prepare-all-v1 <process-id>`.
+Every newly retained non-vertex-only pipeline is appended once to a fixed queue.
+Its single worker calls the resident preparation service; render callbacks do
+not compile, wait, read files or issue GPU commands. Stop drains the bounded
+request queue before releasing pipeline tokens. Status reports queued, requested,
+accepted and subsequently observed prepared-pipeline counts.
+
+In fresh game process 62764, the runtime blend-state observer requested all 47
+visible candidates in one three-second generation. All 47 requests were accepted,
+and nine newly prepared vertex-only identities were observed before unload. The
+resident compiler count later rose from 822 to 831 with one additional rejection;
+other accepted requests referred to already prepared material entries. This is
+batch acquisition evidence. It is not dense vertex capture, previous-frame
+history, boundary MV or FG quality proof.
+
 ## Public pipeline-state stream reconstruction
 
-The game creates many PSOs through `ID3D12Device2::CreatePipelineState`. The
-old hook counted these successful calls but only retained descriptors created by
-`CreateGraphicsPipelineState`; a live census therefore reported 324,264 missing
-pipeline descriptors among 417,065 draw events. `GeometryPipelineStream.h` now
+An earlier run appeared to create many PSOs through `ID3D12Device2::CreatePipelineState`.
+The old hook counted successful calls but retained no stream descriptors; a live
+census therefore reported 324,264 missing pipeline descriptors among 417,065 draw
+events. `GeometryPipelineStream.h` now
 uses Microsoft's public `D3DX12ParsePipelineStream` helper after the original
 runtime call succeeds. Graphics streams feed the same bounded immutable
 observation/compiler caches as legacy descriptors. The hook never changes the
@@ -243,6 +271,15 @@ graphics streams and non-default view instancing remain explicit rejections.
 This preserves semantics across driver and game changes rather than guessing a
 private byte layout. The full independent GPU suite passes a real stream-created
 graphics PSO and checks compute classification, duplicate-subobject rejection,
-view-instancing rejection and unchanged original rendering. Fresh Cyberpunk
-startup/census validation is still pending; no MV or FG admission follows from
-the standalone result.
+view-instancing rejection and unchanged original rendering.
+
+Fresh process 62764 loaded build 6ca25d2 and reported 5,224 legacy graphics
+creations, zero pipeline streams and 831 prepared entries after batch requests.
+A three-second census still had 308,238 missing identities among 404,294 total
+draw observations and retained 46 blended pipelines. The active run therefore
+did not exercise the new stream parser. The active cache admitted opaque
+descriptors before the scene and exposed no filter/capacity counters, so the
+remaining budget-versus-invalid split is not measurable from that process. The
+blended-only source change removes the known opaque-budget path and adds the
+missing counters, but requires another fresh process.
+No MV or FG admission follows from either census.

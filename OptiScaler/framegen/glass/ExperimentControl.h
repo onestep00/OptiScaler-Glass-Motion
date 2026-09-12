@@ -1,6 +1,7 @@
 #pragma once
 #include "ExperimentCaptureOwner.h"
 #include "ExperimentCensusBridge.h"
+#include "GeometryCreation.h"
 #include <fstream>
 #include <string>
 
@@ -49,6 +50,7 @@ class ExperimentControl
         const auto module = runtime.status();
         const auto capture = owner.status();
         const auto views = GetGeometryViewStats();
+        const auto geometry = GetGeometryCreationStats();
         std::ofstream file(directory / "experiment.control.response", std::ios::binary);
         file << "request=" << id << "\nok=" << error.empty() << "\nerror=" << error
              << "\nprocess=" << GetCurrentProcessId() << "\nactive_generation=" << module.active
@@ -61,6 +63,12 @@ class ExperimentControl
              << "\ncensus_observer_ready=" << censusRegistered
              << "\ntarget_view_hooks=" << views.active << "\ntarget_view_healthy=" << views.healthy
              << "\ntarget_view_lookups=" << views.lookups << "\ntarget_view_misses=" << views.misses
+             << "\ngeometry_observed=" << geometry.observation.retained
+             << "\ngeometry_observation_filtered=" << geometry.observation.filtered
+             << "\ngeometry_observation_invalid=" << geometry.observation.invalid
+             << "\ngeometry_observation_capacity_rejected=" << geometry.observation.capacityRejected
+             << "\ngeometry_observation_bytes=" << geometry.observation.retainedBytes
+             << "\ngeometry_compiled=" << geometry.cache.ready << "\ngeometry_pending=" << geometry.cache.pending
              << "\ncommands=" << commands << "\nfg_connected=0\n";
         file.close();
         if (!file) throw std::runtime_error("Experiment response write failed");
