@@ -6,6 +6,17 @@
 #include "../DiagnosticInstanceLookup.h"
 
 GlassFg::DiagnosticInstanceLookup<4, 4> fixtureLookup;
+bool packetScope = false;
+int32_t fixturePacketQuery(uint64_t callsite, uint64_t mesh, uint32_t chunk, uint32_t instances,
+    uint32_t ordinal, uint32_t first, uint32_t count, uint32_t transformIndex, uint32_t globalRange,
+    GlassExperimentPacketParent* result)
+{
+    if (!packetScope || callsite != 0x1234 || mesh != 0x20000 || chunk != 7 || instances != 2 || ordinal ||
+        first || count != 2 || transformIndex != 70 || globalRange != 1) return 0;
+    result->proxy = 0x10000; result->mesh = mesh; result->entry = 0x40000; result->slot = 19;
+    result->arrayCount = 40; result->count = count; result->transformIndex = transformIndex;
+    result->globalRange = globalRange; return 1;
+}
 int32_t fixtureQuery(uint32_t frame, uint64_t mesh, uint32_t first, uint32_t count,
                      GlassExperimentInstanceSource* result)
 {
@@ -168,6 +179,22 @@ int wmain(int argc, wchar_t** argv)
             return 19;
         for (const auto& object : original)
             if (object.proxy || object.generation || object.transformIndex != 70 || object.count != 2) return 20;
+    }
+    {
+        TimelineFixture linked;
+        linked.descriptor = fixture.descriptor;
+        linked.objects[0] = {0, 0, 0, 0, 0, 2, 70, 1};
+        draw.source = &linked; draw.pipelineAccess.source = &linked;
+        draw.mesh = 0x20000; draw.chunk = 7; draw.instances = 2; draw.objectCount = 1;
+        input.callsite = 0x1234; packetScope = true;
+        TimelineRecorder<16, 16, 4> recorder(output / "packet", nullptr, fixturePacketQuery);
+        if (recorder.observe(event) != 1) return 21;
+        packetScope = false;
+        if (recorder.observe(event) != 1) return 22;
+        recorder.save();
+        const auto saved = readTimeline<TimelineParent>(output / "packet/packet-parents.bin");
+        if (saved.size() != 1 || saved[0].objectIndex || saved[0].source.proxy != 0x10000 ||
+            saved[0].source.arrayCount != 40 || saved[0].source.slot != 19) return 23;
     }
     std::puts("PASS timeline_consecutive_frames=12 caller_data_copied=1 address_generation_preserved=1 "
               "bounded_capacity=1 unknown_frame_preserved=1 pipeline_retained_once=1 "

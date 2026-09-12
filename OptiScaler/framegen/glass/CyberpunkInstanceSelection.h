@@ -17,6 +17,21 @@ struct CyberpunkInstanceSelection
     std::uint64_t sourceIndices = 0;
     std::uint32_t count = 0, sourceCount = 0;
     bool linear = false;
+    std::uint32_t linearFirst = 0;
+
+    // Exact subrange of the owner's populated global array, including native
+    // 32767-element packet splits. Current indices only, not temporal identity.
+    bool resolveGlobalPacket(bool global, std::uint32_t packetStart, std::uint32_t packetCount,
+                             std::uint32_t ownerStart, std::uint32_t originalCount)
+    {
+        *this = {};
+        if (!global || !packetCount || packetCount > 32767 || !originalCount || originalCount > 65536 ||
+            ownerStart == UINT32_MAX || std::uint64_t(ownerStart) + originalCount > 131072 ||
+            packetStart < ownerStart || packetStart - ownerStart >= originalCount ||
+            packetCount > originalCount - (packetStart - ownerStart)) return false;
+        linear = true; linearFirst = packetStart - ownerStart;
+        count = packetCount; sourceCount = originalCount; return true;
+    }
 
     // Only at the audited whole-array call site. Zero span is its explicit
     // descriptor form, not permission to guess missing grouped indices.
@@ -61,7 +76,7 @@ struct CyberpunkInstanceSelection
         if (linear)
         {
             if (ordinal >= count) return false;
-            output = ordinal;
+            output = linearFirst + ordinal;
             return true;
         }
         if (!sourceIndices || ordinal >= count) return false;

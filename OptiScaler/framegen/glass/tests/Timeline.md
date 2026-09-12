@@ -1,11 +1,18 @@
 # Continuous draw and object metadata timeline
 
 - Created: 2026-09-12
-- Updated: 2026-09-12
+- Updated: 2026-09-13
 - Status: bounded moving capture and live diagnostic array-parent lookup verified; packet-direct parent source added; temporal history remains incomplete
 - Deployment: replaceable diagnostic loaded and unloaded in PID 21760; production correction unchanged
 - Deprecated: no
 - Scope: CPU draw/object correspondence for observed blended pipelines; not complete GPU replay or object MV
+
+Latest follow-up: the explicit `.provider` can expose `GlassPacketParentQuery`
+instead of the frame-key lookup. It is valid only within the original native
+flush. `packet-parents.bin` records an object-index uint64 and a 72-byte
+`GlassExperimentPacketParent`; optional storage is 20,971,520 bytes. It preserves
+the original `objects.bin` identity fields. Current live results and the exact
+global source-index decoder are documented in [GeometryDraws.md](GeometryDraws.md).
 
 ## Recording contract
 

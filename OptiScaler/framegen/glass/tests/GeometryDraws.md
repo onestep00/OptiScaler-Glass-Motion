@@ -1,13 +1,56 @@
 # Engine render packets and draw ownership
 
 - Created: 2026-09-11
-- Updated: 2026-09-12
-- Status: direct array-parent packet preservation passes callback checks; continuous object history incomplete
-- Deployment: 7769d34 coverage diagnostic loaded and saved seven nearly empty captures; see GeometryShaders.md. The mesh allocation decoder below is not deployed
+- Updated: 2026-09-13
+- Status: same-flush packet parent query verified live; exact global-array source range decoded; continuous object history incomplete
+- Deployment: same-flush CPU diagnostic captured PID 21760 and stopped; installed host and GPU/FG inputs unchanged
 - Deprecated: no
 - Scope: direct indexed mesh batches in the audited Cyberpunk executable; broader routes remain incomplete
 
 ## Actual mesh allocation ranges
+
+`ExperimentPacketParents.cpp` proves the direct path against the existing
+resident host without a restart. Its three diagnostic hooks observe native
+append, rigid flush and skinned flush. The original host detours continue to
+run. Preparation verifies the owned function tails and that each current jump
+reaches the exact expected host DLL; the diagnostic profile additionally binds
+the complete current bytes to this PID and image base. This temporary profile
+is deliberately process-specific and is not the production compatibility path.
+
+The provider copies only parent/span scalars at append. A thread-local borrowed
+flush permits O(1) lookup by the actual object ordinal. Call site, mesh, chunk,
+draw instance count, packet interval and transform range must agree. No global
+frame-key map, search or transform-array copy is used. A changed context, epoch,
+invalid interval or expired flush rejects lookup. Parent metadata is diagnostic;
+it does not supply a registered lifetime generation or child-history lease.
+Storage is two 2,048-span arrays (294,912 bytes plus headers) per participating
+thread, not a globally bounded production cache. Production retains its existing
+fixed render-scope pool. Recording stop makes the pinned hooks forward only.
+The source additionally rejects a batch changed by nested callbacks using its
+context and revision; that guard passes the owned fixture but postdates the
+live capture below. The earlier resident diagnostic remains stopped.
+
+The five-second capture `timeline-1789224751425101000` in PID 21760 saved 141
+consecutive frame numbers. It queried 44,232 object spans and saved 44,213 packet
+parents (97 unique parent keys). All 38,119 existing nonzero host identities
+agree on proxy, mesh and slot. Another 6,094 previously unknown spans are arrays;
+their original/drawn counts are two, three, four or five. Nineteen single-instance
+non-global spans remain unresolved. No captured array-parent span is unresolved.
+Missing host pipelines and objects outside this scene still prohibit a claim
+of complete transparency coverage. Timeline and provider recording both stopped;
+the game remained running and no MV/FG input was changed.
+
+`CyberpunkInstanceSelection::resolveGlobalPacket` derives exact current source
+indices for a verified global packet from its offset within the parent's array.
+It validates the native 17-bit range, 32,767-instance packet limit and complete
+owner bounds, including split packets. It performs no source-memory reads.
+The production decoder applied offline to all 6,094 recorded array spans resolves
+20,498 element occurrences. CPU-group selections, original baked-source identity,
+array replacement/compaction and N-1 GPU input are not proven by this arithmetic.
+`build_packet_parents.ps1` runs selection, producer and same-flush callback checks,
+optionally applies the decoder to a recorded packet file, and builds the isolated
+DLL. It never injects a game. The separate timeline test checks ABI propagation
+and refusal outside the provider's active scope.
 
 The latest source preserves `GeometryBatchSpan::parent` separately from admitted
 single-object identity. In the owned array producer at RVA `1ea780`, instructions

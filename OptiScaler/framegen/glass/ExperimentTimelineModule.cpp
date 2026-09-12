@@ -28,6 +28,8 @@ struct TimelineProvenance
     GlassExperimentInstanceSource source;
 };
 static_assert(sizeof(TimelineProvenance) == 200);
+struct TimelineParent { uint64_t objectIndex; GlassExperimentPacketParent source; };
+static_assert(sizeof(TimelineParent) == 80);
 struct TimelinePipeline
 {
     uint64_t identity = 0;
@@ -47,7 +49,10 @@ class TimelineRecorder
     std::unique_ptr<GlassExperimentObject[]> objects = std::make_unique<GlassExperimentObject[]>(ObjectCapacity);
     static constexpr unsigned ProvenanceCapacity = (ObjectCapacity + 3) / 4;
     GlassExperimentInstanceQuery instanceQuery = nullptr;
+    GlassExperimentPacketQuery packetQuery = nullptr;
     std::unique_ptr<TimelineProvenance[]> provenance;
+    std::unique_ptr<TimelineParent[]> packetParents;
+    std::atomic<uint64_t> packetAttempts = 0, packetCount = 0;
     std::atomic<uint64_t> queryAttempts = 0, queryMatches = 0, provenanceCount = 0;
     std::atomic<uint64_t> unmatchedPrevious = 0, unmatchedNext = 0;
     std::array<TimelinePipeline, PipelineCapacity> pipelines;
@@ -112,12 +117,14 @@ class TimelineRecorder
         file.close(); if (!file) throw std::runtime_error("Timeline write failed");
     }
   public:
-    explicit TimelineRecorder(std::filesystem::path path, GlassExperimentInstanceQuery query = nullptr)
-        : instanceQuery(query), output(std::move(path))
+    explicit TimelineRecorder(std::filesystem::path path, GlassExperimentInstanceQuery query = nullptr,
+                              GlassExperimentPacketQuery packet = nullptr)
+        : instanceQuery(query), packetQuery(packet), output(std::move(path))
     {
         if (!output.is_absolute() || !std::filesystem::create_directory(output))
             throw std::runtime_error("Fresh output directory required");
         if (instanceQuery) provenance = std::make_unique<TimelineProvenance[]>(ProvenanceCapacity);
+        if (packetQuery) packetParents = std::make_unique<TimelineParent[]>(ProvenanceCapacity);
     }
     int observe(const GlassExperimentEvent& event)
     {
@@ -150,6 +157,20 @@ class TimelineRecorder
             GlassExperimentObject object {};
             if (draw.objectAt(draw.source, i, &object) != 1) { row.flags |= 2; break; }
             objects[objectStart + i] = object; ++row.objectCount;
+            if (packetQuery)
+            {
+                ++packetAttempts;
+                GlassExperimentPacketParent parent;
+                if (packetQuery(input.callsite, draw.mesh, draw.chunk, draw.instances, i, object.first, object.count,
+                    object.transformIndex, object.globalRange, &parent) == 1 && parent.size == sizeof(parent) &&
+                    parent.version == 1 && parent.proxy && parent.mesh == draw.mesh && parent.count == object.count &&
+                    parent.first == object.first && parent.transformIndex == object.transformIndex &&
+                    parent.globalRange == object.globalRange && !parent.reserved)
+                {
+                    const auto index = packetCount.fetch_add(1, std::memory_order_relaxed);
+                    if (index < ProvenanceCapacity) packetParents[index] = {objectStart + i, parent};
+                }
+            }
             if (instanceQuery && event.frame && event.frame <= UINT32_MAX && (object.globalRange || object.count > 1))
             {
                 ++queryAttempts;
@@ -195,6 +216,8 @@ class TimelineRecorder
         binary("objects.bin", objects.get(), size_t(savedObjects) * sizeof(GlassExperimentObject));
         const auto savedProvenance = (std::min)(provenanceCount.load(), uint64_t(ProvenanceCapacity));
         if (instanceQuery) binary("provenance.bin", provenance.get(), size_t(savedProvenance) * sizeof(TimelineProvenance));
+        const auto savedParents = (std::min)(packetCount.load(), uint64_t(ProvenanceCapacity));
+        if (packetQuery) binary("packet-parents.bin", packetParents.get(), size_t(savedParents) * sizeof(TimelineParent));
         unsigned retained = 0, selected = 0;
         for (const auto& entry : pipelines)
         {
@@ -222,6 +245,9 @@ class TimelineRecorder
              << "\nunmatched_previous_frame=" << unmatchedPrevious.load() << "\nunmatched_next_frame=" << unmatchedNext.load()
              << "\nprovenance_full=" << (provenanceCount.load() - savedProvenance)
              << "\nprovenance_storage_bytes=" << (instanceQuery ? size_t(ProvenanceCapacity) * sizeof(TimelineProvenance) : 0)
+             << "\npacket_parent_rows=" << savedParents << "\npacket_query_attempts=" << packetAttempts.load()
+             << "\npacket_parent_full=" << (packetCount.load() - savedParents)
+             << "\npacket_storage_bytes=" << (packetQuery ? size_t(ProvenanceCapacity) * sizeof(TimelineParent) : 0)
              << "\norder=cpu_observation\nframe_zero=unknown\ngpu_buffer_copies=0\nmotion_produced=0\n";
         done.close(); if (!done) throw std::runtime_error("Timeline completion write failed");
     }
@@ -242,6 +268,7 @@ int32_t timelineCreate(const GlassExperimentHost* host, void** context)
         if (!std::getline(file, output) || file.peek() != std::char_traits<char>::eof()) return -1;
         if (!output.empty() && output.back() == '\r') output.pop_back();
         GlassExperimentInstanceQuery query = nullptr;
+        GlassExperimentPacketQuery packetQuery = nullptr;
         auto providerConfig = std::filesystem::path(path); providerConfig.replace_extension(L".provider");
         if (std::filesystem::exists(providerConfig))
         {
@@ -252,13 +279,16 @@ int32_t timelineCreate(const GlassExperimentHost* host, void** context)
             const std::filesystem::path provider(std::u8string(providerPath.begin(), providerPath.end()));
             if (!provider.is_absolute()) return -1;
             const auto module = GetModuleHandleW(provider.c_str());
-            const auto address = module ? GetProcAddress(module, "GlassInstanceSourceQuery") : nullptr;
+            const auto sourceAddress = module ? GetProcAddress(module, "GlassInstanceSourceQuery") : nullptr;
+            const auto packetAddress = module ? GetProcAddress(module, "GlassPacketParentQuery") : nullptr;
+            const auto address = sourceAddress ? sourceAddress : packetAddress;
             HMODULE pinned = nullptr;
             if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                 reinterpret_cast<LPCWSTR>(address), &pinned) || pinned != module) return -1;
-            query = reinterpret_cast<GlassExperimentInstanceQuery>(address);
+            query = reinterpret_cast<GlassExperimentInstanceQuery>(sourceAddress);
+            packetQuery = reinterpret_cast<GlassExperimentPacketQuery>(packetAddress);
         }
-        *context = new RuntimeTimeline(std::filesystem::path(std::u8string(output.begin(), output.end())), query);
+        *context = new RuntimeTimeline(std::filesystem::path(std::u8string(output.begin(), output.end())), query, packetQuery);
         return 0;
     }
     catch (...) { return -1; }

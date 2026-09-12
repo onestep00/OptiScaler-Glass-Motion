@@ -54,6 +54,22 @@ int main()
     require(!view.resolve(address, descriptor, 40, read));
     descriptor.first = 7; descriptor.end++;
     require(!view.resolve(address, descriptor, 40, read));
+    const auto previousCalls = calls;
+    require(view.resolveGlobalPacket(true, 20160, 40, 20160, 40));
+    require(view.originalIndex(39, actual, read) && actual == 39);
+    require(view.resolveGlobalPacket(true, 20000 + 32767, 32767, 20000, 65536));
+    require(view.originalIndex(0, actual, read) && actual == 32767);
+    require(view.originalIndex(32766, actual, read) && actual == 65533);
+    require(view.resolveGlobalPacket(true, 20000 + 65534, 2, 20000, 65536));
+    require(view.originalIndex(1, actual, read) && actual == 65535);
+    require(!view.originalIndex(2, actual, read));
+    require(!view.resolveGlobalPacket(false, 20160, 40, 20160, 40));
+    require(!view.resolveGlobalPacket(true, 20159, 40, 20160, 40));
+    require(!view.resolveGlobalPacket(true, 20161, 40, 20160, 40));
+    require(!view.resolveGlobalPacket(true, 131071, 2, 131071, 2));
+    require(!view.resolveGlobalPacket(true, 20000, 32768, 20000, 65536));
+    require(calls == previousCalls);
     std::cout << "PASS reordered40=1 culled1=1 range_rejection=1 setup_reads=3 setup_bytes=16 "
-                 "per_instance_bytes=2 table_scans=0 live_engine=0 lifetime_proven=0\n";
+                 "per_instance_bytes=2 global_packet_splits=1 global_range_reads=0 "
+                 "table_scans=0 live_engine=0 lifetime_proven=0\n";
 }
