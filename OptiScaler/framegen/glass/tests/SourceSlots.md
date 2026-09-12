@@ -1,7 +1,7 @@
 # Direct source-slot handoff
 
 - Created: 2026-09-11
-- Updated: 2026-09-11
+- Updated: 2026-09-12
 - Status: creation/destruction cache adapter passes independent checks; live lifetime/view adapter incomplete
 - Deployment: none; no motion or FG input changes
 - Deprecated: no
@@ -715,3 +715,27 @@ compatibility only. It does not prove same-frame ownership, GPU history ordering
 complete material coverage or FG input substitution. The next runtime capture
 must connect registered single-object identities and consecutive original VS
 outputs, while grouped-array identity work remains in scope.
+
+## Original instance identifiers and history lookup (2026-09-12)
+
+The source-slot table now exposes `resolveHistoryKey`, joining a sealed current
+view/frame ticket and the source index to `VertexHistoryCache`. Owner proxy,
+mesh and generation must match; array generation and original index remain
+separate key fields. Reordered draw slots reuse the same allocations, while an
+array replacement gets distinct history. The independent SourceSlots fixture
+passes these joins and wrong-view/frame/owner rejection with at most four
+history candidates per lookup. Native generation/update supply remains absent.
+
+The upstream [Red Hot Tools registry](https://github.com/psiberx/cp2077-red-hot-tools/blob/master/src/App/World/WorldNodeRegistry.cpp)
+records `globalNodeID` and offers `FindStreamedNodeInstance`. It identifies the
+node setup, not each transform inside an instanced mesh node. The local SDK's
+`worldRenderProxyTransformBuffer` contains a shared handle and start/count.
+WolvenKit's `WorldTransformsReader.cs` decodes each 48-byte entry as translation,
+rotation and scale, skipping words at offsets 12 and 44. It exposes no element-ID
+field; skipped words are not proven padding or IDs. No claim that all possible
+engine routes lack per-element identifiers follows from this inspected subset.
+
+Do not replace the source index with `globalNodeID`: all members of one node
+would then share a history. Node lifecycle plus original element index remains
+the candidate for these arrays. Compacted dynamic source paths and particles
+still require their own original identity/lifetime supply. No game DLL changed.

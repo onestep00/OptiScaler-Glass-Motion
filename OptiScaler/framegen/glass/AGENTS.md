@@ -12,7 +12,9 @@
 
 ## Document index
 
-- [tests/VertexHistoryCache.md](tests/VertexHistoryCache.md): Fixed-budget geometry history keys, four-way lookup and GPU-retirement-gated reuse pass 300 CPU churn frames; no game capture connection.
+- [tests/SourceSlots.md](tests/SourceSlots.md): Original source-slot lookup now composes array history keys. Node-level ID lookup is documented separately from element identity; native lifetime/update supply remains incomplete.
+
+- [tests/VertexHistoryCache.md](tests/VertexHistoryCache.md): Original source-index lookup preserves history across packed-slot reordering and separates array replacement. Four-way lookup and 300 CPU churn frames pass; native lifetime/update and game capture remain incomplete.
 
 - [tests/PackedUav.md](tests/PackedUav.md): Original UAV/color preservation, signed MV/range and generation rejection pass 22,528 GPU samples; 3,530 local shader pairs validate. Production activation, pixel-depth coverage and game FG remain incomplete.
 

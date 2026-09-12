@@ -15,14 +15,35 @@ struct VertexHistoryKey
     GeometryDrawIdentity object;
     std::uint64_t view = 0, pipeline = 0, topology = 0;
     std::uint32_t chunk = 0, vertexFactory = 0;
+    // Zero generation is the existing single-object domain. Array entries use
+    // the original source index, never the packed draw ordinal or pool slot.
+    std::uint32_t arrayGeneration = 0, sourceIndex = 0;
     bool operator==(const VertexHistoryKey& b) const
     {
         return object.proxy == b.object.proxy && object.mesh == b.object.mesh &&
                object.slot == b.object.slot && object.generation == b.object.generation &&
                view == b.view && pipeline == b.pipeline && topology == b.topology &&
-               chunk == b.chunk && vertexFactory == b.vertexFactory;
+               chunk == b.chunk && vertexFactory == b.vertexFactory &&
+               arrayGeneration == b.arrayGeneration && sourceIndex == b.sourceIndex;
     }
-    explicit operator bool() const { return bool(object) && view && pipeline && topology; }
+    explicit operator bool() const
+    {
+        return bool(object) && view && pipeline && topology && (arrayGeneration || !sourceIndex);
+    }
+
+    // Source is the result of GeometrySourceSlots::resolve for this same view
+    // and frame. The caller still supplies a verified owner/geometry key; no
+    // generation, view, topology or registry slot is inferred from an address.
+    template<class Source> VertexHistoryKey forSource(const Source& source) const
+    {
+        if (!*this || arrayGeneration || !source || source.proxy != object.proxy ||
+            source.mesh != object.mesh || source.ownerGeneration != object.generation)
+            return {};
+        auto result = *this;
+        result.arrayGeneration = source.arrayGeneration;
+        result.sourceIndex = source.index;
+        return result;
+    }
 };
 
 struct VertexHistoryAllocation
@@ -61,6 +82,7 @@ class VertexHistoryCache
         mix(std::uint64_t(key.object.slot) << 32 | key.object.generation);
         mix(key.view); mix(key.pipeline); mix(key.topology);
         mix(std::uint64_t(key.chunk) << 32 | key.vertexFactory);
+        mix(std::uint64_t(key.arrayGeneration) << 32 | key.sourceIndex);
         h ^= h >> 30; h *= 0xbf58476d1ce4e5b9ull;
         h ^= h >> 27; h *= 0x94d049bb133111ebull;
         return h ^ (h >> 31);

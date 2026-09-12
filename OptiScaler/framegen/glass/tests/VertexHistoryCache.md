@@ -40,9 +40,9 @@ coalescing and 300 frames of allocation churn. It checks all live ranges for
 overlap and enforces the lookup/sweep limits. These are CPU ownership checks,
 not game vertex correspondence, GPU ordering, frame-time or FG-quality evidence.
 
-The current run admitted 7,589 requests and rejected 6,811 under deliberately
+The current run admitted 7,073 requests and rejected 7,327 under deliberately
 small arena pressure across 300 frames. No still-live ranges overlapped. Default
-metadata size is 1,343,592 bytes in the tested x64 build, separate from GPU vertex
+metadata size is 1,474,664 bytes in the tested x64 build, separate from GPU vertex
 storage. Four lookup candidates and seven sweep inspections per test frame were
 enforced; this is an operation bound, not a measured render-time cost.
 
@@ -50,3 +50,19 @@ Build from a Visual Studio x64 developer shell with `/std:c++20 /O2 /W4 /WX` and
 place the executable and object file in the repository's `artifacts` directory.
 Live integration still needs proven view/topology keys, exact producer/FG frame
 correspondence, separate boundary IDs and a valid retirement watermark.
+
+## Original source-index lookup
+
+Array histories additionally distinguish source-array generation and original
+element index. `GeometrySourceSlots::resolveHistoryKey` validates the sealed
+producer ticket against the requested view/frame, then verifies owner proxy,
+mesh and generation before composing the history key. The single-object domain
+stays distinct from array element zero. It does not discover an array generation.
+
+`SourceSlots.cpp` now drives the actual source table and history cache together.
+Two instances exchange packed slots and one moves to a noncontiguous slot; their
+history allocations and GPU generation tags remain unchanged. A source-array
+generation change obtains a separate allocation while the old N-1 allocation
+is retained. Missing generations and mismatched owner/mesh/view/frame reject.
+These are independent CPU tests; the native producer's lifetime/update adapter
+and game draw-to-history connection remain incomplete.

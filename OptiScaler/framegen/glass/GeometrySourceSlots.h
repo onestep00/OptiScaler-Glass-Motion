@@ -96,5 +96,12 @@ template <std::size_t Capacity> class GeometrySourceSlots
         const auto& entry = entries[slot];
         return entry.epoch == current.epoch && !entry.conflict ? entry.source : Source {};
     }
+    template<class HistoryKey>
+    HistoryKey resolveHistoryKey(Ticket ticket, std::uint32_t slot, const HistoryKey& owner,
+                                 std::uint32_t frame) const
+    {
+        if (owner.view != ticket.view || frame != ticket.frame) return {};
+        return owner.forSource(resolve(ticket, slot));
+    }
 };
 } // namespace GlassFg

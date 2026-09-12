@@ -1,5 +1,6 @@
 #include "../GeometrySourceSlots.h"
 #include "../GeometrySourceOwners.h"
+#include "../VertexHistoryCache.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -85,6 +86,44 @@ int main()
     require(slots.resolve(fourth, 2) == replaced);
     auto invalid = slots.begin(0, 12);
     require(!slots.publish(invalid, 2, a) && !slots.seal(invalid));
+    // Actual source-slot -> history-cache lookup, with changing draw ordinals.
+    // Fixture generations are supplied explicitly, not derived from pointers.
+    GlassFg::VertexHistoryCache<8, 4, 32, 4> history;
+    GlassFg::VertexHistoryKey ownerKey { {a.proxy, a.mesh, 23, a.ownerGeneration}, 9, 10, 11, 0, 4 };
+    auto ticket = slots.begin(ownerKey.view, 100);
+    require(slots.publish(ticket, 0, a) && slots.publish(ticket, 1, b) && slots.seal(ticket));
+    require(history.beginFrame(100, 0));
+    const auto ha = history.acquire(slots.resolveHistoryKey(ticket, 0, ownerKey, 100), 6, 100);
+    const auto hb = history.acquire(slots.resolveHistoryKey(ticket, 1, ownerKey, 100), 6, 100);
+    const auto single = history.acquire(ownerKey, 6, 100);
+    require(ha && hb && single && ha.base != hb.base && ha.base != single.base && hb.base != single.base);
+    ticket = slots.begin(ownerKey.view, 101);
+    require(slots.publish(ticket, 0, b) && slots.publish(ticket, 4, a) && slots.seal(ticket));
+    require(history.beginFrame(101, 100));
+    const auto movedA = history.acquire(slots.resolveHistoryKey(ticket, 4, ownerKey, 101), 6, 101);
+    const auto movedB = history.acquire(slots.resolveHistoryKey(ticket, 0, ownerKey, 101), 6, 101);
+    require(movedA.base == ha.base && movedA.generation == ha.generation &&
+            movedB.base == hb.base && movedB.generation == hb.generation);
+    auto changedArray = a; ++changedArray.arrayGeneration;
+    ticket = slots.begin(ownerKey.view, 102);
+    require(slots.publish(ticket, 4, changedArray) && slots.seal(ticket));
+    require(history.beginFrame(102, 100));
+    const auto newA = history.acquire(slots.resolveHistoryKey(ticket, 4, ownerKey, 102), 6, 102);
+    require(newA && newA.generation != ha.generation && newA.base != ha.base);
+    auto wrongOwner = a; ++wrongOwner.ownerGeneration;
+    require(!ownerKey.forSource(wrongOwner) && !ownerKey.forSource(Source{}));
+    auto wrongMesh = a; ++wrongMesh.mesh;
+    require(!ownerKey.forSource(wrongMesh));
+    auto arrayZero = a; arrayZero.index = 0;
+    require(ownerKey.forSource(arrayZero) != ownerKey); // Element zero is not the whole owner.
+    auto missingArrayGeneration = a; missingArrayGeneration.arrayGeneration = 0;
+    require(!ownerKey.forSource(missingArrayGeneration));
+    require(!slots.resolveHistoryKey(ticket, 4, ownerKey, 101));
+    auto wrongView = ownerKey; ++wrongView.view;
+    require(!slots.resolveHistoryKey(ticket, 4, wrongView, 102));
+    std::cout << "PASS source_to_history=1 reordered_draw_reuses_history=1 array_replacement_separates_history=1 "
+                 "owner_generation_checked=1 single_array_domains_separate=1 bounded_lookup="
+              << history.stats.maxLookupInspections << "\n";
     std::cout << "PASS source_owner_cancel=1 owner_reuse=1 bounded_owners=1 skipped_source_groups=1 span_bounds=1 reorder=1 stale_submission=1 ambiguity=1 generation_passthrough=1 "
                  "allocation=0 slot_scans_per_lookup=0 live_engine=0 motion_produced=0\n";
 }
