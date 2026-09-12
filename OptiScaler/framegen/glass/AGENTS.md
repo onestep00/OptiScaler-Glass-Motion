@@ -12,7 +12,7 @@
 
 ## Document index
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): Shared engine output matches 1,118 native and 1,800 missing-record private supplies live. Creation gates traced to the cache provider; array support, GPU binding and FG remain incomplete.
+- [EngineMotionSupply.md](EngineMotionSupply.md): Selected native supply/flag GPU tests compare 2,984/2,399 N-1 vertices. A scoped original declaration-provider hook is enabled; native existing-layout refresh, arrays, full coverage and FG remain incomplete.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 

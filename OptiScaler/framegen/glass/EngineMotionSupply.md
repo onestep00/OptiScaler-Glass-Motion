@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: native private-buffer supply verified live for missing records; creation-gate experiment passed in an isolated process; GPU/FG integration incomplete
+- Status: selected draw-time native supply and GPU vertices verified; scoped native declaration hook installed; existing-layout refresh, all-route coverage and FG integration incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -106,6 +106,91 @@ CPU block is currently retained only in diagnostic records. The next integration
 must carry its verified draw provenance into the existing explicit-matrix GPU
 binding and shared vertex-position calculation, then verify resulting vertices.
 Do not describe the current CPU block as a shader input already installed.
+
+## Draw-time GPU supply and flag experiment, 2026-09-13
+
+The actual scene used by the native material caller comes from the renderer at
+executable RVA `0x3427c00`, then member `0x4628`. It is not the pointer at proxy
+offset `0x68`. An initial read-only hypothesis using that proxy member failed.
+The corrected native caller path resolved all 202 nonzero proxies in a fresh
+203-entry census to their actual registry slot. This after-capture check alone
+does not establish draw-time ownership.
+
+The replaceable `native-world-gpu/NativeWorldObserver.dll` subsequently resolved
+the registry again inside the actual capture callback, checked the draw proxy,
+called the original supplier, and placed 48 output bytes into the existing
+per-capture upload SRV. The registry/context/header checks were repeated before
+accepting the result. Source shader bytes and native helper bodies were checked.
+No arbitrary history addresses, image estimates or parent-root substitution for
+arrays were admitted. The existing upload/capture slots remain owned until GPU
+completion and recording discard.
+
+The game produced 64 completed GPU vertex captures from three proxies using
+pipeline 958's original VS. Forty-four N-1 pairs compared 2,984 vertices with no
+invalid values and a maximum screen-coordinate difference of 0.000241491 pixels.
+Motion was small (maximum 0.359400 pixels); this does not prove large-motion
+quality, all shader families, full material contours or FG substitution.
+
+`FlagWorldObserver.dll` additionally calls the original named-slot constructor
+`0x11923fc` and original modifier evaluator `0x1f0418`. Its private declaration
+requests bit 7 and row 24. The request-bit branch and one-record container are
+constructed by the adapter, not the entire native builder. In every admitted
+draw, update mask 0 leaves the owned block untouched; mask 4 makes the engine
+fill the new MotionMatrix slot. That slot's first 48 bytes reach the GPU SRV.
+This second live run produced 64 captures, 47 N-1 pairs and 2,399 valid compared
+vertices; maximum error was 0.000276900 pixels and maximum motion 0.484175 pixels.
+Both GPU observers unloaded. The installed FG correction remains unchanged.
+
+## Native declaration-provider hook, 2026-09-13
+
+A read-only inventory of 19,037 binary-provider records resolves shader cache
+identities through each binary record's `+8` metadata key to the actual modifier
+metadata. Preserve all cache aliases for equal shader bytes. Pipeline 958's
+captured VS aliases resolve to metadata key `0xccd5360c883c5323`; its PS resolves
+to `0xf23347db6fb057ff`. The original VS has no b7 loads; the inspected PS reads
+only b7 row 2. These shader-specific results are not general free-slot admission.
+
+`CyberpunkDeclarationProbe.cpp` (standalone diagnostic, not imported into the host
+project) is now installed in process 21760 at the real
+provider method RVA `0x2adc5c`. For the selected VS metadata key and exact expected
+32-byte record, it returns an owned immutable copy with request bit 7 set and
+`MatMod_MotionMatrix` assigned row 24. Other keys/results pass through unchanged.
+It preserves the original metadata/name storage and retains its 64-byte clone
+in the pinned module. This is a scoped diagnostic, not a material whitelist to
+ship or a completed general implementation. An owned test and warning-clean
+build passed before attachment.
+
+The native provider was then called through its hooked entry in the game:
+the returned declaration was the augmented copy, and the original record was
+bit-identical. The initial counters were one call/one match/no rejection, entirely
+from that explicit verification call. **This is not evidence that the normal
+game layout builder has consumed the declaration.** Existing compiled-layout
+caches were not invalidated. The hook remains enabled; its control exports can
+record counters or stop redirection without unloading the pinned module. A later
+snapshot recorded 191 calls and still only the one explicit matching call: normal
+provider activity exists, but the selected declaration has not been requested
+again by the normal game path.
+
+The immediate remaining task is native compiled-layout/record refresh or a
+same-call augmented-record route that demonstrably uses the engine's ordinary
+448-byte uploader. Validate the shader's slot consumption with that route.
+Do not describe the existing private SRV experiment as this original upload path.
+Trace the opaque/grouped draw conditions in parallel with this integration:
+the latest 73-pipeline census found native velocity shader matches only on
+single-instance observed draws. Its grouped opaque matches were highlight
+passes, so it does not establish how grouped opaque velocity is supplied.
+The full cache velocity-VS inventory now contains 879 unique binaries and is
+available for this comparison. Do not assume a root MotionMatrix covers array
+elements simply because the common declaration bit can be enabled.
+
+Local tools/evidence added under `work/glass-native-material-v1/`:
+
+- `audit_opaque_velocity.py`, `opaque-velocity-audit/index.json`: all cache velocity VS extraction/signatures; no live grouped-motion admission.
+- `capture_velocity_groups.py`: existing unloadable census extended to opaque draws.
+- `check_draw_supplier_context.py`: bounded read-only registry/context check.
+- `prepare_native_world_capture.py`, `prepare_flag_world_capture.py`, `run_native_world_capture.py`, `analyze_native_world.py`: live GPU supply/flag experiments, with completed results under `native-world-gpu/`.
+- `resolve_motion_metadata.py`, `motion-metadata-resolved.json`: live binary-to-metadata mapping, including aliases.
+- `build_declaration_hook.py`, `native-declaration-hook/`: build/profile, owned test and status for the currently enabled upstream declaration probe. The canonical source is the module's `CyberpunkDeclarationProbe.cpp`.
 
 ## Framework investigation
 
