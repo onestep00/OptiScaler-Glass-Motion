@@ -55,6 +55,13 @@ constexpr bool DrawInstanceDiagnostic = true;
 #else
 constexpr bool DrawInstanceDiagnostic = false;
 #endif
+#ifdef GLASS_PREPARE_PACKED_MOTION
+constexpr bool PackedMotionPreparation = true;
+static_assert(!NativePixelDiagnostic && !VertexCoverageDiagnostic && !NativePairDiagnostic &&
+              !InputWordsDiagnostic && !VertexOutputDiagnostic && !DrawInstanceDiagnostic);
+#else
+constexpr bool PackedMotionPreparation = false;
+#endif
 void check(HRESULT result) { if (FAILED(result)) throw std::runtime_error("Coverage GPU operation failed"); }
 void barrier(ID3D12GraphicsCommandList* command, ID3D12Resource* resource,
              D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
@@ -115,6 +122,7 @@ class Coverage
     VertexInputPair inputWords {};
     uint64_t nativePipeline = 0;
     uint64_t selectionAccepted = 0, selectionRejected = 0;
+    uint64_t packedPipelineMatches = 0;
     std::array<Slot, SlotCount> slots;
     struct PreparedPipeline { uint64_t identity = 0; ComPtr<ID3D12PipelineState> pipeline; };
     // Worker-only, module-lifetime cache. Compilation mode and clip selection
@@ -159,7 +167,9 @@ class Coverage
             // Recorded Cyberpunk layout. Capturing these words is not view/history admission.
             const VertexConstantPair cameraWords { 0, 1, 848, 51 };
             const NativeClipInputs nativeInputs {clipPair.currentOutput,clipPair.previousOutput,true};
-            const auto compiled = NativePixelDiagnostic
+            const auto compiled = PackedMotionPreparation
+                ? dxc.createPackedMotion(device.Get(), root, original, slot.pipeline, error)
+                : NativePixelDiagnostic
                 ? dxc.createNativeMotionCapture(device.Get(), root, original, slot.pipeline, error, nativeInputs)
                 : VertexCoverageDiagnostic
                 ? dxc.createCoverageAudit(device.Get(), root, original, slot.pipeline, error, &cameraWords)
@@ -175,6 +185,8 @@ class Coverage
             if (preparedCount == preparedPipelines.size()) throw std::runtime_error("Pipeline cache full");
             preparedPipelines[preparedCount++] = { view.identity, slot.pipeline };
         }
+        if constexpr (PackedMotionPreparation)
+            return; // Compatibility probe: compile actual PSOs without recording a game draw.
         slot.bits = buffer(slot.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true);
         slot.readback = buffer(slot.bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         slot.zeros = buffer(slot.bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -424,7 +436,8 @@ class Coverage
         catch (const std::exception& error) { std::ofstream(output / "errors.txt", std::ios::app) << error.what() << '\n'; }
         std::ofstream(output / "selection.status") << "enabled=" << selection.enabled << "\nmatched=" << selectionAccepted
             << "\nrejected=" << selectionRejected << "\npipeline_builds=" << preparedCount
-            << "\npipeline_reuses=" << pipelineReuses << "\nobject_motion_produced=0\n";
+            << "\npipeline_reuses=" << pipelineReuses << "\npacked_pipeline_matches=" << packedPipelineMatches
+            << "\npacked_motion_draws=0\nobject_motion_produced=0\n";
     }
     int32_t event(const GlassExperimentEvent& event)
     {
@@ -501,6 +514,11 @@ class Coverage
                 (!(NativePixelDiagnostic || selection.meshOnly) || (slot.requestedMesh == d->mesh && slot.requestedChunk == d->chunk)) &&
                 (!VertexOutputDiagnostic || slot.mesh.vertices == vertexShape.vertices))
             {
+                if constexpr (PackedMotionPreparation)
+                {
+                    ++packedPipelineMatches;
+                    return 0;
+                }
                 slot.left = left; slot.top = top; slot.objects = {};
                 auto* mapping = static_cast<GeometryInstance*>(slot.mapping);
                 memset(mapping, 0, MaxInstances * sizeof(GeometryInstance));
@@ -619,7 +637,8 @@ class Coverage
             const unsigned words = unsigned(1 + (uint64_t(width) * height + 31) / 32);
             const uint64_t vertexBytes = uint64_t(vertexShape.vertices) * d->instances * VertexRecordBytes;
             const uint64_t coverageBytes = uint64_t(words) * (d->instances + 2) * 4;
-            const uint64_t bytes = NativePixelDiagnostic ? (uint64_t(width)*height+1)*32
+            const uint64_t bytes = PackedMotionPreparation ? 256
+                : NativePixelDiagnostic ? (uint64_t(width)*height+1)*32
                 : VertexCoverageDiagnostic ? vertexBytes + coverageBytes
                 : VertexOutputDiagnostic ? vertexBytes
                 : uint64_t(words) * (d->instances + 2) * 4;

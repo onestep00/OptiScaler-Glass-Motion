@@ -7,9 +7,9 @@ constexpr uint32_t PixelCount = 5;
 
 uint64_t pack(uint32_t depth, int32_t motionX, int32_t motionY, uint32_t weight, uint32_t objectId)
 {
-    return (uint64_t(depth & 0xfffff) << 44) | (uint64_t(uint32_t(motionX) & 0xfff) << 32) |
-           (uint64_t(uint32_t(motionY) & 0xfff) << 20) | (uint64_t(weight & 0xff) << 12) |
-           uint64_t(objectId & 0xfff);
+    return (uint64_t(depth & 0x3ffff) << 46) | (uint64_t(uint32_t(motionX) & 0x7ff) << 35) |
+           (uint64_t(uint32_t(motionY) & 0x7ff) << 24) | (uint64_t(weight & 0xff) << 16) |
+           uint64_t(objectId & 0xffff);
 }
 
 uint64_t candidate(uint32_t layer, uint32_t pixel)

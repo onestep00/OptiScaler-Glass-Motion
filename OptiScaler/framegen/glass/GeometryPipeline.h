@@ -52,6 +52,11 @@ class GeometryCompiler
     HRESULT createCoverage(ID3D12Device* device, const GeometryRoot& root,
                            const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                            Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
+    // Retains the original material draw and atomically records one nearest
+    // transparent-layer payload per screen pixel. Requires SM 6.6/int64 ops.
+    HRESULT createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
+                               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                               Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
     HRESULT createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,

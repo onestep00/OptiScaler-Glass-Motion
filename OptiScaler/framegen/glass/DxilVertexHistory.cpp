@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DxilVertexHistory.h"
+#include "PackedMotionShader.h"
 #include "RovCaptureShader.h"
 #include <algorithm>
 #include <array>
@@ -130,6 +131,127 @@ std::string single(const std::string& source, const std::regex& pattern, size_t 
     const auto value = (*it)[group].str();
     need(++it == end, reason);
     return value;
+}
+struct ModernResource
+{
+    unsigned resourceClass = 0, id = 0, lower = 0, upper = 0, space = 0, properties0 = 0, properties1 = 0;
+};
+unsigned extendedProperty(Metadata& metadata, const std::string& reference, unsigned tag)
+{
+    need(reference != "null", "Missing resource property metadata");
+    const auto properties = split(metadata.get(reference));
+    need(!(properties.size() & 1), "Malformed resource property metadata");
+    for (size_t i = 0; i < properties.size(); i += 2)
+        if (number(properties[i], "i32 ") == tag)
+            return number(properties[i + 1], "i32 ");
+    throw std::runtime_error("Required resource property missing");
+}
+std::string upgradeResourceHandles(std::string body, Metadata& metadata, const Parts& resourceLists)
+{
+    need(resourceLists.size() == 4, "Malformed resource lists");
+    std::vector<ModernResource> resources;
+    for (unsigned resourceClass = 0; resourceClass < resourceLists.size(); ++resourceClass)
+    {
+        if (resourceLists[resourceClass] == "null")
+            continue;
+        for (const auto& node : split(metadata.get(resourceLists[resourceClass])))
+        {
+            const auto fields = split(metadata.get(node));
+            need(fields.size() >= 8, "Malformed resource metadata");
+            ModernResource resource {resourceClass, number(fields[0], "i32 ")};
+            resource.space = number(fields[3], "i32 ");
+            resource.lower = number(fields[4], "i32 ");
+            const auto count = number(fields[5], "i32 ");
+            need(count && resource.lower <= UINT32_MAX - (count - 1), "Unsupported resource range");
+            resource.upper = resource.lower + count - 1;
+            if (resourceClass == 2)
+            {
+                resource.properties0 = 13;
+                resource.properties1 = number(fields[6], "i32 ");
+            }
+            else if (resourceClass == 3)
+            {
+                resource.properties0 = 14;
+                if (number(fields[6], "i32 ") == 1)
+                    resource.properties0 |= 0x8000;
+            }
+            else
+            {
+                const auto kind = number(fields[6], "i32 ");
+                need(kind >= 1 && kind <= 16, "Unsupported resource kind for DXIL upgrade");
+                resource.properties0 = kind;
+                if (resourceClass == 1)
+                {
+                    need(fields.size() >= 11, "Malformed UAV metadata");
+                    resource.properties0 |= 0x1000;
+                    if (fields[7] == "i1 true") resource.properties0 |= 0x4000;
+                    if (fields[8] == "i1 true") resource.properties0 |= 0x8000;
+                    if (fields[9] == "i1 true") resource.properties0 |= 0x2000;
+                }
+                if (kind >= 1 && kind <= 10)
+                {
+                    const auto& extension = fields[resourceClass ? 10 : 8];
+                    const auto component = extendedProperty(metadata, extension, 0);
+                    unsigned components = 1;
+                    std::smatch vector;
+                    if (std::regex_search(fields[1], vector, std::regex(R"(vector<[^,>]+,\s*([1-4])\s*>)")))
+                        components = number("i32 " + vector[1].str(), "i32 ");
+                    const auto samples = resourceClass ? 0u : number(fields[7], "i32 ");
+                    need(component <= 255 && components <= 255 && samples <= 255, "Typed resource property overflow");
+                    resource.properties1 = component | (components << 8) | (samples << 16);
+                }
+                else if (kind == 12)
+                    resource.properties1 = extendedProperty(metadata, fields[resourceClass ? 10 : 8], 1);
+            }
+            resources.push_back(resource);
+        }
+    }
+    const std::regex legacy(
+        R"(^([ \t]*)(%[-A-Za-z$._0-9]+) = call %dx.types.Handle @dx.op.createHandle\(i32 57, i8 ([0-3]), i32 ([0-9]+), i32 ([^,]+), i1 ([^\)]+)\).*$)");
+    std::string upgraded, line;
+    std::istringstream lines(body);
+    unsigned replaced = 0;
+    while (std::getline(lines, line))
+    {
+        std::smatch match;
+        if (!std::regex_match(line, match, legacy))
+        {
+            upgraded += line + "\n";
+            continue;
+        }
+        const auto resourceClass = number("i32 " + match[3].str(), "i32 ");
+        const auto id = number("i32 " + match[4].str(), "i32 ");
+        const auto resource = std::find_if(resources.begin(), resources.end(), [&](const auto& value) {
+            return value.resourceClass == resourceClass && value.id == id;
+        });
+        need(resource != resources.end(), "Legacy handle has no matching resource");
+        const auto raw = "%glass.upgradedHandle" + std::to_string(replaced++);
+        upgraded += match[1].str() + raw +
+                    " = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 " +
+                    std::to_string(resource->lower) + ", i32 " + std::to_string(resource->upper) + ", i32 " +
+                    std::to_string(resource->space) + ", i8 " + std::to_string(resourceClass) + " }, i32 " +
+                    trim(match[5].str()) + ", i1 " + trim(match[6].str()) + ")\n";
+        upgraded += match[1].str() + match[2].str() +
+                    " = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle " + raw +
+                    ", %dx.types.ResourceProperties { i32 " + std::to_string(resource->properties0) + ", i32 " +
+                    std::to_string(resource->properties1) + " })\n";
+    }
+    need(replaced && upgraded.find("@dx.op.createHandle(i32 57") == std::string::npos,
+         "Incomplete legacy handle upgrade");
+    upgraded = std::regex_replace(
+        upgraded,
+        std::regex(R"(declare %dx.types.Handle @dx.op.createHandle\(i32, i8, i32, i32, i1\)[^\n]*\n)"), "");
+    const auto definition = upgraded.find("define void ");
+    need(definition != std::string::npos, "Missing shader entry for handle upgrade");
+    if (upgraded.find("%dx.types.ResBind = type") == std::string::npos)
+        upgraded.insert(definition, "%dx.types.ResBind = type { i32, i32, i32, i8 }\n\n");
+    if (upgraded.find("%dx.types.ResourceProperties = type") == std::string::npos)
+        upgraded.insert(upgraded.find("define void "), "%dx.types.ResourceProperties = type { i32, i32 }\n\n");
+    if (upgraded.find("declare %dx.types.Handle @dx.op.createHandleFromBinding") == std::string::npos)
+        upgraded += "declare %dx.types.Handle @dx.op.createHandleFromBinding(i32, %dx.types.ResBind, i32, i1)\n";
+    if (upgraded.find("declare %dx.types.Handle @dx.op.annotateHandle") == std::string::npos)
+        upgraded += "declare %dx.types.Handle @dx.op.annotateHandle(i32, %dx.types.Handle, %dx.types.ResourceProperties)\n";
+    return upgraded;
 }
 std::array<std::string, 4> outputValuesAtReturn(std::string& body, unsigned output, const char* reason)
 {
@@ -710,10 +832,12 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
     try
     {
         need(target == MaterialMotionTarget::SeparateTarget || target == MaterialMotionTarget::OriginalColorAndCapture ||
+                 target == MaterialMotionTarget::OriginalColorAndPackedMotion ||
                  target == MaterialMotionTarget::OriginalColorAndCoverage ||
                  target == MaterialMotionTarget::OriginalColorAndCoverageAudit ||
                  target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit,
              "Unsupported material target");
+        const bool packedMotion = target == MaterialMotionTarget::OriginalColorAndPackedMotion;
         const bool depthCoverage = target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
         const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit || depthCoverage;
         const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage || auditCoverage;
@@ -721,6 +845,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         need(!nativeInputs || (retainColor && !coverageOnly), "Native motion requires retained-color capture");
         need(layout == GeometryLayout::Contiguous || layout == GeometryLayout::PerInstance, "Invalid geometry layout");
         const bool mapped = layout == GeometryLayout::PerInstance;
+        need(!packedMotion || mapped, "Packed motion requires object mapping");
+        need(!packedMotion || !nativeInputs, "Packed native motion is not validated");
         need(!coverageOnly || mapped, "Coverage requires object mapping");
         need(!nativeInputs || !nativeInputs->countInvocations || mapped, "Native invocation audit requires mapped reserved record");
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
@@ -748,7 +874,13 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                 body += line + "\n";
         }
         const auto model = single(source, std::regex(R"(!dx.shaderModel = !\{(!\d+)\})"), 1, "Missing shader model");
+        const auto version = single(source, std::regex(R"(!dx.version = !\{(!\d+)\})"), 1, "Missing DXIL version");
         need(metadata.get(model) == "!\"ps\", i32 6, i32 0", "Only DXIL PS 6.0 is currently validated");
+        if (packedMotion)
+        {
+            metadata.get(model) = "!\"ps\", i32 6, i32 6";
+            metadata.get(version) = "i32 1, i32 6";
+        }
         need(source.find("!dx.rootSignature") == std::string::npos, "Embedded root signature unsupported");
         const auto ep = single(source, std::regex(R"(!dx.entryPoints = !\{(!\d+)\})"), 1, "Missing entry point");
         auto entry = split(metadata.get(ep));
@@ -890,9 +1022,13 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                          std::to_string(retainColor ? 64 : 32) + ", null"));
         if (retainColor)
         {
+            const auto atomic64 = packedMotion ? metadata.add("i32 3, i32 1") : "null";
             metadata.append(resources[1],
-                            metadata.add("i32 0, %Glass.RasterOrderedBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
-                                         "i32 1, i32 11, i1 false, i1 false, i1 true, null"));
+                            metadata.add(packedMotion
+                                             ? "i32 0, %Glass.RawBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
+                                               "i32 1, i32 11, i1 false, i1 false, i1 false, " + atomic64
+                                             : "i32 0, %Glass.RasterOrderedBuffer* undef, !\"GlassCapture\", i32 31, i32 1, "
+                                               "i32 1, i32 11, i1 false, i1 false, i1 true, null"));
             auto properties = entry[4] == "null" ? Parts {} : split(metadata.get(entry[4]));
             need(properties.size() % 2 == 0, "Malformed pixel properties");
             bool found = false;
@@ -900,13 +1036,15 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                 if (properties[i] == "i32 0")
                 {
                     need(properties[i + 1].starts_with("i64 "), "Invalid shader flags");
-                    properties[i + 1] = "i64 " + std::to_string(std::stoull(properties[i + 1].substr(4)) | 262168ull);
+                    properties[i + 1] = "i64 " +
+                                        std::to_string(std::stoull(properties[i + 1].substr(4)) |
+                                                       (packedMotion ? 1048600ull : 262168ull));
                     found = true;
                 }
             if (!found)
             {
                 properties.push_back("i32 0");
-                properties.push_back("i64 262168");
+                properties.push_back("i64 " + std::to_string(packedMotion ? 1048600ull : 262168ull));
             }
             entry[4] = metadata.add(join(properties));
         }
@@ -1048,33 +1186,47 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
         body.replace(body.find("  ret void"), 10,
-                     retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly, auditCoverage)
-                                 : code.str());
+                     packedMotion ? Detail::CapturePackedMotion(code.str(), instanceMapId)
+                     : retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly, auditCoverage)
+                                   : code.str());
         if (mapped)
         {
             if (retainColor)
             {
                 body.insert(body.find("define void "), "%Glass.InstanceRead = type { i32 }\n\n");
-                body += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
+                if (!packedMotion)
+                    body += "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32)\n";
             }
             if (body.find("declare i32 @dx.op.loadInput.i32") == std::string::npos)
                 body += "declare i32 @dx.op.loadInput.i32(i32, i32, i32, i8, i32)\n";
         }
         if (retainColor)
         {
-            for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {
+            for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 4> {
                      { { "Glass.RasterOrderedBuffer", "{ i32 }" },
+                       { "Glass.RawBuffer", "{ i32 }" },
                        { "dx.types.CBufRet.i32", "{ i32, i32, i32, i32 }" },
                        { "dx.types.ResRet.i32", "{ i32, i32, i32, i32, i32 }" } } })
-                if (body.find(std::string("%") + name + " = type") == std::string::npos)
+                if ((packedMotion || std::string_view(name) != "Glass.RawBuffer") &&
+                    (!packedMotion || std::string_view(name) != "Glass.RasterOrderedBuffer") &&
+                    body.find(std::string("%") + name + " = type") == std::string::npos)
                     body.insert(body.find("define void "), std::string("%") + name + " = type " + fields + "\n\n");
             for (const auto* declaration :
                  { "%dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32, %dx.types.Handle, i32)",
                    "%dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32, %dx.types.Handle, i32, i32)",
                    "void @dx.op.bufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8)" })
                 if (!(coverageOnly && std::string_view(declaration).starts_with("void @dx.op.bufferStore")) &&
+                    !(packedMotion && std::string_view(declaration).starts_with("void @dx.op.bufferStore")) &&
+                    !(packedMotion && std::string_view(declaration).find("@dx.op.bufferLoad") != std::string_view::npos) &&
                     body.find(std::string("declare ") + declaration) == std::string::npos)
                     body += std::string("declare ") + declaration + "\n";
+            if (packedMotion)
+            {
+                if (body.find("declare %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32") == std::string::npos)
+                    body += "declare %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32, %dx.types.Handle, i32, i32, i8, i32)\n";
+                if (body.find("declare i64 @dx.op.atomicBinOp.i64") == std::string::npos)
+                    body += "declare i64 @dx.op.atomicBinOp.i64(i32, %dx.types.Handle, i32, i32, i32, i32, i64)\n";
+            }
         }
         for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {
                  { { "dx.types.Handle", "{ i8* }" },
@@ -1101,6 +1253,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             if (body.find(text) == std::string::npos)
                 body += text + "\n";
         }
+        if (packedMotion)
+            body = upgradeResourceHandles(std::move(body), metadata, resources);
         for (const auto& [id, value] : metadata.nodes)
             body += "!" + std::to_string(id) + " = !{" + value + "}\n";
         result.assembly = std::move(body);

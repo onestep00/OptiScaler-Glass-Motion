@@ -105,6 +105,9 @@ enum class MaterialMotionTarget
 {
     SeparateTarget,
     OriginalColorAndCapture,
+    // Production candidate: retain original material/color and atomically keep
+    // the nearest layer's object MV, weight and frame-local ID in 8 bytes.
+    OriginalColorAndPackedMotion,
     // Diagnostic object coverage only. No motion is produced or implied.
     OriginalColorAndCoverage,
     // Diagnostic: also record same-draw surviving/contributing pixels before
@@ -155,4 +158,6 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
 // between overlapping draws. ROV ordering alone covers a single Draw call;
 // overlapping writes from different Draw calls require a UAV barrier/dependency.
 // Records: float MV.xy/depth, uint frame; float transmission.rgb, uint zero.
+// OriginalColorAndPackedMotion requires per-instance mapping, SM 6.6 plus
+// Int64ShaderOps and reserved[0] as a nonzero frame-local object ID.
 } // namespace GlassFg

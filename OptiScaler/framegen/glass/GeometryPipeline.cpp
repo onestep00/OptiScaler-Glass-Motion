@@ -254,6 +254,15 @@ HRESULT GeometryCompiler::createCoverage(ID3D12Device* device, const GeometryRoo
         return reject(error, "Object coverage requires per-instance identity mapping");
     return createTarget(device, root, original, output, error, MaterialMotionTarget::OriginalColorAndCoverage);
 }
+HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
+                                             const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
+                                             ComPtr<ID3D12PipelineState>& output, std::string& error)
+{
+    if (root.layout != GeometryLayout::PerInstance)
+        return reject(error, "Packed motion requires per-instance identity mapping");
+    return createTarget(device, root, original, output, error,
+                        MaterialMotionTarget::OriginalColorAndPackedMotion);
+}
 HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                               ComPtr<ID3D12PipelineState>& output, std::string& error,
@@ -298,29 +307,53 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         const auto& rt = original.BlendState.RenderTarget[original.BlendState.IndependentBlendEnable ? i : 0];
         nativeBlend = nativeBlend && !rt.BlendEnable && !rt.LogicOpEnable;
     }
+    const bool packedMotion = target == MaterialMotionTarget::OriginalColorAndPackedMotion;
     const bool coverageAudit = target == MaterialMotionTarget::OriginalColorAndCoverageAudit;
     const bool depthCoverage = coverageAudit && nativeBlend;
     const bool nativeOpaque = nativeInputs && !nativeInputs->material;
     const bool material = !vertexOnly && !nativeOpaque && !depthCoverage;
     if (depthCoverage) target = MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
-    if (!device || !root.extended || !root.original || root.original.Get() != original.pRootSignature ||
-        !original.NumRenderTargets || original.NumRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
-        original.SampleDesc.Count != 1 || original.GS.BytecodeLength || original.HS.BytecodeLength ||
-        original.DS.BytecodeLength || original.StreamOutput.NumEntries || original.StreamOutput.NumStrides ||
-        (material && !readOnly(original.DepthStencilState)) ||
-        original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE ||
-        (nativeOpaque && !nativeBlend) ||
-        (material && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend,
-                                              coverageAudit)))
-        return reject(error, "Unsupported original pipeline, blend, depth/stencil or geometry");
+    if (!device || !root.extended || !root.original || root.original.Get() != original.pRootSignature)
+        return reject(error, "Missing device or mismatched extended root");
+    if (!original.NumRenderTargets || original.NumRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
+        return reject(error, "Unsupported render-target count");
+    if (original.SampleDesc.Count != 1)
+        return reject(error, "Multisampled pipeline unsupported");
+    if (original.GS.BytecodeLength || original.HS.BytecodeLength || original.DS.BytecodeLength ||
+        original.StreamOutput.NumEntries || original.StreamOutput.NumStrides)
+        return reject(error, "Additional graphics stages or stream output unsupported");
+    if (material && !readOnly(original.DepthStencilState))
+        return reject(error, "Material capture requires read-only depth/stencil");
+    if (original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+        return reject(error, "Non-triangle pipeline unsupported");
+    if (nativeOpaque && !nativeBlend)
+        return reject(error, "Native opaque capture requires unblended targets");
+    if (material && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend,
+                                             coverageAudit || packedMotion))
+        return reject(error, "Unsupported material blend equation");
     // Vertex capture replaces the original draw once. Its unmodified PS and
     // depth/stencil/blend state retain native writes. Unblended coverage audit
     // uses the no-discard native-output contract; blended material capture
     // still requires read-only depth and its supported blend equation.
-    D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
-    HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
-    if (!vertexOnly && (FAILED(hr) || !options.ROVsSupported))
-        return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
+    HRESULT hr = S_OK;
+    if (packedMotion)
+    {
+        D3D12_FEATURE_DATA_SHADER_MODEL shaderModel { D3D_SHADER_MODEL_6_6 };
+        hr = device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel));
+        if (FAILED(hr) || shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_6)
+            return reject(error, "Shader Model 6.6 unavailable", FAILED(hr) ? hr : E_NOTIMPL);
+        D3D12_FEATURE_DATA_D3D12_OPTIONS1 options {};
+        hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options));
+        if (FAILED(hr) || !options.Int64ShaderOps)
+            return reject(error, "64-bit shader operations unavailable", FAILED(hr) ? hr : E_NOTIMPL);
+    }
+    else if (!vertexOnly)
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
+        hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
+        if (FAILED(hr) || !options.ROVsSupported)
+            return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
+    }
     const auto& blend = original.BlendState.RenderTarget[0];
     const auto source = depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
                         : blend.SrcBlend == D3D12_BLEND_ONE ? MaterialSource::One

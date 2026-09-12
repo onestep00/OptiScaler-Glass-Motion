@@ -7,7 +7,7 @@
 - Settings.cpp includes the production settings implementation with a test-only DLL-path provider. ImGui uses stb fonts in this headless test; production retains FreeType. Vertex generation is not visual acceptance of the game menu.
 - All settings test directories must be new. Build artifacts belong outside source control.
 - MaterialCaptureBlend.cpp checks source color, RGB transmission and surviving-pixel coverage for five blend families. It includes discarded pixels and unit transmission with nonzero source color. This is not game layer extraction or FG quality validation.
-- PackedMotion.cpp/HLSL checks SM 6.6 root-UAV 64-bit atomic nearest-layer arbitration on an independent NVIDIA device. It does not measure game cost or connect the packed result to FG.
+- PackedMotion.cpp/HLSL checks SM 6.6 root-UAV 64-bit atomic nearest-layer arbitration on an independent NVIDIA device. GeometryInstances `--packed` and `--packed-mrt` check the rewritten material in real single/independent-MRT graphics draws while preserving original color/depth/discard. Neither measures game cost or connects the packed result to FG.
 - LayerComposite.cpp runs the isolated compositor on caller-supplied float4 files. Build and contract checks are documented in replay/README.md. It never captures or changes a game, and it is not part of the default suite that has no Python dependency.
 - The compositor runner accepts independent per-input dimensions and valid regions. Keep its 36-constant layout and normalized-offset interpretation synchronized with the HLSL. Resolution checks use analytic fields and preserve exact fallback; differing sizes alone never establish input admission.
 - StageReadback.h and StageReadback.cpp test diagnostic color copies at actual allocation/region sizes. They never infer resource state, frame identity or color space. The caller must supply a live resource and prove submission, completion and recording discard. Uncertain lifetimes retain resources; do not use that bounded diagnostic policy for production streaming. Build separately with build_stage_readback.ps1.
@@ -71,7 +71,7 @@
 
 - [GeometryShaders.md](GeometryShaders.md): Same-draw vertex/coverage diagnostic passed 64 live captures with exact contributing-reference masks and zero status. Visualization is vertex displacement plus material coverage, not dense boundary MV.
 
-- [GeometryShaders.md](GeometryShaders.md): PackedMotion verifies one 64-bit root-UAV atomic per candidate can retain nearest depth with inseparable MV, weight and object ID. Production shader rewriting, frame clearing and FG composition remain incomplete.
+- [GeometryShaders.md](GeometryShaders.md): Packed material rewriting preserves the original draw and passes independent GPU execution. Eight currently observed live PSOs compiled without submitting replacement draws. Continuous history, frame clearing and FG composition remain incomplete.
 
 - [GeometryShaders.md](GeometryShaders.md): Optional bound-CB pair recording passed three recorded VS validators and live generation-7 capture (64 snapshots, 38 consecutive pairs). Candidate jitter subtraction is not final MV/FG proof.
 

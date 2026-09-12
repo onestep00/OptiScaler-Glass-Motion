@@ -96,6 +96,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Event-controlled module replacement/capture fa
 if ($LASTEXITCODE -ne 0) { throw 'Actual observer/in-flight capture replacement failed' }
 & $instances $build $dxc --coverage
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
+& $instances $build $dxc --packed
+if ($LASTEXITCODE -ne 0) { throw 'Packed material graphics execution failed' }
 & $instances $build $dxc --recorder
 if ($LASTEXITCODE -ne 0) { throw 'Asynchronous object recorder failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialMrt.hlsl') (Join-Path $build 'fixture-mrt.dxil') ps_6_0
@@ -104,5 +106,7 @@ if ($LASTEXITCODE -ne 0) { throw 'MRT material compilation failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Dual-source material compilation failed' }
 & $instances $build $dxc --mrt
 if ($LASTEXITCODE -ne 0) { throw 'Original auxiliary MRT preservation failed' }
+& $instances $build $dxc --packed-mrt
+if ($LASTEXITCODE -ne 0) { throw 'Packed independent MRT preservation failed' }
 & $instances $build $dxc --dual-mrt
 if ($LASTEXITCODE -ne 0) { throw 'Dual-source MRT preservation failed' }

@@ -88,9 +88,10 @@ int wmain(int argc, wchar_t** argv)
             output = disassembly;
         }
         else if (mode == L"assemble" || mode == L"rewrite" || mode == L"material" || mode == L"capture" ||
+                 mode == L"packed" ||
                  mode == L"coverage" || mode == L"native-motion")
         {
-            if (mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"coverage" ||
+            if (mode == L"rewrite" || mode == L"material" || mode == L"capture" || mode == L"packed" || mode == L"coverage" ||
                 mode == L"native-motion")
             {
                 ComPtr<IDxcCompiler> compiler;
@@ -100,7 +101,7 @@ int wmain(int argc, wchar_t** argv)
                 const auto assembly =
                     std::string_view((const char*) disassembly->GetBufferPointer(), disassembly->GetBufferSize());
                 unsigned historyRegister = UINT32_MAX;
-                if (argc == 7 && (mode == L"material" || mode == L"capture" || mode == L"coverage"))
+                if (argc == 7 && (mode == L"material" || mode == L"capture" || mode == L"packed" || mode == L"coverage"))
                 {
                     ComPtr<IDxcBlobEncoding> vertexBytes, vertexText;
                     check(library->CreateBlobFromFile(argv[6], &codepage, &vertexBytes));
@@ -122,6 +123,7 @@ int wmain(int argc, wchar_t** argv)
                               std::wstring(argv[5]) == L"dual" ? GlassFg::MaterialDestination::SecondSourceRgb
                                                                : GlassFg::MaterialDestination::OneMinusAlpha,
                               mode == L"capture" ? GlassFg::MaterialMotionTarget::OriginalColorAndCapture
+                              : mode == L"packed" ? GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion
                               : mode == L"coverage" ? GlassFg::MaterialMotionTarget::OriginalColorAndCoverage
                                                    : GlassFg::MaterialMotionTarget::SeparateTarget,
                               historyRegister, layout);

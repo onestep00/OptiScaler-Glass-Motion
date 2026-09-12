@@ -225,9 +225,11 @@ int wmain(int argc, wchar_t** argv)
     try
     {
         require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0 ||
-                                            wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0 ||
-                                            wcscmp(argv[3], L"--coverage") == 0 ||
-                                            wcscmp(argv[3], L"--capture-command") == 0 ||
+                                             wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0 ||
+                                             wcscmp(argv[3], L"--coverage") == 0 ||
+                                             wcscmp(argv[3], L"--packed") == 0 ||
+                                             wcscmp(argv[3], L"--packed-mrt") == 0 ||
+                                             wcscmp(argv[3], L"--capture-command") == 0 ||
                                             wcscmp(argv[3], L"--recorder") == 0 ||
                                             wcscmp(argv[3], L"--experiment") == 0 ||
                                             wcscmp(argv[3], L"--capture-module") == 0 ||
@@ -236,6 +238,8 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--controlled-recorder") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
+        const bool packedMrt = argc == 4 && wcscmp(argv[3], L"--packed-mrt") == 0;
+        const bool packedMotion = packedMrt || (argc == 4 && wcscmp(argv[3], L"--packed") == 0);
         const bool inflightRecorder = argc == 4 && wcscmp(argv[3], L"--inflight-recorder") == 0;
         const bool controlledRecorder = inflightRecorder || (argc == 4 && wcscmp(argv[3], L"--controlled-recorder") == 0);
         const bool moduleRecorder = controlledRecorder || (argc == 4 && wcscmp(argv[3], L"--module-recorder") == 0);
@@ -244,9 +248,9 @@ int wmain(int argc, wchar_t** argv)
         const bool experiment = captureModule || (argc == 4 && wcscmp(argv[3], L"--experiment") == 0);
         const bool captureCommand = experiment || recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
         static CaptureOwner captureOwner;
-        const bool observed = argc == 4 && !coverageOnly;
+        const bool observed = argc == 4 && !coverageOnly && !packedMotion;
         const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
-        const bool mrt = dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
+        const bool mrt = packedMrt || dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
         const bool commands = captureCommand || mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
         if (captureCommand && !recorder && !captureModule)
             require(GlassFg::RegisterGeometryDrawCapture(&captureOwner), "Register capture owner");
@@ -368,6 +372,11 @@ int wmain(int argc, wchar_t** argv)
         blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlendAlpha = D3D12_BLEND_ZERO;
         blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        if (packedMrt)
+        {
+            pd.BlendState.IndependentBlendEnable = TRUE;
+            pd.BlendState.RenderTarget[2] = blend;
+        }
         pd.SampleMask = UINT_MAX;
         pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -385,10 +394,26 @@ int wmain(int argc, wchar_t** argv)
         pd.SampleDesc.Count = 1;
         ComPtr<ID3D12PipelineState> original, capturePso, streamPso;
         check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&original)));
-        auto lease = observed ? observedPipeline(g.d.Get(), original.Get(), pd, commands)
-                              : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
-                                               std::filesystem::absolute(argv[2]));
-        const auto& root = *lease->root;
+        std::shared_ptr<const GlassFg::GeometryPipelineEntry> lease;
+        GlassFg::GeometryRoot directRoot;
+        const GlassFg::GeometryRoot* rootPointer = nullptr;
+        if (packedMotion)
+        {
+            std::string error;
+            if (FAILED(GlassFg::CreateGeometryRoot(g.d.Get(), originalRoot.Get(), 0, serialized->GetBufferPointer(),
+                                                   serialized->GetBufferSize(), directRoot, error,
+                                                   GlassFg::GeometryLayout::PerInstance)))
+                throw std::runtime_error(error);
+            rootPointer = &directRoot;
+        }
+        else
+        {
+            lease = observed ? observedPipeline(g.d.Get(), original.Get(), pd, commands)
+                             : cachedPipeline(g.d.Get(), originalRoot.Get(), serialized.Get(), original.Get(), pd,
+                                              std::filesystem::absolute(argv[2]));
+            rootPointer = lease->root.get();
+        }
+        const auto& root = *rootPointer;
         if (moduleRecorder)
         {
             if (inflightRecorder)
@@ -397,12 +422,20 @@ int wmain(int argc, wchar_t** argv)
         }
         if (captureModule) experimentCheck.prime(lease, argv[2]);
         rootInvalidation(root, original.Get());
-        capturePso = lease->instrumented;
+        if (lease)
+            capturePso = lease->instrumented;
         if (coverageOnly)
         {
             GlassFg::GeometryCompiler compiler(std::filesystem::absolute(argv[2]));
             std::string error;
             if (FAILED(compiler.createCoverage(g.d.Get(), root, pd, capturePso, error)))
+                throw std::runtime_error(error);
+        }
+        else if (packedMotion)
+        {
+            GlassFg::GeometryCompiler compiler(std::filesystem::absolute(argv[2]));
+            std::string error;
+            if (FAILED(compiler.createPackedMotion(g.d.Get(), root, pd, capturePso, error)))
                 throw std::runtime_error(error);
         }
         require(root.dwords == 22 && root.instanceSlot == 6, "Mapped root extension");
@@ -468,6 +501,7 @@ int wmain(int argc, wchar_t** argv)
         std::array<std::vector<char>, 2> priorHistory;
         std::vector<char> priorCapture;
         UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0, auxiliaryWritten = 0;
+        UINT64 packedChecked = 0, packedWrites = 0;
         UINT maximumCoverageWords = 0;
         double maximum = 0;
         unsigned recorderSplitFrame = 5;
@@ -529,6 +563,8 @@ int wmain(int argc, wchar_t** argv)
                                    RoiStride,
                                    CapturePixels,
                                    status };
+                if (packedMotion)
+                    mapping[5 + i].reserved[0] = object + 1;
                 if (frame == 6 && object == 1)
                     mapping[5 + i] = {}; // Unknown object stays in the original draw.
             }
@@ -565,15 +601,16 @@ int wmain(int argc, wchar_t** argv)
                     require(entry.inactive() || entry.validCoverage(usedWords), "Packed coverage allocation invalid");
             }
             upload(mappingBuffer.Get(), mapping.data(), sizeof(mapping));
-            GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame,         0,
-                                                   0, 0, W,       H,       0, W, CapturePixels, 0 };
+            GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame, 0,
+                                                   0, 0, W, H, 0, W,
+                                                   packedMotion ? W * H : CapturePixels, 0 };
             upload(pixelConstants.Get(), &pc, sizeof(pc));
             const float fc[] { frame * .31f, frame * .023f, frame * -.017f, 0 };
             const UINT current = frame & 1, previous = current ^ 1;
             g.begin();
             if (moduleRecorder) moduleRecorderCheck.collect();
             g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-            if (coverageOnly)
+            if (coverageOnly || packedMotion)
                 g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, CaptureBytes);
             for (UINT object = 0; object < 3; ++object)
                 g.c->CopyBufferRegion(capture.Get(), (8 + object * Segment) * 32, zeros.Get(), 0, 32);
@@ -769,6 +806,76 @@ int wmain(int argc, wchar_t** argv)
             const auto* hist = reinterpret_cast<const History*>(bytes + 5 * imageBytes + SOBytes);
             const auto* pixels =
                 reinterpret_cast<const CaptureRecord*>(bytes + 5 * imageBytes + SOBytes + HistoryBytes);
+            std::array<Clip, 18> now {};
+            for (UINT i = 0; i < 3; ++i)
+                memcpy(now.data() + order[7 + i] * 6, emitted + i * 6, 6 * sizeof(Clip));
+            if (packedMotion)
+            {
+                const auto* packed = reinterpret_cast<const UINT64*>(pixels);
+                for (UINT y = 0; y < H; ++y)
+                    for (UINT x = 0; x < W; ++x)
+                    {
+                        const auto actual = packed[y * W + x];
+                        if (frame == 1)
+                            require(!actual, "Packed material wrote without adjacent history");
+                        if (frame == 2)
+                        {
+                            UINT64 expected = 0;
+                            for (UINT object = 0; object < 3; ++object)
+                            {
+                                const auto* originalPixel = reinterpret_cast<const float*>(
+                                    bytes + (object + 2) * imageBytes + y * footprint.Footprint.RowPitch + x * 16);
+                                if (!(originalPixel[3] > 0))
+                                    continue;
+                                const auto mv = referenceMotion(now.data() + object * 6,
+                                                                last.data() + object * 6, x, y, W, H);
+                                const auto quantizeMotion = [](double value)
+                                {
+                                    return std::clamp(static_cast<int>(value * 8.0), -1024, 1023);
+                                };
+                                const auto mx = quantizeMotion(mv[0] * W);
+                                const auto my = quantizeMotion(mv[1] * H);
+                                const auto weight = static_cast<UINT>(
+                                    std::clamp(double(originalPixel[3]), 0.0, 1.0) * 255.0);
+                                const auto encodedDepth = static_cast<UINT>((.4 + object * .03) * 262143.0);
+                                const auto depthKey = 262143u - encodedDepth;
+                                const UINT64 candidate = (UINT64(depthKey & 0x3ffff) << 46) |
+                                                         (UINT64(UINT(mx) & 0x7ff) << 35) |
+                                                         (UINT64(UINT(my) & 0x7ff) << 24) |
+                                                         (UINT64(weight & 0xff) << 16) | UINT64(object + 1);
+                                expected = (std::max)(expected, candidate);
+                            }
+                            if (!expected)
+                                require(!actual, "Packed material wrote outside surviving material coverage");
+                            else
+                            {
+                                const auto signed11 = [](UINT64 value)
+                                {
+                                    auto result = int(value & 0x7ff);
+                                    return (result & 0x400) ? result - 0x800 : result;
+                                };
+                                require((actual >> 46) == (expected >> 46) &&
+                                            (actual & 0xffff) == (expected & 0xffff),
+                                        "Packed material chose the wrong depth or object");
+                                require(std::abs(signed11(actual >> 35) - signed11(expected >> 35)) <= 1 &&
+                                            std::abs(signed11(actual >> 24) - signed11(expected >> 24)) <= 1,
+                                        "Packed material motion exceeded one quantization step");
+                                require(std::abs(int((actual >> 16) & 0xff) - int((expected >> 16) & 0xff)) <= 1,
+                                        "Packed material opacity exceeded one quantization step");
+                            }
+                            ++packedChecked;
+                            packedWrites += actual != 0;
+                        }
+                        require(!(actual & 0xffff) || (actual & 0xffff) <= 3,
+                                "Packed material emitted a foreign object ID");
+                    }
+                last = now;
+                priorHistory[current].assign(reinterpret_cast<const char*>(hist),
+                                             reinterpret_cast<const char*>(hist) + HistoryBytes);
+                D3D12_RANGE noWrite { 0, 0 };
+                readback->Unmap(0, &noWrite);
+                continue;
+            }
             if (coverageOnly)
             {
                 require(!memcmp(hist, zero.data(), HistoryBytes), "Coverage-only draw wrote vertex history");
@@ -802,9 +909,6 @@ int wmain(int argc, wchar_t** argv)
                 readback->Unmap(0, &noWrite);
                 continue;
             }
-            std::array<Clip, 18> now {};
-            for (UINT i = 0; i < 3; ++i)
-                memcpy(now.data() + order[7 + i] * 6, emitted + i * 6, 6 * sizeof(Clip));
             for (UINT i = 0; i < 3; ++i)
             {
                 const UINT object = order[7 + i];
@@ -888,6 +992,14 @@ int wmain(int argc, wchar_t** argv)
                                 reinterpret_cast<const char*>(pixels) + CaptureBytes);
             D3D12_RANGE noWrite { 0, 0 };
             readback->Unmap(0, &noWrite);
+        }
+        if (packedMotion)
+        {
+            require(packedChecked == UINT64(W) * H && packedWrites, "Packed material coverage was not verified");
+            printf("PASS packed_material_gpu=1 original_material_preserved=1 nearest_layer_exact=1 "
+                   "motion_quantization_step_px=0.125 pixels=%llu writes=%llu bytes_per_pixel=8\n",
+                   packedChecked, packedWrites);
+            return 0;
         }
         if (recorder)
         {

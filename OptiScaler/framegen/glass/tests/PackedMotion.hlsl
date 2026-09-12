@@ -9,11 +9,11 @@ RWByteAddressBuffer packedMotion : register(u0);
 
 uint64_t packCandidate(uint depth, int motionX, int motionY, uint weight, uint objectId)
 {
-    return ((uint64_t(depth) & 0xfffff) << 44) |
-           ((uint64_t(uint(motionX) & 0xfff)) << 32) |
-           ((uint64_t(uint(motionY) & 0xfff)) << 20) |
-           ((uint64_t(weight & 0xff)) << 12) |
-           uint64_t(objectId & 0xfff);
+    return ((uint64_t(depth) & 0x3ffff) << 46) |
+           ((uint64_t(uint(motionX) & 0x7ff)) << 35) |
+           ((uint64_t(uint(motionY) & 0x7ff)) << 24) |
+           ((uint64_t(weight & 0xff)) << 16) |
+           uint64_t(objectId & 0xffff);
 }
 
 [numthreads(8, 1, 1)]

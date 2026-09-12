@@ -2,10 +2,10 @@
 
 - Created: 2026-09-11
 - Updated: 2026-09-12
-- Status: live vertex snapshots recorded; continuous object history, jitter/view admission and FG integration incomplete
-- Deployment: replaceable vertex diagnostic ran in PID 56340 and unloaded; installed correction unchanged
+- Status: packed material PSOs validated live; continuous object history, composition and FG integration incomplete
+- Deployment: compile-only packed PSO probe ran in PID 62764 and unloaded; installed correction unchanged
 - Deprecated: no
-- Scope: instrumenting supported DXIL VS/PS 6.0 shaders without replacing their geometry or material math
+- Scope: instrumenting supported DXIL VS/PS shaders without replacing their geometry or material math
 
 ## Implemented source
 
@@ -494,7 +494,9 @@ The latest [compatibility checkpoint](../Compatibility.md) adds preservation of 
 
 `RewriteMaterialMotion` preserves the original material computation/discard and emits normalized previous-minus-current motion, mean RGB attenuation, and current device depth into a separate target. Material opacity is derived from the verified destination blend factor; colored transmission becomes `1 - mean(saturate(T.rgb))`. A scalar coefficient cannot fully represent colored/refraction layers. Pixels contributing neither source color nor attenuation are excluded. Invalid history and nonfinite motion are rejected. Original color-output stores are replaced only in this separate diagnostic/capture PSO; this shader must never replace the game's color pixel shader as-is.
 
-`PackedMotion.cpp` and `PackedMotion.hlsl` isolate the proposed bounded overlap store. Each contributing layer issues one 64-bit maximum operation to a root-descriptor raw UAV. The high 20-bit key selects the nearest candidate and the remaining bits retain signed object motion, material weight and a frame-local object ID as one indivisible value. The independent GPU test requires Shader Model 6.6 and `Int64ShaderOps`, submits seven competing layers to five pixels, and verifies every decoded winner by CPU reference. This establishes the storage primitive only. Runtime pixel addressing, native material instrumentation, per-frame clearing, boundary composition and FG replacement are not connected by this test.
+`PackedMotion.cpp` and `PackedMotion.hlsl` isolate the bounded overlap store. Each contributing layer issues one 64-bit maximum operation to a root-descriptor raw UAV. The layout is an 18-bit nearest-depth key, two signed 11-bit object-MV components at 1/8-pixel precision, an 8-bit material weight and a 16-bit frame-local object ID. The independent GPU test requires Shader Model 6.6 and `Int64ShaderOps`, submits seven competing layers to five pixels, and verifies every winner by CPU reference.
+
+`OriginalColorAndPackedMotion` upgrades legacy PS 6.0 resource handles to the DXIL 1.6 binding form, retains the original material exports/discard/MRT state and appends the same packed atomic. Forced early depth keeps occluded fragments out of the UAV. The mapped graphics fixtures verify original color, exact nearest object/depth, 0.125-pixel motion quantization and opacity across both single-target and independent three-target draws. The full geometry suite passes. A compile-only replaceable module then created all eight packed PSOs observed in live PID 62764; independent three-target blending is accepted because no render target or blend state is changed. It recorded 27,800 later matches with zero compile errors and deliberately submitted zero replacement draws. The seven unique PS/VS pairs saved by the earlier boundary capture also validate offline after the general handle upgrade. Continuous GPU history, per-frame buffer ownership, boundary/depth composition and FG replacement are still absent.
 
 The algorithm and creation observer remain in this module. The upstream D3D12 device hook has explicit startup and final-root-creation integration calls. Acquisition build 32054cc is staged in MO2 Root for fresh-process validation. Its correction still uses static-world projection; the shader capture has no production draw caller yet.
 
