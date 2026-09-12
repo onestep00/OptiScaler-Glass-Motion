@@ -20,7 +20,7 @@
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Original source-slot lookup now composes array history keys. Node-level ID lookup is documented separately from element identity; native lifetime/update supply remains incomplete.
 
-- [tests/VertexHistoryCache.md](tests/VertexHistoryCache.md): Original source-index lookup preserves history across packed-slot reordering and separates array replacement. Four-way lookup and 300 CPU churn frames pass; native lifetime/update and game capture remain incomplete.
+- [tests/VertexHistoryCache.md](tests/VertexHistoryCache.md): Bounded mapping separates chunk histories from shared object boundary IDs; CPU checks pass. Local capture prototype uses it but lacks native identity provider/queue admission; no game deployment.
 
 - [tests/PackedUav.md](tests/PackedUav.md): Original UAV/color preservation, signed MV/range and generation rejection pass 22,528 GPU samples; 3,530 local shader pairs validate. Production activation, pixel-depth coverage and game FG remain incomplete.
 

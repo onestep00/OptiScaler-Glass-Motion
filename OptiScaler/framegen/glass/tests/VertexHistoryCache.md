@@ -1,9 +1,9 @@
 # Bounded vertex history ownership
 
 - Created: 2026-09-12
-- Updated: 2026-09-12
+- Updated: 2026-09-13
 - Status: independent CPU identity, retirement and bounded-churn checks passed
-- Deployment: not connected to the game capture owner
+- Deployment: bounded mapping wrapper connected to the local capture prototype; not deployed or enabled in game
 - Deprecated: no
 - Scope: fixed GPU arena ownership metadata; no motion estimation or GPU synchronization implementation
 
@@ -50,6 +50,30 @@ Build from a Visual Studio x64 developer shell with `/std:c++20 /O2 /W4 /WX` and
 place the executable and object file in the repository's `artifacts` directory.
 Live integration still needs proven view/topology keys, exact producer/FG frame
 correspondence, separate boundary IDs and a valid retirement watermark.
+
+## Packed mapping and object boundaries
+
+`PackedMotionMappings.h` now combines the existing bounded vertex allocator
+with a separate four-way frame-local boundary-ID table. Different chunks,
+pipelines and topology keys keep separate vertex histories while sharing the
+same object boundary ID. Original array elements and owner lifetimes remain
+distinct. IDs are limited to the packed shader's 15-bit domain. No table-wide
+clear or unbounded lookup is required each frame.
+
+`PackedMotionMappings.cpp` verifies multi-chunk separation, common boundary IDs,
+different array elements, reordered draws, lifetime replacement and reclaimed
+storage receiving new GPU generation tags. These are CPU mapping checks.
+
+The local `PackedMotionCapture.cpp` prototype now uses this wrapper instead of
+the monotonic object-only arena. It passes the allocation generation into shader
+history, admits each explicitly resolved source element and derives retirement
+only from its retained recording/GPU slots. The prototype compiles, but the
+full source set remains uncommitted and runtime integration is not approved.
+Its new `PackedMotionIdentityProvider` requires explicit verified view/topology
+and original-source generations. The native host does not supply that provider
+yet; missing provenance rejects initialization instead of inventing a view or
+array lifetime. Queue ordering, continuous game history and FG quality remain
+unfinished. The installed host and live FG inputs are unchanged.
 
 ## Original source-index lookup
 

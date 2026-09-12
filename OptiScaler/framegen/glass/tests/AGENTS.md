@@ -27,7 +27,7 @@
 
 - [SourceSlots.md](SourceSlots.md): Source-slot to history lookup checks original index, owner, view and frame. Node IDs identify the parent setup; native array generations and game connection remain incomplete.
 
-- [VertexHistoryCache.md](VertexHistoryCache.md): Original source-index lookup joins the sealed source table to bounded history; reorder/replacement and 300 churn frames pass CPU checks. Native lifetime/update and game integration remain incomplete.
+- [VertexHistoryCache.md](VertexHistoryCache.md): PackedMotionMappings checks separate chunk histories, shared object boundary IDs and distinct array lifetimes. Local capture prototype compiles; native identity/queue admission and game MV remain incomplete.
 
 - [PackedUav.md](PackedUav.md): In-place packed PS preserves original writes/color through 22,528 GPU samples, rejects out-of-range MV/IDs and reused history. Default production admission stays off; depth exports, live coverage and FG remain incomplete.
 
