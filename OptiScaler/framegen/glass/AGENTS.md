@@ -12,7 +12,9 @@
 
 ## Document index
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): Selected native supply/flag GPU tests compare 2,984/2,399 N-1 vertices. A scoped original declaration-provider hook is enabled; native existing-layout refresh, arrays, full coverage and FG remain incomplete.
+- [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
+
+- [EngineMotionSupply.md](EngineMotionSupply.md): Startup declaration consumption and original b7 GPU supply verified in process 43504. Forty native MV grafts pass offline checks; grouped instances, all-route supply, full-screen boundary MV and FG remain incomplete.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 

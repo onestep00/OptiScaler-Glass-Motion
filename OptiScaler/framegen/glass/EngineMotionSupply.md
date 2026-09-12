@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: selected draw-time native supply and GPU vertices verified; scoped native declaration hook installed; existing-layout refresh, all-route coverage and FG integration incomplete
+- Status: startup declaration consumption and original b7 GPU supply verified on a selected route; 40 native MV grafts validate offline; all-route coverage and FG integration incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -191,6 +191,78 @@ Local tools/evidence added under `work/glass-native-material-v1/`:
 - `prepare_native_world_capture.py`, `prepare_flag_world_capture.py`, `run_native_world_capture.py`, `analyze_native_world.py`: live GPU supply/flag experiments, with completed results under `native-world-gpu/`.
 - `resolve_motion_metadata.py`, `motion-metadata-resolved.json`: live binary-to-metadata mapping, including aliases.
 - `build_declaration_hook.py`, `native-declaration-hook/`: build/profile, owned test and status for the currently enabled upstream declaration probe. The canonical source is the module's `CyberpunkDeclarationProbe.cpp`.
+
+## Startup consumption and original GPU upload, 2026-09-13
+
+The user accepted a startup/load-time adapter. The RED4ext build of
+`CyberpunkDeclarationProbe.cpp` was placed in MO2's
+`overwrite/red4ext/plugins/GlassMotion/GlassMotion.dll`, not an independently
+registered MO2 mod. Its SHA-256 is
+`9dfd2d1cea433eae7e369a9426e622c1e1e080d3964900b0658ad53a8d0e7ee4`.
+Owned self-tests, exports and rejection of a foreign executable passed before
+deployment. The plugin attaches only the code hook during RED4ext Load and
+initializes the immutable declaration on its first real provider callback.
+Game objects and allocators are not dereferenced during plugin Load.
+
+Fresh process 43504 actually loaded that file. Its normal engine calls requested
+the augmented declaration 34 times out of 8,376 observed provider calls, with
+zero rejection and zero manual provider verification calls. This supersedes the
+preceding process's one-manual-call-only result. The metadata scope is still the
+single checked key; global transparency admission is not established.
+
+The existing bounded output observer then recorded 4,096 original evaluator
+calls. In 198 calls on 45 distinct proxy addresses, the native record list included
+the new row 24 and the original evaluator filled that slot. All 198 outputs were
+readable/nonzero and their proxy roots stayed stable across the call. The observer
+did not call the supplier itself. No admitted row belonged to an array proxy.
+Current/previous equality counts overlap and are not counts of moving objects.
+
+`prepare_engine_bound_capture.py` changes the diagnostic shader's previous-root
+binding to the game's original b7 rows 24..26. It calls no supplier and uploads no
+private matrix. The original root bindings reach the diagnostic shader unchanged.
+Its 64 completed GPU captures produced 53 N-1 pairs and 8,427 compared vertices,
+with zero invalid vertices and maximum error 0.000169611 pixels. Maximum observed
+motion was 0.371287 pixels. This proves the selected declaration-to-native-upload
+route; it is not complete world coverage or generated-frame quality evidence.
+
+`match_shared_native_motion.py` now compares original position-expression graphs
+using logical input semantics and referenced resource contracts. It does not
+match by material names. Across 879 native velocity VS and 675 transparent VS,
+42 transparent VS have an exact current-position match plus a native prior-clip
+candidate. Loops/unresolved controls and nonmatching expressions remain explicit
+gaps. The matcher is a candidate selector, not a runtime binding validator.
+
+`graft_native_motion.py` copies the original native previous-position arithmetic,
+including original bone addressing/selection, and reuses identical target
+subexpressions. It relocates the native motion matrix reads to b7 rows 24..26 and
+retains the target's original color/position outputs. Forty grafts pass DXIL
+validation and exact expression checks against the native source after row
+relocation; all original output SSA values and definitions remain unchanged.
+Two matched candidates lack the three-row root contract and remain unsupported.
+These 40 binaries are not enabled globally: their complete VS/PS storage/supply
+and grouped-instance contracts still require admission.
+
+The grafted shader for the already supplied route was then executed in the game
+using the same original b7 upload. In 64 captures, 47 N-1 pairs compared 7,473
+vertices with no invalid values and maximum error 0.000096012 pixels. That run had
+negligible motion (maximum 0.000105668 pixels), so it validates binding/arithmetic
+consistency but not moving-object quality. No single-object visualization was
+presented as a full-screen result. Both GPU observers unloaded after capture.
+
+The next required result is full-screen geometry-derived object/edge MV with
+coverage across supported routes, not another selected-object image. Final
+composition must preserve these user requirements: actual object boundaries use
+object MV; interior weight is `saturate(opacity * InteriorStrength)` with a numeric
+control (zero means boundary-only); overlapping coverage selects the nearest
+camera surface before MV composition. Unrelated background pixels remain intact.
+No new FG input has been connected by these experiments.
+
+Local evidence: `startup-native-output-latest.json`,
+`engine-bound-gpu-1789232792886130800/capture-1789232842864661300/analysis.json`,
+`shared-native-motion-matches.json`, `native-grafted/index.json`,
+`native-grafted/verification.json`, and
+`native-graft-gpu-1789233454907652200/capture-1789233464654268300/analysis.json`.
+All paths in this paragraph are under `work/glass-native-material-v1/`.
 
 ## Framework investigation
 
