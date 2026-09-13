@@ -603,6 +603,37 @@ Local evidence: `audit_native_writer_layouts.py`, `native-writer-layouts.json`,
 `motion-writer-slot-audit.json`, and `pending-motion-declarations/manifest.json`
 under `work/glass-native-material-v1/`.
 
+## Live supplier context target, 2026-09-13
+
+The existing bounded supplier-output diagnostic was extended locally to record
+the first evaluator context argument and its owner/vtable/virtual-0x20 target.
+It performs the original pointer loads without invoking that virtual function.
+Owned valid/invalid-pointer checks and the preceding output checks passed. The
+original 142-byte evaluator entry and executable identity were verified before
+attachment to the existing process 24404. No restart or menu operation was used.
+
+The diagnostic captured 4,096 normal evaluator calls and stopped successfully.
+3,988 records resolved context vtable RVA `0x2ac8688`, whose +0x20 target is
+`0x18ec810`. Its five live bytes matched the original executable exactly:
+`lea rax, [rcx+0x10]; ret`. It returns an address and performs no memory write.
+The other 108 records did not resolve a target. Crucially, none of the captured
+record lists executed modifier 0. This identifies a real context implementation
+but does not certify that the six unresolved shader pairs use that context, or
+that every possible context has the same virtual method. Their admission remains
+unresolved rather than inferred from this sample.
+
+The same recording contains 180 original row-24 outputs from the previously
+installed selected declaration, and 302 array calls without a MotionMatrix
+record. These are present-process supply observations, not new transparent MV
+coverage. No matrix was injected by the recorder, no GPU command was added, and
+the installed FG correction remains unchanged. The diagnostic is pinned and only
+forwards calls after Save.
+
+Local evidence: `MotionContextProbe.cpp`, `context-probe-latest.json`, and
+`context-live-1789265826318681500/{preflight.json,analysis.json,capture/}` under
+`work/glass-native-material-v1/`. Loaded diagnostic SHA-256:
+`d9872c13268986d1075989de51acfada5acbe969a8d1ce00bb58078d1181fede`.
+
 ## Framework investigation
 
 - [RED4ext Hooking API](https://raw.githubusercontent.com/WopsS/RED4ext.SDK/master/include/RED4ext/Api/v1/Hooking.hpp)
