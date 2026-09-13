@@ -25,7 +25,7 @@
 
 - [GeometryDraws.md](GeometryDraws.md): Same-flush parents verified live; global storage offsets are separated from original indices after finding grouped repacking. Grouped/unknown flags reject linear identity; native lifetimes and MV/FG remain incomplete.
 
-- [ArraySourceDomains.md](ArraySourceDomains.md): Caller-context diagnostics captured 697 game updates and resolved 2,686 source-element occurrences. Four independent tests cover real unwind/callback and scalar decoding. Cross-frame lifetime, foliage/particle identity and MV/FG remain incomplete.
+- [ArraySourceDomains.md](ArraySourceDomains.md): Dynamic placeholder ordinals and recovered RBX/RSI counts pass five owned checks. New live recorder saw zero updates and is stopped. Earlier capture resolved 2,686 source-element occurrences; temporal identity and MV/FG remain incomplete.
 
 - [SourceSlots.md](SourceSlots.md): Source-slot to history lookup checks original index, owner, view and frame. Node IDs identify the parent setup; native array generations and game connection remain incomplete.
 

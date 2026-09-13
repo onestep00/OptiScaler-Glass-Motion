@@ -84,8 +84,22 @@ template<class Read> DiagnosticArraySource ReadDiagnosticArraySource(
         if (mapping.compact(result.first, result.count, result.mask) &&
             mapping.packedCount() == packedCount) result.flags |= 16;
     }
+    else if (result.kind == 3 && result.count <= 256 && caller.Rsi == result.count &&
+             packedCount == result.count)
+    {
+        // Native 57b114 advances its input by 64 bytes and appends one 48-byte
+        // output for every source ordinal. Inactive bits append placeholders;
+        // they do not compact the following elements. RSI is the original
+        // input count retained in the checked producer's nonvolatile register.
+        // This certifies ordinal layout only, never N-1 identity or visibility.
+        for (unsigned word = 0; word < (result.count + 63u) / 64u; ++word)
+        {
+            const auto remaining = result.count - word * 64u;
+            const auto validBits = remaining >= 64 ? UINT64_MAX : (std::uint64_t {1} << remaining) - 1;
+            if (result.mask[word] & validBits) { result.flags |= 16; break; }
+        }
+    }
     else if (result.kind == 4 && packedCount == result.count) result.flags |= 16;
-    // Kind 3: placeholder records are not certified baked-element identities.
     return result;
 }
 } // namespace GlassFg

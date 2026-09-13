@@ -5,6 +5,8 @@
 extern "C" void* DiagnosticWrapperTarget = reinterpret_cast<void*>(&enqueue);
 extern "C" unsigned char ArraySourceTraceFixture(void*, void*, void*, void*);
 extern "C" void DiagnosticArrayReturn();
+extern "C" unsigned char DynamicArraySourceTraceFixture(void*, void*, void*, void*, std::uint64_t);
+extern "C" void DiagnosticDynamicArrayReturn();
 unsigned forwards = 0;
 unsigned char forward(void*, void*, void*) { ++forwards; return 39; }
 int main()
@@ -31,9 +33,24 @@ int main()
             rows[i].source.mask[0] != 0x49ULL + i || rows[i].source.steps != 2 ||
             rows[i].source.node != reinterpret_cast<std::uint64_t>(node.data())) return 2;
     }
+    sourceImage = reinterpret_cast<std::uint64_t>(&DiagnosticDynamicArrayReturn) - 0x57b3e0;
+    span[1] = span[0] + 8 * 48;
+    for (unsigned count : {8u, 7u})
+    {
+        const auto index = used.load();
+        if (DynamicArraySourceTraceFixture(node.data(), handle.data(), span.data(), bounds.data(), count) != 39)
+            return 4;
+        const auto& source = rows[index].source;
+        if (used != index + 1 || source.kind != 3 || source.steps != 2 ||
+            source.node != reinterpret_cast<std::uint64_t>(node.data()) ||
+            source.flags != (count == 8 ? 31u : 15u) || source.mask[0] != 0x4a) return 5;
+    }
+    const auto recorded = used.load();
+    const auto forwarded = forwards;
     recording = false;
     if (ArraySourceTraceFixture(node.data(), handle.data(), span.data(), bounds.data()) != 39 ||
-        used != 2 || forwards != 3 || active || profileMagic != 0x49555036) return 3;
+        used != recorded || forwards != forwarded + 1 || active || profileMagic != 0x49555036) return 3;
     std::puts("PASS wrapper_real_caller_context=1 source_mask_changes=1 forwarded_result=39 "
+              "dynamic_rbx_rsi_context=1 wrong_dynamic_count_rejected=1 "
               "unwind_steps=2 disabled_recording=1 game_hooks=0");
 }

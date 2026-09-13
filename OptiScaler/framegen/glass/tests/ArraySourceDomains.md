@@ -1,9 +1,9 @@
 # Native array source domains
 
 - Created: 2026-09-12
-- Updated: 2026-09-12
-- Status: bounded live source-range/selection capture; temporal correspondence incomplete
-- Deployment: optional source-trace observer loaded in PID 21760; recording stopped; no motion or FG substitution
+- Updated: 2026-09-13
+- Status: bounded source-range capture and dynamic placeholder layout decoder; temporal correspondence incomplete
+- Deployment: new diagnostic loaded in PID 24404; record/save succeeded with zero array calls; stopped, no MV or FG substitution
 - Deprecated: no
 - Scope: upstream identities of instanced render arrays; not a material whitelist or complete world coverage
 
@@ -140,3 +140,45 @@ Address tuples and same-invocation source ranges do not prove cross-frame
 lifetime, producer-to-draw frame matching or MV. Recording is stopped and the
 forwarding DLL remains pinned; the process was responding after Save. No new
 geometry MV was supplied to FG.
+
+## Dynamic input ordinal layout, 2026-09-13
+
+The dynamic producer `0x57b114` retains its original input count in RSI and its
+node in RBX. Its loop advances the 64-byte input and source bit index together.
+An active bit appends a converted transform; an inactive bit appends a placeholder
+at `0x57b6bf`. Both branches advance to the same next ordinal. Thus this output
+keeps holes, unlike the compacted baked producer `0x579ab8`. The callback thunk
+`0x57b97c` computes the count from the supplied span divided by 64. The destruction
+event path `0x8e8288` also indexes that span with the same event element index
+used for the node's state bitsets. These are original instruction observations,
+not a position-matching heuristic or cross-frame lifetime proof.
+
+`ReadDiagnosticArraySource` now recognizes the dynamic ordinal layout only when
+the recovered RSI count, definition range count and emitted 48-byte span count
+agree, the count is at most 256, and an in-range active bit exists. It retains the
+entire original mask. It performs at most four mask-word checks without allocating
+or copying transforms. A compacted span, mismatched count, empty/inapplicable mask
+or changing headers stays unadmitted. The local analyzer emits placeholder indices
+separately; those entries must not acquire visible-object or N-1 history admission.
+Definition lifetime, applied update ordering and renderer selection still need
+verification before these ordinals can supply motion.
+
+The actual diagnostic callback fixture now recovers RBX/RSI across two real
+unwind steps. Correct counts pass; a changed caller count is rejected. Additional
+scalar tests cover changed masks, compacted-count confusion, the 64/65-bit boundary,
+out-of-range active bits and the 256-element bound. All five independent build
+checks pass, including the original wrapper/compact/shared-range regressions.
+
+Process 24404's nine required native function ranges matched 6,260 bytes. The
+prepared diagnostic SHA `aaadecc3f2a01f735e20ba6b4b40c6b40c847726432c834fa6d1ebf3f209db5e`
+loaded at its full path without restart. Start/Save returned zero, but the short
+capture recorded zero calls, including zero filtered calls. `status.txt` confirms
+recording=0; the forwarding hook stays pinned. This is no live dynamic-layout,
+history or MV validation. A subsequent source-only optimization removed the
+temporary index-map construction from the mask check; its final build also
+passes and has not replaced the resident diagnostic. The production correction
+and MO2 files remain unchanged.
+
+Local evidence: `work/glass-array-source-live-v1/dynamic-live-p24404/preflight.json`,
+`capture-1/{status.txt,analysis.json}` beneath that directory, and
+`work/glass-array-source-live-v1/dynamic-layout-final-build/`.

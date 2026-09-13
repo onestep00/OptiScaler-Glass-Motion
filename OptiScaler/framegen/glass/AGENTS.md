@@ -20,7 +20,7 @@
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): Same-flush parents verified live; global storage offsets are separated from original indices after finding grouped repacking. Grouped/unknown flags reject linear identity; native lifetimes and MV/FG remain incomplete.
 
-- [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Bounded live caller-context capture resolves shared/destructible source ranges, with 2,686 source-element occurrences. Temporal ownership and actual MV/FG remain incomplete; diagnostic recording stopped.
+- [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Dynamic placeholder ordering and caller-count checks added; five owned checks pass. Live diagnostic recorded zero updates and stopped. Previous shared/baked evidence remains; temporal ownership and MV/FG are incomplete.
 
 - [tests/SourceSlots.md](tests/SourceSlots.md): Original source-slot lookup now composes array history keys. Node-level ID lookup is documented separately from element identity; native lifetime/update supply remains incomplete.
 
