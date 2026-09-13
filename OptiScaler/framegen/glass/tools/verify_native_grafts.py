@@ -24,6 +24,14 @@ for r in index['shaders']:
     if r.get('coverage_guard'):
         _,guard=a.uncollapsed_position()
         assert guard==r['coverage_guard']
+    current_id=next(i for i,f in a.outs.items() if f[1]=='!"SV_Position"')
+    original_current=[a.roots[current_id][i] for i in range(4)]
+    recorded_current=[b.roots[r['current_output']][i] for i in range(4)]
+    assert b.before_jitter_subtraction(recorded_current)==original_current,'incorrect current jitter convention'
+    geometry=a.uncollapsed_position()[0] if r.get('coverage_guard') else None
+    try:a.before_jitter_subtraction(geometry)
+    except ValueError:pass
+    else:raise AssertionError('original already subtracts jitter; graft would subtract twice')
     src=Shader(native)
     handles={v for v,h in src.handles.items() if h[0]==2 and h[2]==7}
     def relocate(m):
@@ -53,7 +61,8 @@ for r in index['shaders']:
         pending.extend(zip(x[1],y[1]))
         assert len(seen)<=100000,'expression comparison bound exceeded'
     results.append(dict(sha256=r['sha256'],original_outputs_unchanged=True,
-                        original_branches_unchanged=True,native_previous_expression_identical=True))
+                        original_branches_unchanged=True,native_previous_expression_identical=True,
+                        current_clip_convention_verified=True))
 result=dict(checked=len(results),passed=len(results),scope='Exact expression and original-output checks; not live material supply',results=results)
 (p/'native-grafted/verification.json').write_text(json.dumps(result,indent=2))
 print(json.dumps({k:result[k] for k in ('checked','passed','scope')}))

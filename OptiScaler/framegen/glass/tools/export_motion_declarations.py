@@ -32,7 +32,7 @@ def main():
     verification = json.loads((p / 'native-grafted/verification.json').read_text())
     verified = {r['sha256'] for r in verification['results']
                 if r['original_outputs_unchanged'] and r['original_branches_unchanged']
-                and r['native_previous_expression_identical']}
+                and r['native_previous_expression_identical'] and r.get('current_clip_convention_verified')}
     selected = [r for r in index['shaders'] if r['status'] == 'validated']
     if {r['sha256'] for r in selected} != verified:
         raise ValueError('graft and preservation results disagree')

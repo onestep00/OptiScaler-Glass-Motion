@@ -1,6 +1,6 @@
 """Owned checks for split native clip components and invalid prior candidates."""
 import json
-from match_shared_native_motion import native_previous
+from match_shared_native_motion import native_previous, Shader
 
 
 class Fixture:
@@ -37,7 +37,26 @@ def main():
         pass
     else:
         raise AssertionError('incomplete prior clip accepted')
-    print(json.dumps(dict(camera_layouts=2, split_outputs=True, invalid_rejected=True, game_attached=False)))
+    shader=Shader.__new__(Shader)
+    shader.defs={
+        '%1':'fsub fast float %10, %3', '%2':'fsub fast float %11, %4',
+        '%3':'fmul fast float %5, %13', '%4':'fmul fast float %13, %6',
+        '%5':'extractvalue %dx.types.CBufRet.f32 %7, 0',
+        '%6':'extractvalue %dx.types.CBufRet.f32 %7, 1',
+        '%7':'call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %8, i32 51)'}
+    shader.handles={'%8':(2,0,1,'false')};shader.resources={(2,0):('i32 0',)}
+    roots=['%1','%2','%12','%13']
+    assert shader.before_jitter_subtraction(roots)==['%10','%11','%12','%13']
+    for value, invalid in (('%1','fadd fast float %10, %3'),('%3','fmul fast float %5, %14'),
+                           ('%6','extractvalue %dx.types.CBufRet.f32 %7, 0'),
+                           ('%7',shader.defs['%7'].replace('i32 51','i32 50'))):
+        saved=shader.defs[value];shader.defs[value]=invalid
+        try:shader.before_jitter_subtraction(roots)
+        except ValueError:pass
+        else:raise AssertionError('invalid jitter subtraction accepted')
+        shader.defs[value]=saved
+    print(json.dumps(dict(camera_layouts=2, split_outputs=True, explicit_jitter_subtraction=True,
+                          invalid_rejected=True, game_attached=False)))
 
 
 if __name__ == '__main__':

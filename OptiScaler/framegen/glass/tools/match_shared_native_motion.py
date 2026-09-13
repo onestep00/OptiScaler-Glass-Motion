@@ -208,6 +208,28 @@ class Shader:
                              collapsed_predecessor=collapsed,join=join,
                              original_coverage_preserved=True)
 
+    def before_jitter_subtraction(self,roots=None):
+        """Recognize exactly XY - b1[51].xy * W; original code stays intact."""
+        if roots is None:
+            oid=next(i for i,f in self.outs.items() if f[1]=='!"SV_Position"')
+            roots=[self.roots[oid][i] for i in range(4)]
+        result=list(roots)
+        value=r'(%(?:\d+|graft[\w.]*))'
+        for col in range(2):
+            sub=re.fullmatch('fsub fast float '+value+', '+value,self.defs.get(roots[col],''))
+            if not sub:raise ValueError('no explicit clip jitter subtraction')
+            mul=re.fullmatch('fmul fast float '+value+', '+value,self.defs.get(sub[2],''))
+            if not mul or roots[3] not in mul.groups():raise ValueError('jitter does not use the same clip W')
+            jitter=mul[2] if mul[1]==roots[3] else mul[1]
+            extract=re.fullmatch(r'extractvalue %dx.types.CBufRet.f32 '+value+', '+str(col),self.defs.get(jitter,''))
+            if not extract:raise ValueError('jitter component mismatch')
+            load=re.fullmatch(r'call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32\(i32 59, %dx.types.Handle '+value+r', i32 51\)',self.defs.get(extract[1],''))
+            handle=self.handles.get(load[1]) if load else None
+            if not handle or handle[0]!=2 or handle[2]!=1 or self.resources[handle[0],handle[1]][0]!='i32 0':
+                raise ValueError('jitter camera binding mismatch')
+            result[col]=sub[1]
+        return result
+
     def position_graph(self,supplied_roots=None):
         """Exact graph with explicit predecessor edges, including loops.
 

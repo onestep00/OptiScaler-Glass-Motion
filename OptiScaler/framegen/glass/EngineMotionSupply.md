@@ -509,6 +509,59 @@ Repeatable commands are `audit_motion_gaps.py --workspace <local inventory>` and
 `declaration-adapter-1789262827914444400/result.json`. The native PS disassembly
 remains in the local `modifier-writer-audit/` directory.
 
+## Current clip convention and original batch scheduling, 2026-09-13
+
+The verifier now checks the added diagnostic current-clip output as well as the
+native previous expression. It recognizes only the exact original camera binding
+and `XY - b1[51].xy * W` using the same clip W. It rejects double subtraction when
+the original pre-coverage position already has this form. All 240 existing grafts
+pass; this adds no supported shader. Sixteen remaining candidates already contain
+explicit jitter subtraction. Removing that difference for a trial comparison
+added no native match, so that matcher fallback was removed. Declaration export
+requires the new current-clip result. Owned sign/component/row/W negative checks
+also pass. These expression checks do not establish the live camera contents.
+
+`audit_native_instance_inputs.py` examines both data and control dependencies of
+current and native prior clip across all 879 original velocity VS. All parsed:
+720 use INSTANCE_TRANSFORM in the current graph but not the previous graph;
+154 use it in both; five use it in neither graph. A declared input alone is not
+counted. The 154 include original effect, foliage, diode and distant-crowd/vehicle
+variants; they are not one universal grouped-motion implementation. Reading the
+current instance transform in a previous-position graph does not prove that the
+engine supplies an independent N-1 instance transform. Full dependency reports
+remain local for following each actual buffer path without a material whitelist.
+
+The common native creation-to-batch path was traced in the current executable:
+
+1. Builder `0x2ae99c` collects update categories from the actual constructed
+   modifier list into material byte `+0x22` bits 0..2. The native category helper
+   assigns MotionMatrix to category 4.
+2. Map insertion `0x52b848` places the value at node `+0x10`; its copy constructor
+   `0x52b964` preserves those category bits. They are consequently at node `+0x32`.
+3. Packet builder `0x1e9658` copies these bits into packet qword 0 bits 14..16.
+   The alternate array packet builder `0x1ea780` also packs the low three bits there.
+4. In `0x1f1208`, a changed low-18-bit registry index enables update categories 5.
+   If the packet categories intersect the active update mask, the engine calls
+   batch flush `0x1f191c` before the original modifier evaluator `0x1f0418`.
+   That flush uploads a dirty 448-byte material block and emits pending geometry.
+5. The subsequent array append `0x1f1a88` still consumes the packet's entire
+   encoded instance count (qword 1 bits 18..32), copying 48-byte transforms or the
+   original 64-byte extended records. There is no per-element MotionMatrix
+   evaluation in that append loop.
+
+This explains how native per-proxy material updates can separate pending draws
+without proving that an array proxy has per-element history. Adding a declaration
+alone must not authorize assigning one root transform to every array element.
+The live native packet category, grouping, supplier output and actual shader
+input still need joint verification. The fixed RVAs above are local diagnostic
+evidence for the recorded executable, not the startup compatibility mechanism.
+
+Local evidence: `native-instance-input-audit.json` (all 879 VS),
+`native-batch-gate-audit.json` (ten exact native instruction ranges checked against
+the executable SHA), and `audit_native_batch_gate.py`, under
+`work/glass-native-material-v1/`. No game attachment, new DLL deployment, new
+full-screen MV or FG substitution occurred during this audit.
+
 ## Framework investigation
 
 - [RED4ext Hooking API](https://raw.githubusercontent.com/WopsS/RED4ext.SDK/master/include/RED4ext/Api/v1/Hooking.hpp)

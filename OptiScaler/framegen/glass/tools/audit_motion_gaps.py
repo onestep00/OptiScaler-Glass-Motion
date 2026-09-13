@@ -43,6 +43,11 @@ def main():
                 geometry = None
                 row['terminal_coverage_guard'] = False
             _, graph = shader.position_graph(geometry)
+            try:
+                shader.before_jitter_subtraction(geometry)
+                row['explicit_jitter_subtraction'] = True
+            except ValueError:
+                row['explicit_jitter_subtraction'] = False
             values = [key[1] for key in graph if key[0] == 'value']
             dependencies = shader.dependencies_values(values)
             row['position_and_control_inputs'] = dependencies
@@ -69,6 +74,7 @@ def main():
                    native_candidate_but_graft_rejected=sum(r['native_candidate'] for r in rows),
                    camera_0_to_3=sum(r['camera_0_to_3'] for r in parsed),
                    camera_28_to_31=sum(r['camera_28_to_31'] for r in parsed),
+                   explicit_jitter_subtraction=sum(r['explicit_jitter_subtraction'] for r in parsed),
                    material_b4_dependencies=sum(bool(r['material_b4_rows']) for r in parsed),
                    global_b0_dependencies=sum(bool(r['global_b0_rows']) for r in parsed),
                    instance_transform_inputs=sum(r['instance_transform_input'] for r in parsed),
