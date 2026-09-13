@@ -14,7 +14,7 @@
 
 - [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): 209 native grafts validate offline; scoped declaration adapter passes bounded/thread/relocation checks. All 1,854 selected VS/PS pairs match loaded cache, covering 204 grafted VS. Broader live supply, remaining motion routes, full-screen MV and FG are incomplete; new adapter not deployed.
+- [EngineMotionSupply.md](EngineMotionSupply.md): Both original prior-camera layouts yield 240 validated native grafts; 2,024 pairs pass owned adapter checks. The preceding 1,854 pairs matched loaded cache. Remaining 435 candidates, broad live supply, full-screen MV and FG are incomplete; new adapter not deployed.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 

@@ -319,6 +319,34 @@ class Shader:
             if '@dx.op.bufferLoad' in rhs or '@dx.op.sample' in rhs or '@dx.op.textureLoad' in rhs:other.append(rhs)
         return dict(cb_rows=sorted(cb),inputs=sorted(inputs),resource_reads=len(other),instructions=len(seen))
 
+def native_previous(shader):
+    # Native velocity programs use two camera layouts. The forward layout's
+    # b1[12..15] outputs also feed the original PS previous/current divide and
+    # subtraction; they are not absent history merely because b1[16..19] is unused.
+    dependencies={(oid,col):shader.dependencies_values([value])
+                  for oid,roots in shader.roots.items() for col,value in roots.items()}
+    alternatives=[]
+    for start in (16,12):
+        scalar=defaultdict(list)
+        for oid,roots in shader.roots.items():
+            for col,value in roots.items():
+                cb=set(map(tuple,dependencies[oid,col]['cb_rows']))
+                old={row for binding,row in cb if binding==1 and start<=row<start+4}
+                current={row for binding,row in cb if binding==1 and
+                         (28<=row<32 or (start==12 and 0<=row<4))}
+                if len(old)==1 and not current:scalar[next(iter(old))-start].append((oid,col,value))
+        if set(scalar)!={0,1,2,3}:continue
+        if any(len({value for _,_,value in rows})!=1 for rows in scalar.values()):
+            raise ValueError('ambiguous prior-projection component')
+        components=[list(scalar[i][0][:2]) for i in range(4)]
+        roots=[scalar[i][0][2] for i in range(4)]
+        alternatives.append(dict(components=components,dependencies=shader.dependencies_values(roots),
+                                 camera_rows=list(range(start,start+4))))
+    if not alternatives:raise ValueError('no complete native prior-projection output')
+    if len(alternatives)!=1:raise ValueError('ambiguous native prior camera layout')
+    return alternatives
+
+
 def main():
     native=json.loads((p/'opaque-velocity-audit/index.json').read_text())['shaders']
     transparent=json.loads((p/'all-transparent-input-routes.json').read_text())['shaders']
@@ -327,19 +355,7 @@ def main():
     for r in native:
         try:
             s=Shader(Path(r['disassembly']).read_text(),contracts.get(r['sha256']));key,graph_keys=s.position_graph()
-            scalar=defaultdict(list)
-            for oid,roots in s.roots.items():
-                for col,value in roots.items():
-                    d=s.dependencies_values([value]);cb=set(map(tuple,d['cb_rows']))
-                    old={row for binding,row in cb if binding==1 and 16<=row<20}
-                    current={row for binding,row in cb if binding==1 and 28<=row<32}
-                    if len(old)==1 and not current:scalar[next(iter(old))-16].append((oid,col,value))
-            if set(scalar)!={0,1,2,3}:raise ValueError('no complete native prior-projection output')
-            if any(len({value for _,_,value in rows})!=1 for rows in scalar.values()):
-                raise ValueError('ambiguous prior-projection component')
-            components=[list(scalar[i][0][:2]) for i in range(4)]
-            d=s.dependencies_values([scalar[i][0][2] for i in range(4)])
-            prior=[dict(components=components,dependencies=d)]
+            prior=native_previous(s)
             n=dict(sha256=r['sha256'],previous=prior,techniques=r['techniques'])
             groups[key].append(n);natives.append(n)
             # Specialize a native material amplitude to the target's literal one
@@ -379,6 +395,7 @@ def main():
     summary=dict(native_total=len(native),native_current_compared=len(natives),native_rejected=dict(reject),
         transparent_total=len(transparent),transparent_matched=len(matches),unmatched=dict(Counter(x['reason'] for x in miss)),
         native_templates=sum(map(len,groups.values())),
+        native_camera_layouts=dict(Counter(str(n['previous'][0]['camera_rows']) for n in natives)),
         coverage_preserved_matches=sum(bool(r['coverage_guard']) for r in matches),
         method='Exact position/control graph with named rows and validated unit-amplitude specialization; no material-name matching',
         live_bindings_verified=False,grafted=False)

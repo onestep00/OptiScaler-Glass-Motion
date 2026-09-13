@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: selected startup/b7 supply verified; 209 native MV grafts and scoped declaration adapter pass offline checks; 1,854 shader pairs match loaded cache; broader live supply, all-route MV and FG incomplete
+- Status: selected startup/b7 supply verified; 240 native MV grafts validate offline; scoped adapter passes 2,024 owned pair checks, with the preceding 1,854 pairs matched to loaded cache; broader live supply, all-route MV and FG incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -450,6 +450,64 @@ Local evidence: `pending-motion-declarations/manifest.json`,
 `declaration-adapter-1789261537898194200/result.json`, and the stage/constructor
 disassemblies in `modifier-writer-audit/`. Extracted cache/engine binaries and
 diagnostic builds remain local.
+
+## Second native camera layout and remaining input groups, 2026-09-13
+
+`audit_motion_gaps.py` groups every unresolved entry in the 675-VS base-cache
+candidate inventory by its actual position/control dependencies. It records
+camera/material/global rows, instance/skinning inputs and resource reads. Family
+names are report labels only. This found a substantial set using b1 rows 0..3
+where the earlier native reference set primarily projected through rows 28..31.
+Those matrices are not assumed interchangeable.
+
+The earlier detector had excluded 42 of 879 native velocity VS because they use
+b1 rows 12..15 for prior clip instead of rows 16..19. The original
+`79f7efb...a454` VS, for example, exports the four prior components across output
+5.w and 6.xyz after reading rows 12..15 and the original b7 MotionMatrix. Its
+actual paired PS `682c2fb4...b035` writes native velocity target 3 using those
+components divided by prior W minus the corresponding current components divided
+by current W, scaled by `(0.5, -0.5, 1000)`. This confirms an actual native MV
+consumer, not just a guessed output name or a copied camera matrix.
+
+`native_previous()` now recognizes both complete, unambiguous component layouts.
+It keeps the original native arithmetic and bindings, records the chosen camera
+rows, and rejects incomplete, conflicting or mixed-current candidates. All 879
+native velocity VS now expose a candidate: 837 use rows 16..19 and 42 use rows
+12..15. The complete current-position graph still must match the target before
+copying any previous calculation. No camera-row equivalence was introduced.
+
+This expands exact transparent matches from 215 to 250. Of those, 240 grafts pass
+DXIL validation and the original-definition/output/branch plus native-prior
+expression verification. Thirty-one are new; none of the preceding 209 was lost.
+The four other new candidates lack required native resource contracts and remain
+rejected, joining six preceding rejections. Five other shaders have multiple
+position-component stores and 420 have no admitted native current-position match.
+
+The pending declaration export now contains 85 declarations, 221 names and 2,024
+VS/PS pairs covering 235 grafted VS. The five VS-only entries remain unpaired.
+All 85 declarations and 2,024 pairs passed the actual adapter's owned callback
+fixture. This newer 2,024-pair set has not been live-hook tested; the preceding
+read-only loaded-cache proof covered 1,854 pairs. No new DLL was installed.
+
+There are 435 unresolved candidate VS. Of 430 parsed entries, 227 read all camera
+rows 0..3, 187 read all rows 28..31, 256 use material b4, 130 use global b0, 245
+use instance-transform inputs, 128 use skinning inputs and 185 read position
+resources. These overlapping counts are dependency groups, not supported-object
+counts or proof that a prior input is missing. Particle/procedural and remaining
+deformation supply, native writer spans, broad live binding, full-screen MV and
+actual FG remain incomplete.
+
+A sharing-independent graph comparison was also evaluated over the full native
+and target sets. It added no candidate and removed none. That experimental code
+was removed rather than adding work to the permanent matching path.
+
+Repeatable commands are `audit_motion_gaps.py --workspace <local inventory>` and
+`check_native_projection.py --workspace <local inventory>`. Local evidence:
+`native-prior-detector-gaps.json`, `native-motion-gaps.json`, updated
+`shared-native-motion-matches.json`, `native-grafted/index.json`,
+`native-grafted/verification.json`, and
+`declaration-adapter-1789262827914444400/result.json`. The native PS disassembly
+remains in the local `modifier-writer-audit/` directory.
 
 ## Framework investigation
 
