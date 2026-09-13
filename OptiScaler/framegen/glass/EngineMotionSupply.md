@@ -562,6 +562,47 @@ the executable SHA), and `audit_native_batch_gate.py`, under
 `work/glass-native-material-v1/`. No game attachment, new DLL deployment, new
 full-screen MV or FG substitution occurred during this audit.
 
+## Exact pair direct-writer audit, 2026-09-13
+
+`audit_motion_writer_slots.py` now joins all 2,024 pending pairs through their
+actual VS and PS binary-to-metadata identities, rather than every alias of equal
+shader bytes. These pairs contain 94 distinct metadata unions. It consumes the
+local executable-specific constructor/supplier inspection in
+`native-writer-layouts.json`; extracted executable bytes remain local.
+
+Twelve modifier constructors expose 30 payload fields, including the proposed
+MotionMatrix. The original presence gates differ: CullObjects/DismParams and
+DestructionRegions require both fields before adding a modifier, while several
+other constructors accept any present field. A requested mask bit with absent
+required names therefore does not necessarily execute a supplier. MaterialParam
+and CullObjects constructor dataflow was decoded on the warm-name path; cold
+registration and recursive supplier callees are not certified by this audit.
+
+The inspected direct spans distinguish resource bindings (including 77) from
+b7 rows. ProxyTranslation writes one row, while the same supplier's other two
+matrix payloads can write four rows each. Those matrix names are absent from the
+current selected pairs; their spans are still retained in the inspection.
+Garment IsBound and DismParams each write one row; their associated resource
+slots are separate. The proposed MotionMatrix reserves all four rows 24..27.
+
+No inspected direct write overlaps those reserved rows. 2,018 pairs have complete
+direct-span classifications. Six pairs retain modifier 0, whose supplier tail
+calls context virtual method +0x20; its actual target remains unresolved. These
+six are not silently removed from the target set. Even the other 2,018 do not
+establish recursive callee safety, broad live upload, grouped history or FG.
+`native_writer_spans_verified` and `runtime_admitted` remain false.
+
+The pending export records this separate result only when cache, exact-pair and
+inspection hashes match; it reports stale evidence after an input change and
+rejects an observed reserved-row overlap. Twelve owned checks cover multi-row
+overlap, 448-byte bounds, signed row bytes, the absent-name sentinel, resource
+bindings, constructor gates, unknown/indirect suppliers and conflicting VS/PS
+names. No DLL was deployed and no new game MV was produced in this step.
+
+Local evidence: `audit_native_writer_layouts.py`, `native-writer-layouts.json`,
+`motion-writer-slot-audit.json`, and `pending-motion-declarations/manifest.json`
+under `work/glass-native-material-v1/`.
+
 ## Framework investigation
 
 - [RED4ext Hooking API](https://raw.githubusercontent.com/WopsS/RED4ext.SDK/master/include/RED4ext/Api/v1/Hooking.hpp)

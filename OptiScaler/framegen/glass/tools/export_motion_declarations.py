@@ -124,6 +124,25 @@ def main():
                   omitted_techniques=omitted,
                   pair_sha256=hashlib.sha256(pair_blob).hexdigest(),
                   pair_scope='Exact cache VS/PS identities; live stage binding and native writer admission pending')
+    writer_path = p / 'motion-writer-slot-audit.json'
+    if writer_path.exists():
+        writer = json.loads(writer_path.read_text())
+        source_path = p / 'native-writer-layouts.json'
+        writer_tool = Path(__file__).with_name('audit_motion_writer_slots.py')
+        if (writer['cache_sha256'] != result['cache_sha256'] or
+                writer['pair_sha256'] != result['pair_sha256'] or
+                not source_path.exists() or
+                writer['source_sha256'] != hashlib.sha256(source_path.read_bytes()).hexdigest() or
+                writer['tool_sha256'] != hashlib.sha256(writer_tool.read_bytes()).hexdigest()):
+            # A changed export needs a new audit. Do not inherit a stale result.
+            result['direct_writer_audit'] = dict(state='stale; rerun audit_motion_writer_slots.py')
+        else:
+            if writer['summary']['overlapping_pairs']:
+                raise ValueError('native direct writer overlaps reserved motion storage')
+            result['direct_writer_audit'] = dict(state='inspected direct spans only',
+                                                **writer['summary'])
+        # Recursive callee, cold constructor and live/history proofs remain
+        # separate even when every inspected direct span is clear.
     (out / 'manifest.json').write_text(json.dumps(result, indent=2))
     print(json.dumps({k: v for k, v in result.items() if k not in ('plans', 'omitted_techniques', 'unpaired_vertex_shaders')}))
 

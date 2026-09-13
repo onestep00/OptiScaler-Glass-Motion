@@ -14,7 +14,7 @@
 
 - [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): 240 grafts pass prior/current-clip checks; all 879 native VS inputs audited. Original packet category flushes on proxy updates but does not establish per-element array history. Remaining 435 candidates, broad live supply, full-screen MV and FG are incomplete; new adapter not deployed.
+- [EngineMotionSupply.md](EngineMotionSupply.md): 240 grafts pass offline checks. Direct writer audit covers 2,024 pairs: no inspected overlap, six indirect-supplier gaps; recursive/live supply remains unverified. Remaining 435 shader candidates, grouped history, full-screen MV and FG are incomplete; new adapter not deployed.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 

@@ -7,6 +7,9 @@
 
 ## Index
 
+- `audit_motion_writer_slots.py`: exact VS/PS metadata union and local native constructor/write-range inspection; preserves unresolved suppliers and never grants runtime admission.
+- `check_motion_writer_slots.py`: owned checks for multi-row overlap, absent-name gates, resource bindings, signed rows and conflicting stage metadata.
+
 - `export_motion_declarations.py`: pending bounded declarations and exact VS/PS cache pairs; records unpaired variants, no automatic deployment or writer/history admission.
 - `check_motion_declarations.py`: batch-build owned declaration/scope/relocation/callback and foreign-startup tests; never attaches to the game.
 - `audit_motion_gaps.py`: group all unresolved candidates by position/control dependencies; input presence does not prove history supply.
