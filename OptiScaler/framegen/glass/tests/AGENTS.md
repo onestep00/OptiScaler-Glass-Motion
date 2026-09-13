@@ -19,6 +19,8 @@
 
 ## Document index
 
+- [../EngineMotionSupply.md](../EngineMotionSupply.md): MotionDeclarations, MotionShaderScope and DeclarationCompatibility exercise bounded immutable metadata, nested/thread-local shader-pair scope, actual owned adapter callbacks and relocated native profiles. No live hook or new FG admission follows from these tests.
+
 - [Timeline.md](Timeline.md): Live diagnostic parent lookup and 8,000 concurrent-event checks pass. Neighbor-frame mismatches remain; no GPU replay or MV/FG proof.
 
 - [GeometryDraws.md](GeometryDraws.md): Same-flush parents verified live; global storage offsets are separated from original indices after finding grouped repacking. Grouped/unknown flags reject linear identity; native lifetimes and MV/FG remain incomplete.

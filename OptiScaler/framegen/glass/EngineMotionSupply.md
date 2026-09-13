@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: selected startup/b7 supply verified; 209 native MV grafts validate offline with original coverage preserved; 3,780 shared-stage shader footprints audited; all-route supply and FG incomplete
+- Status: selected startup/b7 supply verified; 209 native MV grafts and scoped declaration adapter pass offline checks; 1,854 shader pairs match loaded cache; broader live supply, all-route MV and FG incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -368,6 +368,88 @@ coverage decisions, dynamic/out-of-range b7 accesses and unresolved handles.
 The native constructor/supplier map covers the original 32 modifier categories;
 it is static inspection, not runtime coverage. Process 43504 was still responsive
 at this checkpoint. No new DLL or full-screen FG input was deployed in this step.
+
+## Bounded declaration and actual shader-pair scope, 2026-09-13
+
+`MotionDeclarationTable.h` replaces the single-key implementation in the pending
+adapter with a fixed-capacity table: at most 256 declarations, 4,096 source names
+and 32 names per augmented declaration. Original records and names remain owned
+by the engine. The adapter clones only the requested metadata, appends the native
+MotionMatrix name and reserves all four rows 24..27. It validates actual name/hash
+and row values on each provider call, including after a pointer is reused. The
+first clone initialization has a mutex; subsequent reads use immutable published
+storage. This table holds no object positions, GPU buffers or frame histories.
+
+Metadata keys are not shader identities. The 83 selected keys are shared with
+unselected particle/fullscreen and opaque/depth programs. The pending adapter
+therefore additionally hooks the original stage resolver. That function selects
+the VS from combination+8 for stage 0, or PS from combination+16 for stage 1,
+resolves its binary, then requests the binary's metadata before merging the mask
+and names into the compiled layout. The original merge and uploader remain native.
+
+`MotionShaderScope.h` authorizes an exact VS/PS cache-identity pair and its expected
+VS metadata. The scoped thread-local selection exists only across that native
+stage call. Metadata changes require both the expected key and the verified
+direct metadata-call return site. Pixel stages, unselected partners, calls outside
+the scope and unrelated nested calls forward unchanged. Nested stage calls clear
+or replace the outer selection and restore it on return. This is shader/layout
+creation work, not per-draw matching or a material-name whitelist.
+
+The pending export contains 1,854 VS/PS pairs covering 204 of the 209 grafted VS.
+Five grafted VS occur only in ten selected VS-only depth/G-buffer techniques and
+are explicitly absent from this pair adapter. These inventory flags are candidate
+scope, not proof that every pair contributes visible transparency to FG. The
+other 466 VS still require their original motion paths. A stable read-only snapshot
+of process 24404's 19,647 loaded combination records contained all 1,854 requested
+pairs in stage-0 ordering, with no missing pair. It read 3,143,592 bytes twice/with
+header checks in total; that one-shot diagnostic copy is not part of runtime.
+This establishes loaded cache correspondence, not execution of the new hooks.
+
+Startup function discovery uses `RelocatableCode` profiles for six audited native
+functions. Only relocatable address operands are normalized; data layouts, opcode
+bytes and branch structure remain checked. The actual referenced lookup helper
+must match its profile. Owned PE tests relocate the metadata and stage functions,
+reject duplicate matches and a wrong callee, and verify the relocated metadata
+return site. This handles supported address relocation, not arbitrary code changes.
+The preceding manual diagnostic entry still uses its exact fingerprint/RVA profile.
+
+`tools/check_motion_declarations.py` builds and runs the bounded table, scope,
+compatibility, actual adapter callback and negative startup checks together. The
+maximum table check exercised 8,192 concurrent calls. The scope check exercised
+32,768 calls across eight threads. The adapter's owned fixture passed all 83
+declarations and 1,854 stage pairs while preserving original metadata and pair
+records; pixel stages and unscoped calls stayed unchanged. A foreign executable
+was rejected before any hook attempt and wrote the explicit rejection status.
+These checks use owned memory and do not execute or attach to the game.
+
+The two fixed tables occupy 256,096 bytes together, plus small counters and TLS.
+There is no per-frame file read, shader hashing, GPU readback or GPU synchronization
+in this selection path. Existing object-supplier cost and new rendering work are
+separate and are not measured by these CPU checks.
+
+The new startup adapter reports configured/prepared declarations, configured
+pairs, stage hook installation, selected/out-of-scope calls and native layout
+rejection in `status.json`. The pending adapter remains uninstalled. Process 24404
+still loaded the preceding GlassMotion DLL hash `9dfd2d1...e4` and OptiScaler host
+hash `997b5465...204`; the original version.dll ASI loader was present. The new code
+does not establish all native writer spans, array element history, live b7 upload,
+full-screen object/edge MV or a new FG input. Those remain required before broader
+runtime admission and completion.
+
+After code/table validation, the startup adapter pins its own module before
+attaching callbacks. This keeps immutable metadata and forwarding code mapped
+even if a subsequent attach or detach fails; Stop disables redirection. The
+startup adapter lasts until process exit, while the separate diagnostic-host
+experiment DLL remains replaceable. This follows the documented
+[GetModuleHandleExW PIN lifetime](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexw)
+and the SDK's separate
+[Attach/Detach results](https://raw.githubusercontent.com/WopsS/RED4ext.SDK/master/include/RED4ext/Api/v1/Hooking.hpp).
+
+Local evidence: `pending-motion-declarations/manifest.json`,
+`shader-pair-live-1789261207863059700.json`,
+`declaration-adapter-1789261537898194200/result.json`, and the stage/constructor
+disassemblies in `modifier-writer-audit/`. Extracted cache/engine binaries and
+diagnostic builds remain local.
 
 ## Framework investigation
 

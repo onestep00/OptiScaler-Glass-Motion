@@ -159,6 +159,31 @@ class RelocatableCode
         }
         return found;
     }
+    // A caller reference can identify a shared helper whose body also occurs
+    // elsewhere. Validate that exact function entry instead of requiring global
+    // uniqueness of a compiler-generated helper.
+    bool functionAt(std::uint32_t rva, const Profile& profile) const
+    {
+        if (!exceptionCount || !profile.bytes || profile.bytes > 65536)
+            return false;
+        DWORD lo = 0, hi = exceptionCount;
+        while (lo < hi)
+        {
+            const DWORD mid = lo + (hi - lo) / 2;
+            RUNTIME_FUNCTION f {};
+            if (!read(std::uint64_t(exceptionRva) + std::uint64_t(mid) * sizeof(f), f))
+                return false;
+            if (f.BeginAddress < rva)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        RUNTIME_FUNCTION f {};
+        return lo < exceptionCount &&
+               read(std::uint64_t(exceptionRva) + std::uint64_t(lo) * sizeof(f), f) &&
+               f.BeginAddress == rva && f.EndAddress > rva && f.EndAddress - rva == profile.bytes &&
+               matches(rva, profile);
+    }
     std::uint32_t uniqueWindow(std::span<const unsigned char> signature, std::span<const Reference> references) const
     {
         if (signature.empty() || signature.size() > 256 || references.empty() || !references.front().offset ||

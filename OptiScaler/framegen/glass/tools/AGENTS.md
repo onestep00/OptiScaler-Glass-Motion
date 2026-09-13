@@ -7,6 +7,9 @@
 
 ## Index
 
+- `export_motion_declarations.py`: pending bounded declarations and exact VS/PS cache pairs; records unpaired variants, no automatic deployment or writer/history admission.
+- `check_motion_declarations.py`: batch-build owned declaration/scope/relocation/callback and foreign-startup tests; never attaches to the game.
+
 - `read_modifier_contracts.py`: cache-wide named modifier rows and shader aliases; no runtime reads.
 - `match_shared_native_motion.py`: native position/control graph matching, split prior outputs, unit-amplitude specialization and coverage-preserving terminal-collapse matching.
 - `graft_native_motion.py`: transplant native prior-position arithmetic and validate DXIL; engine slot admission remains separate.
