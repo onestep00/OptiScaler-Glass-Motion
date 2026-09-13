@@ -7,6 +7,10 @@
 
 ## Index
 
+- `bridge_native_preskinned.py`: separate offline candidates declaring the original t9/b3 preskinning inputs; no live binding creation or pending runtime export.
+- `check_native_preskinned.py`: metadata-node, original-output, binding collision, feature-flag and negative prior-row checks.
+- `native_graft_checks.py`: common output/current-clip/prior-graph verifier used by both graft paths.
+
 - `audit_motion_writer_slots.py`: exact VS/PS metadata union and local native constructor/write-range inspection; preserves unresolved suppliers and never grants runtime admission.
 - `check_motion_writer_slots.py`: owned checks for multi-row overlap, absent-name gates, resource bindings, signed rows and conflicting stage metadata.
 

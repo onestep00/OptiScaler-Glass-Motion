@@ -2,7 +2,7 @@
 
 - Created: 2026-09-13
 - Updated: 2026-09-13
-- Status: selected startup/b7 supply verified; 240 native MV grafts validate offline; scoped adapter passes 2,024 owned pair checks, with the preceding 1,854 pairs matched to loaded cache; broader live supply, all-route MV and FG incomplete
+- Status: 240 ordinary grafts and 10 separate preskinned-input candidates validate offline; selected startup/b7 supply verified; broader native inputs, all-route MV and FG incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
 - Scope: common material modifier supply, shader declaration creation and framework feasibility; all world transparency remains the objective
@@ -633,6 +633,53 @@ Local evidence: `MotionContextProbe.cpp`, `context-probe-latest.json`, and
 `context-live-1789265826318681500/{preflight.json,analysis.json,capture/}` under
 `work/glass-native-material-v1/`. Loaded diagnostic SHA-256:
 `d9872c13268986d1075989de51acfada5acbe969a8d1ce00bb58078d1181fede`.
+
+## Original preskinned input bridge, 2026-09-13
+
+All ten resource-contract rejections share the same missing pair: raw SRV t9
+and a 176-byte b3 constant buffer in register space 0. The original native prior
+position calculation uses these inputs; the target has no declarations for them.
+Its matching current-position graph and required vertex input semantics remain
+available. This is an absent shader declaration, not proof that the engine never
+binds the resources. The original 420 unmatched plus five multiple-store targets
+remain separate unresolved shader paths.
+
+The native geometry binding path `0x1f1e44 -> 0x1f2b68` reaches `0x76d868` with
+the engine's deformation owner, chunk and selector. That function selects an
+owner+0x40 handle at `3*chunk + (selector+1)%2`, stores it at descriptor+0x84,
+zeros descriptor+0x88, and copies the corresponding two original float4 blocks to
+descriptor+0x50/+0x60. The binder sends a valid descriptor+0x84 to resource index
+9 through `0x1f5438`, and writes logical constant row 8 and rows 9..10 through
+`0x1f5b24`. No per-object name filter occurs in this inspected path.
+
+These are static executable observations. Native prior VS reads b3 rows 1..3;
+the logical-bank-to-b3 mapping, selector-to-consecutive-rendered-frame identity,
+actual bound resource and lifetime still need verification. The CPU selector
+alone is not accepted as N-1 proof. Four original function bodies totaling 1,995
+bytes are fingerprinted in local `native-preskinned-supply.json`.
+
+`bridge_native_preskinned.py` adds those exact two shader resource declarations
+in a separate candidate directory and reuses `graft_native_motion.py` unchanged
+for the original prior arithmetic. It neither allocates previous geometry nor
+changes the native binding or selector. Required t9/b3 inputs remain explicit
+and unverified in each candidate record. Existing conflicting resource ranges
+are rejected instead of overwritten.
+
+All ten resulting candidates passed DXIL validation, exact original definition,
+output and branch preservation, current clip convention, and complete native
+prior graph comparison. The existing 240 passed the same checks after the
+verifier was extracted into shared `native_graft_checks.py`. The pending runtime
+export remains the preceding 240-graft set; the ten are not silently admitted.
+Full-screen MV and FG input substitution are still incomplete.
+
+The bridge reserves metadata numbers including distinct control-flow nodes and
+adds only the required raw-buffer flag, preserving existing flags. This follows
+the [DXC shader flag definition](https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/main/include/dxc/DXIL/DxilShaderFlags.h).
+The ten-shader check also rejects repeated/conflicting input declarations and a
+deliberately wrong native previous-matrix row. No new DLL was deployed in this
+step. Local artifacts are `missing-native-contract-audit.json`,
+`native-preskinned-supply.json` and `native-preskinned-grafted/` under
+`work/glass-native-material-v1/`.
 
 ## Framework investigation
 
