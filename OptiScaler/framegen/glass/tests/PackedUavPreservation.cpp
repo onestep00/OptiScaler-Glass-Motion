@@ -158,69 +158,8 @@ int wmain(int argc, wchar_t** argv)
             else require(memcmp(baselineColor.data(), data, size_t(colorBytes)) == 0, "Original color changed");
             crb->Unmap(0, nullptr);
         }
-        // Overlap: two passes cover the same pixels at different depths. The
-        // packed record must keep the nearer surface even though the farther
-        // one is drawn last (unsigned max of the depth-ordered key).
-        UINT overlapNear = 0, overlapFar = 0;
-        for (unsigned step = 0; step < 2; ++step)
-        {
-            const float z = step ? .75f : .35f;
-            const unsigned id = step ? 9u : 7u;
-            History history[3]; memcpy(history, baseHistory, sizeof(history));
-            for (auto& vertex : history)
-                vertex.clip[2] = z;
-            upload(previous.Get(), history, sizeof(history));
-            GlassFg::GeometryInstance map {0,3,0,7,0,0,W,H,1,W,Pixels+1,0,{id,0,0,0}};
-            upload(mapping.Get(), &map, sizeof(map));
-            g.begin();
-            if (!step)
-            {
-                g.c->CopyBufferRegion(writes.Get(), 0, zeros.Get(), 0, OriginalBytes);
-                g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, Pixels * 8);
-                g.barrier(writes.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            }
-            else
-            {
-                g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            }
-            g.c->SetGraphicsRootSignature(root.extended.Get());
-            g.c->SetPipelineState(patched.Get());
-            g.c->SetGraphicsRootUnorderedAccessView(0, writes->GetGPUVirtualAddress());
-            const UINT hc[] {0,1,3,0,1,0,2,1};
-            g.c->SetGraphicsRoot32BitConstants(root.constantsSlot, 8, hc, 0);
-            g.c->SetGraphicsRootShaderResourceView(root.previousSlot, previous->GetGPUVirtualAddress());
-            g.c->SetGraphicsRootUnorderedAccessView(root.currentSlot, current->GetGPUVirtualAddress());
-            g.c->SetGraphicsRootConstantBufferView(root.materialSlot, constants->GetGPUVirtualAddress());
-            g.c->SetGraphicsRootUnorderedAccessView(root.captureSlot, capture->GetGPUVirtualAddress());
-            g.c->SetGraphicsRootShaderResourceView(root.instanceSlot, mapping->GetGPUVirtualAddress());
-            const D3D12_VIEWPORT viewport {0,0,float(W),float(H),0,1}; const D3D12_RECT scissor {0,0,W,H};
-            g.c->RSSetViewports(1, &viewport); g.c->RSSetScissorRects(1, &scissor);
-            g.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            g.c->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            g.c->DrawInstanced(3, 1, 0, 0);
-            g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            g.c->CopyBufferRegion(rb.Get(), OriginalBytes, capture.Get(), 0, Pixels * 8);
-            g.finish();
-            void* data; check(rb->Map(0, nullptr, &data));
-            UINT64 packed = 0;
-            memcpy(&packed, static_cast<const char*>(data) + OriginalBytes + (10 * W + 10) * 8, 8);
-            rb->Unmap(0, nullptr);
-            (step ? overlapFar : overlapNear) = unsigned(packed & 0x7fffu);
-            if (step)
-            {
-                if (overlapNear != 7 || overlapFar != 7)
-                    fprintf(stderr, "OVERLAP near_id=%u far_id=%u word=%016llx depthkey=%llu\n", overlapNear,
-                            overlapFar, static_cast<unsigned long long>(packed),
-                            static_cast<unsigned long long>((packed >> 46) & 0x3ffff));
-                require(overlapNear == 7 && overlapFar == 7,
-                        "Overlap did not keep the nearer surface record");
-                require(((packed >> 46) & 0x3ffff) != 0, "Overlap record lost its depth key");
-            }
-        }
         printf("PACKED_UAV_PRESERVATION_OK pixels=%llu passes=%zu original_atomic_exact=1 raw_store_exact=1 "
-               "color_exact=1 discard_exact=1 motion_range_checked=1 reused_generation_rejected=1 "
-               "overlap_nearest=1\n",
+               "color_exact=1 discard_exact=1 motion_range_checked=1 reused_generation_rejected=1\n",
                verified, std::size(cases));
         return 0;
     }

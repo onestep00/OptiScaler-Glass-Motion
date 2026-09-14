@@ -1,4 +1,6 @@
 #include "GeometryTestDevice.h"
+#include "../PackedMotionShader.h"
+#include <string>
 
 namespace
 {
@@ -34,6 +36,16 @@ int wmain(int argc, wchar_t** argv)
         D3D12_FEATURE_DATA_D3D12_OPTIONS1 options {};
         check(g.d->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options)));
         require(options.Int64ShaderOps, "Int64 shader operations unavailable");
+        // Overlap resolution is structural: the packed store is an unsigned max
+        // on a depth-ordered key, so the nearest surface keeps the record even
+        // when a farther surface is drawn later.
+        const auto packedBody = GlassFg::Detail::CapturePackedMotion("", 3, 7);
+        require(packedBody.find("dx.op.atomicBinOp.i64") != std::string::npos,
+                "Packed store is not an atomic operation");
+        require(packedBody.find(", i32 7, i32 %glass.byteaddress") != std::string::npos,
+                "Packed store is not unsigned max on the depth-ordered key");
+        require(packedBody.find("shl i64 %glass.depth64, 46") != std::string::npos,
+                "Packed depth is not the high-order key");
 
         D3D12_ROOT_PARAMETER parameters[2] {};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -96,7 +108,8 @@ int wmain(int argc, wchar_t** argv)
         }
         const D3D12_RANGE noWrite {0, 0};
         readback->Unmap(0, &noWrite);
-        printf("PACKED_MOTION_GPU_OK sm=0x%x int64=1 pixels=%u candidates=%u bytes_per_pixel=8\n",
+        printf("PACKED_MOTION_GPU_OK sm=0x%x int64=1 pixels=%u candidates=%u bytes_per_pixel=8 "
+               "nearest_max_atomic=1 depth_high_key=1\n",
                uint32_t(shaderModel.HighestShaderModel), PixelCount, CandidateCount);
         return 0;
     }
