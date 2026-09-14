@@ -12,6 +12,12 @@
 
 ## Document index
 
+- [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Latest split population header decoding and caller-context checks; diagnostic-only current ordinals, not previous motion or deployment.
+
+- [CompletionPlan.md](CompletionPlan.md): Active opaque-MV-first plan. Modifier construction/publication/packet ordering checkpoint added; 20 VS request gaps remain across 88 exact cache combinations and are absent from limited historical captures. Array identity, render N-1 and other native routes remain incomplete; no new game MV.
+
+- [NativeOpaqueMvRoutes.md](NativeOpaqueMvRoutes.md): Original supply matrix. Common modifier upload/binding and weight initialization linked (16 functions/62 sites). Historical 152 root records/23 native VS map vertex b7 to slot 3; 4,745 handle records agree, GPU contents/N-1 not verified. Instance audit covers 899 VS. Group selection and MV-FG remain incomplete. Old graft labels need revalidation.
+
 - [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
 
 - [EngineMotionSupply.md](EngineMotionSupply.md): 240 grafts plus 10 separate preskinned t9/b3 candidates pass offline checks. Native prior-buffer binder found; actual inputs/frame ownership unverified. Other 425 shader paths, grouped history, full-screen MV and FG remain incomplete; broad adapter not deployed.
@@ -120,3 +126,9 @@
 - The isolated compositor supports per-input valid regions and normalized endpoint offsets across different previous/current/intermediate/final sizes. Analytic GPU mapping tests and a controlled actual-FG comparison passed. This is not proof that arbitrary DLSS stages share a color domain or that the game host supplies these inputs.
 - README.md also distinguishes installed static-world projection from possible engine object-motion inputs. Previous-transform and second-bone-state bytecode paths were found; validity at transparent draws remains unverified. Complete-material single-MV selectors failed the controlled 432-output FG comparison and were not adopted.
 - A later read-only game trace established material and two NGX calls before the identified tone-map command in 22 submission batches. Pixel/color transfer remains unresolved. tests/StageReadback.h prepares native-size diagnostic copies, independently verified with padded regions and completion gates; it is not a game capture hook or production host integration.
+
+- ExperimentPacketParents.cpp / ExperimentSourceAbi.h: additive packet-parent V2 captures original instance flags in same native append; owned tests and Timeline V2 consumer passed; PID28004 actual flags capture completed in attempt266. Previous geometry remains unverified.
+
+- ExperimentTimelineModule.cpp: packet V2 plus explicit resident owner provider records48B source identity sidecar after original ungrouped range validation; actual9344 array rows connected in attempt268. Not previous geometry.
+
+- DiagnosticPacketTransform.h: audited48B CPU source address and stable double-read with bounded Timeline recording. Actual33696 records captured272; not GPU/current-to-prior render proof.
