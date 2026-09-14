@@ -13,7 +13,9 @@
 #include "GlassDebugControl.h"
 #include "NativeHost.h"
 #include <Util.h>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 namespace GlassFg
 {
@@ -95,6 +97,17 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 health.sampledMs = GetTickCount64();
                 PublishGeometryHealth(health);
                 GeometryTelemetry::refresh.store(refreshHealth, std::memory_order_release);
+                // The live channel and the periodic log must not depend on the
+                // game reaching the FG path: menus and loading screens never
+                // evaluate DLSS-G. One 1 Hz thread keeps the tick alive; the
+                // existing frame hooks stay the primary source.
+                std::thread([] {
+                    for (;;)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                        RefreshGeometryHealthIfNeeded(GetTickCount64());
+                    }
+                }).detach();
                 if (FILE* log = _wfopen((directory / L"OptiScaler.Glass.Geometry.log").c_str(), L"a"))
                 {
                     fprintf(
