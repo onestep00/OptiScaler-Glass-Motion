@@ -155,7 +155,7 @@ static int runDump(const wchar_t* shader)
     require(gpu.serviceDump(), "dump was not written");
     struct Expected { const wchar_t* name; };
     const Expected expected[] { { L"dump-1-mv.ppm" }, { L"dump-1-depth.ppm" }, { L"dump-1-original-mv.ppm" },
-                                { L"dump-1-original-depth.ppm" }, { L"dump-1.txt" } };
+                                { L"dump-1-original-depth.ppm" }, { L"dump-1-packed.ppm" }, { L"dump-1.txt" } };
     unsigned long long bytes = 0;
     for (const auto& entry : expected)
     {

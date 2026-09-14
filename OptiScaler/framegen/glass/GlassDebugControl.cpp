@@ -13,10 +13,26 @@ namespace GlassFg
 namespace
 {
 std::atomic<bool> shaderReloadRequested = false;
+std::atomic<bool> readyWritten = false;
 
 std::filesystem::path controlPath(const wchar_t* name)
 {
     return Util::DllPath().parent_path() / L"Glass" / name;
+}
+
+// The live channel must be verifiable from outside: this file lands wherever
+// the module's own writes are redirected, which is the directory the game can
+// also read requests from.
+void writeReadyFile()
+{
+    if (readyWritten.exchange(true, std::memory_order_acq_rel))
+        return;
+    std::ofstream file(controlPath(L"glass-debug.ready"), std::ios::trunc);
+    if (!file)
+        return;
+    file << "module=" << Util::DllPath().string() << "\n";
+    file << "directory=" << controlPath(L"").string() << "\n";
+    file << "ok=1\n";
 }
 
 void writeStatus(std::ofstream& file)
@@ -54,6 +70,7 @@ void PollGlassDebugControl() noexcept
 {
     try
     {
+        writeReadyFile();
         const auto request = controlPath(L"glass-debug.request");
         std::error_code error;
         if (!std::filesystem::exists(request, error) || error)
@@ -62,7 +79,16 @@ void PollGlassDebugControl() noexcept
         const auto consumed = controlPath(L"glass-debug.consumed");
         std::filesystem::rename(request, consumed, error);
         if (error)
-            return;
+        {
+            // Windows refuses a rename onto an existing file. Clear the stale
+            // target and retry once instead of stalling the channel forever.
+            std::error_code ignored;
+            std::filesystem::remove(consumed, ignored);
+            error.clear();
+            std::filesystem::rename(request, consumed, error);
+            if (error)
+                return;
+        }
         std::ifstream input(consumed);
         std::ofstream output(controlPath(L"glass-debug.response"), std::ios::trunc);
         if (!input || !output)
