@@ -679,11 +679,14 @@ class PackedMotionGpu
         if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalDepth, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         {
-            // Same rule as the write-back: the shader only reads the rows it
-            // dispatches over. A pending dump reads the whole frame, so keep the
-            // full copy for that case only.
+            // The staged row limit controls the new compute work only. Any
+            // output that the FG evaluation consumes must hold a complete
+            // frame: rows the compute never touches would otherwise keep stale
+            // memory, and NGX reading that is wrong by construction (the
+            // 22:49 reset ran with 240 composed rows and a stale remainder).
+            // A pending dump reads the whole frame as well.
             const unsigned copyRows =
-                dumpRequests.load(std::memory_order_relaxed)
+                (dumpRequests.load(std::memory_order_relaxed) || controls.packedSubstitute)
                     ? height
                     : (std::min)(height, (std::max)(1u, controls.packedRows));
             const D3D12_BOX box { 0, 0, 0, width, copyRows, 1 };

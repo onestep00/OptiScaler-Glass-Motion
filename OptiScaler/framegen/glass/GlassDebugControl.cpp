@@ -76,6 +76,19 @@ void writeStatus(std::ofstream& file)
          << " replaced=" << mapping.replaced << " lookups=" << mapping.lookups << " hits=" << mapping.hits
          << " misses=" << mapping.misses << " out_of_range=" << mapping.outOfRange
          << " evictions=" << mapping.evictions << "\n";
+    // Bounded first-N keys. The plugin publishes outputStart-based ranges while
+    // the identity provider queries the packet transform index, so a live miss
+    // has to be attributable to either the proxy or the ordinal domain.
+    file << "mapprobe_publish";
+    for (unsigned i = 0; i < mapping.publishProbeCount; ++i)
+        file << " " << std::hex << mapping.publishProbe[i].proxy << "@" << std::dec << mapping.publishProbe[i].value
+             << "+" << mapping.publishProbe[i].ordinal;
+    file << "\n";
+    file << "mapprobe_lookup";
+    for (unsigned i = 0; i < mapping.lookupProbeCount; ++i)
+        file << " " << std::hex << mapping.lookupProbe[i].proxy << ":" << std::dec << mapping.lookupProbe[i].ordinal
+             << "=" << mapping.lookupProbe[i].result;
+    file << "\n";
     file << "ok=1\n";
 }
 } // namespace

@@ -17,6 +17,10 @@ GlassArrayMappingEntry entries[Capacity] {};
 std::mutex mutex;
 std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 }, misses { 0 }, outOfRange { 0 },
     evictions { 0 };
+// First-N probe records, guarded by the same mutex. Bounded and diagnostic only.
+unsigned publishProbeCount = 0, lookupProbeCount = 0;
+GlassArrayMappingStats::Probe publishProbe[GlassArrayMappingStats::ProbeCapacity] {};
+GlassArrayMappingStats::Probe lookupProbe[GlassArrayMappingStats::ProbeCapacity] {};
 
 std::uint32_t lookupUnlocked(std::uintptr_t proxy, std::uint32_t ordinal, bool& entryFound) noexcept
 {
@@ -42,6 +46,14 @@ void PublishArrayMapping(const GlassArrayMappingEntry& source) noexcept
     if (entry.count > 64)
         entry.count = 64;
     std::lock_guard lock(mutex);
+    if (publishProbeCount < GlassArrayMappingStats::ProbeCapacity)
+    {
+        auto& probe = publishProbe[publishProbeCount++];
+        probe.proxy = entry.proxy;
+        probe.ordinal = entry.count;
+        probe.value = entry.outputStart;
+        probe.result = 3;
+    }
     for (auto& slot : entries)
     {
         if (slot.proxy == entry.proxy && slot.count)
@@ -72,6 +84,14 @@ std::uint32_t LookupArrayMapping(std::uintptr_t proxy, std::uint32_t packetOrdin
     std::lock_guard lock(mutex);
     bool entryFound = false;
     const auto index = lookupUnlocked(proxy, packetOrdinal, entryFound);
+    if (lookupProbeCount < GlassArrayMappingStats::ProbeCapacity)
+    {
+        auto& probe = lookupProbe[lookupProbeCount++];
+        probe.proxy = proxy;
+        probe.ordinal = packetOrdinal;
+        probe.value = index;
+        probe.result = index != UINT32_MAX ? 1u : entryFound ? 2u : 0u;
+    }
     if (index != UINT32_MAX)
         ++hits;
     else if (entryFound)
@@ -95,6 +115,12 @@ GlassArrayMappingStats ReadArrayMappingStats() noexcept
     for (const auto& entry : entries)
         if (entry.count)
             ++stats.entries;
+    stats.publishProbeCount = publishProbeCount;
+    stats.lookupProbeCount = lookupProbeCount;
+    for (unsigned i = 0; i < publishProbeCount; ++i)
+        stats.publishProbe[i] = publishProbe[i];
+    for (unsigned i = 0; i < lookupProbeCount; ++i)
+        stats.lookupProbe[i] = lookupProbe[i];
     return stats;
 }
 } // namespace GlassFg

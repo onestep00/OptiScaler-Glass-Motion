@@ -28,6 +28,22 @@ struct GlassArrayMappingStats
     // Table-full evictions: a live proxy lost its slot to a newly published one.
     std::uint64_t evictions = 0;
     unsigned entries = 0;
+    // Bounded diagnostics: the first few published and queried keys, so a live
+    // session can show whether the module queries the proxy and ordinal range
+    // the plugin actually published. Never grows past these capacities.
+    struct Probe
+    {
+        std::uintptr_t proxy = 0;
+        std::uint32_t ordinal = 0, value = 0;
+        // 0 = miss (no entry for this proxy), 1 = hit, 2 = ordinal outside the
+        // published range, 3 = published entry (value = outputStart, ordinal =
+        // count).
+        unsigned result = 0;
+    };
+    static constexpr unsigned ProbeCapacity = 12;
+    unsigned publishProbeCount = 0, lookupProbeCount = 0;
+    Probe publishProbe[ProbeCapacity] {};
+    Probe lookupProbe[ProbeCapacity] {};
 };
 GlassArrayMappingStats ReadArrayMappingStats() noexcept;
 } // namespace GlassFg
