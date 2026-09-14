@@ -1000,10 +1000,18 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                 // Several REDengine shaders initialize a target to zero and
                 // overwrite it in the same final block. The final store wins.
                 // Never select an arbitrary branch-local value for the exit.
-                need(!std::regex_search(
-                         tail, std::regex(
-                                   R"(\n\s*(br |switch |indirectbr |unreachable|; <label>|[A-Za-z_][A-Za-z_0-9.]*:))")),
-                     "Branch-local final color store unsupported");
+                // The exit shape is recorded in the message so the live log can
+                // attribute the rejection to an actual control-flow pattern.
+                if (std::regex_search(
+                        tail, std::regex(
+                                  R"(\n\s*(br |switch |indirectbr |unreachable|; <label>|[A-Za-z_][A-Za-z_0-9.]*:))")))
+                {
+                    std::string detail = tail.substr(0, 120);
+                    for (auto& character : detail)
+                        if (character == '\n' || character == '\r' || character == '\t')
+                            character = '|';
+                    throw std::runtime_error("Branch-local final color store unsupported tail=" + detail);
+                }
             }
         }
         auto component = [&](unsigned target, unsigned column)
