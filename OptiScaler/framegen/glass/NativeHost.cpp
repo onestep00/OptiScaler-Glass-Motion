@@ -123,14 +123,16 @@ void runAutoStage() noexcept
         started = startMs.load(std::memory_order_relaxed);
     }
     const auto seconds = (now - started) / 1000;
-    const unsigned target = seconds < 20 ? 0u : seconds < 40 ? 1u : 2u;
+    // Escalation ladder for the boundary pass. The FG input swap is never
+    // enabled automatically: a reset must be attributable to one compute size.
+    const unsigned target = seconds < 10 ? 0u : seconds < 40 ? 1u : 2u;
     if (step.load(std::memory_order_relaxed) == target)
         return;
     step.store(target, std::memory_order_relaxed);
     auto value = ReadControls();
     value.packedDispatch = true;
-    value.packedRows = target == 0 ? 240u : 1440u;
-    value.packedSubstitute = target >= 2;
+    value.packedRows = target == 0 ? 1u : target == 1 ? 240u : 1440u;
+    value.packedSubstitute = false;
     WriteControls(value);
     if (auto& r = runtime(); r.log)
     {
