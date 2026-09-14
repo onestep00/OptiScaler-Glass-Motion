@@ -50,10 +50,14 @@ bool LoadGlassPlugin(char* message, unsigned messageBytes) noexcept
     }
     const auto attachFn = reinterpret_cast<AttachFn>(GetProcAddress(module, "GlassPluginAttach"));
     const auto detachFn = reinterpret_cast<DetachFn>(GetProcAddress(module, "GlassPluginDetach"));
-    GlassPluginApi api;
+    // The plugin uses this struct and the directory string for its whole loaded
+    // lifetime, so neither may live on this stack frame. A plugin that cached the
+    // old stack pointer crashed on 2026-09-14 17:37.
+    static GlassPluginApi api;
+    static std::wstring directory;
+    api = GlassPluginApi {};
     api.log = nullptr;
-    // Alive for the duration of attach; the plugin must copy it.
-    const auto directory = Util::DllPath().parent_path().wstring();
+    directory = Util::DllPath().parent_path().wstring();
     api.moduleDirectory = directory.c_str();
     api.engineUpdate = nullptr;
     if (const auto* layout = GetCyberpunkLayout(GetModuleHandleW(nullptr)))

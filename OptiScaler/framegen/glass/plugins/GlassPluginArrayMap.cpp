@@ -15,9 +15,11 @@
 #include "../DetourThreads.h"
 #include <cstdio>
 #include <cstdint>
+#include <cstdarg>
 #include <cstring>
 #include <iterator>
 #include <atomic>
+#include <string>
 
 namespace
 {
@@ -39,7 +41,16 @@ struct GlassPluginApi
     void (*trace)(const char* text) noexcept = nullptr;
 };
 
-const GlassPluginApi* host = nullptr;
+// The host pointer must never outlive the caller's stack frame: the resident
+// module builds the API struct on its poll thread and returns immediately after
+// Attach. Storing that pointer crashed the game on 2026-09-14 17:37 when the
+// first grouped-array publish call jumped through reused stack memory. Keep a
+// private copy and publish it with release/acquire ordering.
+GlassPluginApi hostStorage {};
+std::atomic<const GlassPluginApi*> host { nullptr };
+std::atomic<unsigned> groupedCalls { 0 }, appendCalls { 0 };
+HMODULE selfModule = nullptr;
+std::wstring ownLogPath;
 using GroupedPathFn = void (*)(std::uintptr_t proxy, std::uintptr_t* context);
 using AppendFn = void (*)(void* container, std::uintptr_t sourceMatrix);
 GroupedPathFn originalGrouped = nullptr;
@@ -60,13 +71,58 @@ std::uint64_t publishedFrames = 0;
 
 void trace(const char* text)
 {
-    if (host && host->trace)
-        host->trace(text);
+    const auto* api = host.load(std::memory_order_acquire);
+    if (api && api->trace)
+        api->trace(text);
+}
+
+// Independent of the resident module so hook-entry and fault evidence survives
+// even when the module's own trace path is the suspect.
+void directLog(const char* format, ...) noexcept
+{
+    if (ownLogPath.empty())
+        return;
+    char line[480] {};
+    std::va_list args;
+    va_start(args, format);
+    std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (FILE* file = _wfopen(ownLogPath.c_str(), L"a"))
+    {
+        SYSTEMTIME now {};
+        GetLocalTime(&now);
+        std::fprintf(file, "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
+                     line);
+        std::fclose(file);
+    }
+}
+
+LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) noexcept
+{
+    const auto code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0ul;
+    if (code == 0xC0000005ul || code == 0xC000001Dul || code == 0xC0000094ul || code == 0xC0000096ul ||
+        code == 0xC0000409ul)
+    {
+        void* address = info->ExceptionRecord->ExceptionAddress;
+        char module[MAX_PATH] {};
+        HMODULE owner = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(address), &owner) &&
+            owner)
+            GetModuleFileNameA(owner, module, sizeof(module));
+        directLog("fault code=%08lx addr=%p module=%s", code, address, module);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 {
     (void)container;
+    const auto call = appendCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= 4)
+        directLog("append_enter=%u source=%llx valid=%u", call,
+                  static_cast<unsigned long long>(sourceMatrix), current.valid ? 1u : 0u);
     if (current.valid && sourceMatrix >= current.arrayBase &&
         sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30)
     {
@@ -79,6 +135,11 @@ void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 
 void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
 {
+    const auto call = groupedCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= 4)
+        directLog("grouped_enter=%u proxy=%llx context=%llx", call,
+                  static_cast<unsigned long long>(proxy),
+                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(context)));
     // Unreadable proxy fields must never crash the game: this hook runs on the
     // engine's render path.
     __try
@@ -97,14 +158,15 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
             firstCount = 0;
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        current.valid = false;
-        trace("ARRAY_MAP read_fault=1");
-    }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            current.valid = false;
+            directLog("read_fault=1");
+        }
     if (originalGrouped)
         originalGrouped(proxy, context);
-    if (current.valid && firstCount && host && host->publishArrayMapping)
+    const auto* api = host.load(std::memory_order_acquire);
+    if (current.valid && firstCount && api && api->publishArrayMapping)
     {
         __try
         {
@@ -115,11 +177,11 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
             entry.frame = ++publishedFrames;
             for (unsigned i = 0; i < firstCount && i < 64; ++i)
                 entry.indices[i] = firstIndices[i];
-            host->publishArrayMapping(&entry);
+            api->publishArrayMapping(&entry);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            trace("ARRAY_MAP publish_fault=1");
+            directLog("publish_fault=1");
         }
     }
     if (current.valid)
@@ -133,10 +195,23 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
                           static_cast<unsigned long long>(current.proxy), current.count, current.outputStart,
                           current.flags, appends.load(std::memory_order_relaxed), firstIndices[0], firstIndices[1],
                           firstIndices[2], firstIndices[3], firstIndices[4], firstIndices[5]);
-            trace(text);
+            directLog("%s", text);
         }
     }
     current.valid = false;
+}
+
+bool markerPresent(const wchar_t* name) noexcept
+{
+    if (ownLogPath.empty())
+        return false;
+    auto directory = ownLogPath;
+    const auto cut = directory.find_last_of(L"\\/");
+    if (cut == std::wstring::npos)
+        return false;
+    directory.resize(cut);
+    const auto candidate = directory + L"\\" + name;
+    return GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 } // namespace
 
@@ -155,7 +230,22 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
 {
     if (!api || api->version != 1 || !api->trace)
         return false;
-    host = api;
+    {
+        wchar_t path[MAX_PATH] {};
+        const auto length = GetModuleFileNameW(selfModule, path, MAX_PATH);
+        std::wstring text(path, length);
+        const auto cut = text.find_last_of(L"\\/");
+        if (cut != std::wstring::npos)
+            text.resize(cut);
+        ownLogPath = text + L"\\glass-plugin.log";
+    }
+    directLog("attach_begin exe=%p grouped=%p append=%p", GetModuleHandleW(nullptr),
+              reinterpret_cast<void*>(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)) + 0x1e8778),
+              reinterpret_cast<void*>(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)) + 0x9c19e8));
+    if (!AddVectoredExceptionHandler(1, &faultHandler))
+        directLog("veh_failed=1");
+    hostStorage = *api;
+    host.store(&hostStorage, std::memory_order_release);
     auto* base = reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr));
     if (!base)
         return false;
@@ -176,27 +266,39 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     // Detours requires a transaction and the enlistment of every thread that can
     // execute the patched code. Attaching outside a transaction crashed the game
     // on 2026-09-14 16:59.
+    const bool skipGrouped = markerPresent(L"plugin-grouped.off");
+    const bool skipAppend = markerPresent(L"plugin-append.off");
+    directLog("attach switches grouped=%u append=%u", skipGrouped ? 0u : 1u, skipAppend ? 0u : 1u);
     GlassFg::DetourThreads threads;
     if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
     {
         trace("ARRAY_MAP rejected=1 reason=transaction_begin");
         return false;
     }
-    const bool detached = DetourAttach(reinterpret_cast<PVOID*>(&originalGrouped),
-                                       reinterpret_cast<PVOID>(&hookedGrouped)) == NO_ERROR &&
-                          DetourAttach(reinterpret_cast<PVOID*>(&originalAppend),
-                                       reinterpret_cast<PVOID>(&glassArrayMapAppendTrampoline)) == NO_ERROR;
+    bool attached = true;
+    if (!skipGrouped)
+        attached = attached &&
+                   DetourAttach(reinterpret_cast<PVOID*>(&originalGrouped),
+                                reinterpret_cast<PVOID>(&hookedGrouped)) == NO_ERROR;
+    if (!skipAppend)
+        attached = attached &&
+                   DetourAttach(reinterpret_cast<PVOID*>(&originalAppend),
+                                reinterpret_cast<PVOID>(&glassArrayMapAppendTrampoline)) == NO_ERROR;
+    const bool detached = attached;
     if (!detached || !threads.enlist() || DetourTransactionCommit() != NO_ERROR)
     {
         DetourTransactionAbort();
         originalGrouped = nullptr;
         originalAppend = nullptr;
+        directLog("attach failed");
         trace("ARRAY_MAP rejected=1 reason=transaction_commit");
         return false;
     }
     // The trampoline tail-jumps here, so it must hold the real body.
     glassArrayMapAppendTarget = reinterpret_cast<void*>(originalAppend);
-    trace("ARRAY_MAP attached=1");
+    directLog("attach_committed grouped=%u append=%u", originalGrouped ? 1u : 0u, originalAppend ? 1u : 0u);
+    // The build tag makes the module log identify which DLL actually loaded.
+    trace("ARRAY_MAP attached=1 build=4-lifetime-veh");
     return true;
 }
 
@@ -217,11 +319,13 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
     }
     originalGrouped = nullptr;
     originalAppend = nullptr;
+    directLog("detached");
     trace("ARRAY_MAP detached=1");
-    host = nullptr;
+    host.store(nullptr, std::memory_order_release);
 }
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD, LPVOID)
 {
+    selfModule = instance;
     return TRUE;
 }
