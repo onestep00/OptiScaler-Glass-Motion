@@ -440,6 +440,19 @@ bool buildMappingFromOwner(std::uintptr_t proxy, std::uint32_t arrayCount, Array
         }
         if (!valid)
             continue;
+        // A grouped-array selection lists each element once. Duplicates mean the
+        // candidate is not the object's own element list, so publishing it would
+        // attach the wrong source index to every repeated element.
+        bool duplicate = false;
+        for (unsigned i = 0; i < wanted && !duplicate; ++i)
+            for (unsigned j = i + 1; j < wanted; ++j)
+                if (candidateDraft.indices[i] == candidateDraft.indices[j])
+                {
+                    duplicate = true;
+                    break;
+                }
+        if (duplicate)
+            continue;
         candidateDraft.count = wanted;
         draft = candidateDraft;
         return true;
@@ -756,10 +769,7 @@ int main()
     dumpOwner("selftest_bogus", 1, reinterpret_cast<std::uintptr_t>(object));
     alignas(8) unsigned short list[64] {};
     for (unsigned i = 0; i < 40; ++i)
-        list[i] = static_cast<unsigned short>(i);
-    list[0] = 7;
-    list[1] = 9;
-    list[2] = 39;
+        list[i] = static_cast<unsigned short>((i + 3u) % 40u);
     alignas(8) unsigned char group[0x60] {};
     *reinterpret_cast<std::uintptr_t*>(group + 0x18) = reinterpret_cast<std::uintptr_t>(list);
     *reinterpret_cast<std::uint32_t*>(group + 0x3c) = 40;
@@ -778,7 +788,7 @@ int main()
     dumpOwner("selftest_group", 2, reinterpret_cast<std::uintptr_t>(object));
     ArrayMappingDraft draft;
     const bool mapped = buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 40, draft);
-    if (!mapped || draft.count != 40 || draft.indices[0] != 7 || draft.indices[1] != 9 || draft.indices[2] != 39)
+    if (!mapped || draft.count != 40 || draft.indices[0] != 3 || draft.indices[1] != 4 || draft.indices[2] != 5)
         ++failures;
     // An owner whose count does not match the object's array count must be
     // rejected instead of published.
@@ -789,6 +799,12 @@ int main()
     list[0] = 40; // arrayCount is 40, so index 40 is invalid
     ArrayMappingDraft outOfRange;
     if (buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 40, outOfRange))
+        ++failures;
+    // A repeated source index means this is not the object's own element list.
+    list[0] = 3;
+    list[1] = 3;
+    ArrayMappingDraft duplicate;
+    if (buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 40, duplicate))
         ++failures;
     std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u mapping_built=%d\n",
                 failures, found, mapped ? 1 : 0);
