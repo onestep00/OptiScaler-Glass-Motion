@@ -213,6 +213,8 @@ void PollGlassDebugControl() noexcept
                 value.arrayMapping = line.substr(9) == "on";
             else if (line.rfind("pipelines=", 0) == 0)
                 value.compilePipelines = line.substr(10) == "on";
+            else if (line.rfind("enabled=", 0) == 0)
+                value.enabled = line.substr(8) == "on";
             else
             {
                 output << "unknown=" << line << "\n";
