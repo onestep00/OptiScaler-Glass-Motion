@@ -13,14 +13,15 @@ namespace
 constexpr unsigned Capacity = 64;
 GlassArrayMappingEntry entries[Capacity] {};
 std::mutex mutex;
-std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 };
+std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 }, misses { 0 }, outOfRange { 0 };
 
-std::uint32_t lookupUnlocked(std::uintptr_t proxy, std::uint32_t ordinal) noexcept
+std::uint32_t lookupUnlocked(std::uintptr_t proxy, std::uint32_t ordinal, bool& entryFound) noexcept
 {
     for (const auto& entry : entries)
     {
         if (entry.proxy != proxy || !entry.count)
             continue;
+        entryFound = true;
         if (ordinal < entry.outputStart || ordinal >= entry.outputStart + entry.count)
             continue;
         const auto offset = ordinal - entry.outputStart;
@@ -65,9 +66,14 @@ std::uint32_t LookupArrayMapping(std::uintptr_t proxy, std::uint32_t packetOrdin
 {
     ++lookups;
     std::lock_guard lock(mutex);
-    const auto index = lookupUnlocked(proxy, packetOrdinal);
+    bool entryFound = false;
+    const auto index = lookupUnlocked(proxy, packetOrdinal, entryFound);
     if (index != UINT32_MAX)
         ++hits;
+    else if (entryFound)
+        ++outOfRange;
+    else
+        ++misses;
     return index;
 }
 
@@ -79,6 +85,8 @@ GlassArrayMappingStats ReadArrayMappingStats() noexcept
     stats.replaced = replaced.load();
     stats.lookups = lookups.load();
     stats.hits = hits.load();
+    stats.misses = misses.load();
+    stats.outOfRange = outOfRange.load();
     for (const auto& entry : entries)
         if (entry.count)
             ++stats.entries;

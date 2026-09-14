@@ -33,6 +33,8 @@ int main()
         GlassFg::PublishArrayMapping(GlassFg::GlassArrayMappingEntry {}); // Rejected.
         stats = GlassFg::ReadArrayMappingStats();
         check(stats.entries == 2 && stats.published == 2);
+        // Eight lookups: five hits, one unknown-proxy miss, two out-of-range.
+        check(stats.lookups == 8 && stats.hits == 5 && stats.misses == 1 && stats.outOfRange == 2);
         puts("ARRAY_MAPPING publish_lookup_replace_clamp=pass");
         return 0;
     }

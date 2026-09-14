@@ -71,7 +71,8 @@ void writeStatus(std::ofstream& file)
     file << "plugin loaded=" << (GlassPluginLoaded() ? 1 : 0) << "\n";
     const auto mapping = ReadArrayMappingStats();
     file << "arraymap entries=" << mapping.entries << " published=" << mapping.published
-         << " replaced=" << mapping.replaced << " lookups=" << mapping.lookups << " hits=" << mapping.hits << "\n";
+         << " replaced=" << mapping.replaced << " lookups=" << mapping.lookups << " hits=" << mapping.hits
+         << " misses=" << mapping.misses << " out_of_range=" << mapping.outOfRange << "\n";
     file << "ok=1\n";
 }
 } // namespace

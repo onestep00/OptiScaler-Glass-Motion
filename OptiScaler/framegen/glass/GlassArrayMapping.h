@@ -21,6 +21,10 @@ std::uint32_t LookupArrayMapping(std::uintptr_t proxy, std::uint32_t packetOrdin
 struct GlassArrayMappingStats
 {
     std::uint64_t published = 0, replaced = 0, lookups = 0, hits = 0;
+    // Split lookup misses: no entry for the proxy versus an ordinal outside the
+    // published range. The distinction tells whether the plugin never published
+    // this object or published a different output range than the draw uses.
+    std::uint64_t misses = 0, outOfRange = 0;
     unsigned entries = 0;
 };
 GlassArrayMappingStats ReadArrayMappingStats() noexcept;
