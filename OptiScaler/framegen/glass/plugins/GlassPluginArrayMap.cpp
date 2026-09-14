@@ -171,6 +171,41 @@ struct ArrayMappingDraft
 bool buildMappingFromOwner(std::uintptr_t proxy, std::uint32_t arrayCount, ArrayMappingDraft& draft) noexcept;
 std::atomic<unsigned> flaggedDumps { 0 };
 
+// The owner scan is a fallback for objects whose element walk has not run yet.
+// It probes engine memory and every accepted candidate costs a readableRange
+// (VirtualQuery) round trip, so repeating it on every grouped call burned
+// eleven cores on 2026-09-14. Remember each proxy that was already probed and
+// retry only after a long call interval. Per render thread, no lock.
+constexpr unsigned long long OwnerRetryInterval = 1ull << 16;
+struct OwnerAttempt
+{
+    std::uintptr_t proxy = 0;
+    unsigned long long nextCall = 0;
+};
+thread_local OwnerAttempt ownerAttempts[64] {};
+thread_local unsigned ownerAttemptCursor = 0;
+
+bool ownerScanAllowed(std::uintptr_t proxy, unsigned long long call) noexcept
+{
+    for (const auto& attempt : ownerAttempts)
+        if (attempt.proxy == proxy)
+            return call >= attempt.nextCall;
+    return true;
+}
+
+void noteOwnerScan(std::uintptr_t proxy, unsigned long long call) noexcept
+{
+    for (auto& attempt : ownerAttempts)
+        if (attempt.proxy == proxy)
+        {
+            attempt.nextCall = call + OwnerRetryInterval;
+            return;
+        }
+    auto& slot = ownerAttempts[ownerAttemptCursor++ % std::size(ownerAttempts)];
+    slot.proxy = proxy;
+    slot.nextCall = call + OwnerRetryInterval;
+}
+
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 {
     (void)container;
@@ -260,11 +295,17 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
             else
             {
                 ArrayMappingDraft draft;
-                if (buildMappingFromOwner(proxy, current.count, draft))
+                // Bounded fallback: at most one probe per proxy per
+                // OwnerRetryInterval grouped calls on this thread.
+                if (ownerScanAllowed(proxy, call))
                 {
-                    count = draft.count;
-                    for (unsigned i = 0; i < count; ++i)
-                        indices[i] = draft.indices[i];
+                    noteOwnerScan(proxy, call);
+                    if (buildMappingFromOwner(proxy, current.count, draft))
+                    {
+                        count = draft.count;
+                        for (unsigned i = 0; i < count; ++i)
+                            indices[i] = draft.indices[i];
+                    }
                 }
             }
             if (count)

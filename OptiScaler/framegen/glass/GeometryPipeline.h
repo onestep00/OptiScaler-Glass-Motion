@@ -37,6 +37,9 @@ struct GeometryRoot
 HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* originalIdentity, UINT nodeMask,
                            const void* serialized, SIZE_T bytes, GeometryRoot& output, std::string& error,
                            GeometryLayout layout = GeometryLayout::Contiguous);
+// Packed variants that had to fall back to coverage-only capture because the
+// material exports could not be read safely. Diagnostics only.
+std::uint64_t ReadPackedCoverageFallbackCount() noexcept;
 
 // Instantiate on a worker, reuse for PSOs, and retain the compiler through all
 // calls. No compilation, file I/O or PSO creation belongs in a draw callback.

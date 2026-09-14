@@ -972,6 +972,14 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         std::array<std::array<std::string, 4>, 2> color;
         for (const auto& node : outputs)
         {
+            // Coverage-only capture never reads the material colour: the packed
+            // record carries the object identity, the previous clip and the
+            // depth. Keeping depth exports, MRT slots above one and branch-local
+            // stores on the packed path relies on the original exports staying
+            // untouched, which the packed target guarantees. Every other target
+            // keeps the strict analysis below.
+            if (coverageOnly || packedCoverageOnly)
+                break;
             const auto outputFields = split(metadata.get(node));
             need(outputFields.size() >= 2 && _stricmp(outputFields[1].c_str(), "!\"SV_Target\"") == 0,
                  "Pixel depth/stencil exports require separate coverage validation");

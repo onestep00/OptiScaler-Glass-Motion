@@ -6,7 +6,6 @@
 #include "GeometryDrawBatch.h"
 #include "GeometryPipelineCache.h"
 #include "GeometryRasterState.h"
-#include "GlassArrayMapping.h"
 #include "GlassControls.h"
 #include "VertexHistoryCache.h"
 #include <atomic>
@@ -111,21 +110,16 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
         std::uint32_t sourceIndex = 0;
         if (span.count != 1)
         {
-            // Element identity uses the original source index; a missing or
-            // unverified original order must not be guessed from the ordinal.
-            const bool linear = span.parent && span.originalOrder && span.originalIndex(ordinal, sourceIndex);
-            if (!linear)
+            // Instance arrays keep the engine's own logic. Only the order the
+            // engine itself exposes is used; a grouped element whose original
+            // source index is not available stays unresolved and keeps the
+            // engine's original motion. The extra per-element mapping a live
+            // plugin used to publish was dropped on 2026-09-14: its owner scan
+            // cost far more CPU than the correction was worth.
+            if (!span.parent || !span.originalOrder || !span.originalIndex(ordinal, sourceIndex))
             {
-                // Grouped arrays: the live plugin published the engine's own
-                // element -> source-index list while the draw order was built.
-                const auto mapped = span.parent && ReadControls().arrayMapping?
-                                    LookupArrayMapping(span.parent.proxy, span.transformIndex + ordinal) : UINT32_MAX;
-                if (mapped == UINT32_MAX)
-                {
-                    reject(noElementIndexCount);
-                    return false;
-                }
-                sourceIndex = mapped;
+                reject(noElementIndexCount);
+                return false;
             }
         }
         key.object = {owner.proxy, owner.mesh, owner.slot, lifetime};

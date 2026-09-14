@@ -6,6 +6,7 @@
 #include "PackedMotionCapture.h"
 #include "GlassPluginHost.h"
 #include "GlassArrayMapping.h"
+#include "GeometryPipeline.h"
 #include <Util.h>
 #include <cstdio>
 #include <fstream>
@@ -53,8 +54,10 @@ void writeStatus(std::ofstream& file)
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
          << " unknown_identity=" << packed.unknownIdentity << " topology_rejected=" << packed.topologyRejected
          << " slot_busy=" << packed.slotBusy << " ordering_rejected=" << packed.orderingRejected
+         << " slot_reclaimed=" << packed.slotReclaimed
          << " no_fg_frame=" << packed.noFgFrame << " no_fg_queue=" << packed.noFgQueue
          << " acquire_no_candidate=" << packed.acquireNoCandidate << " acquire_stale=" << packed.acquireStalePair
+         << " coverage_fallback=" << ReadPackedCoverageFallbackCount()
          << " acquire_ambiguous=" << packed.acquireAmbiguous
          << " acquire_consumer_busy=" << packed.acquireConsumerBusy << "\n";
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected

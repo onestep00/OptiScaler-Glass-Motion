@@ -40,6 +40,10 @@ struct PackedMotionCaptureStatus
     std::uint64_t admittedDraws = 0, capturedFrames = 0, fgFrames = 0;
     std::uint64_t missingPipeline = 0, unknownIdentity = 0, topologyRejected = 0;
     std::uint64_t mappingOverflow = 0, historyOverflow = 0, slotBusy = 0, orderingRejected = 0;
+    // Slots whose recorded/consumed command list disappeared without a reset and
+    // that the capture reclaimed after both fences completed. Diagnostics only;
+    // a growing value means the engine keeps replacing command lists.
+    std::uint64_t slotReclaimed = 0;
     // FG-boundary rejection split. noFgFrame counts acquisitions where the native
     // Streamline frame value was absent; noFgQueue counts unknown FG command queue.
     std::uint64_t noFgFrame = 0, noFgQueue = 0;

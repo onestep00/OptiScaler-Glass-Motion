@@ -189,6 +189,29 @@ class Capture final : public GeometryDrawCaptureOwner
                 value.clearSubmitted = value.syncPending = false;
                 return &value;
             }
+        // Stale-slot reclaim. A recorded render list that is never reset again,
+        // or an FG list that was replaced without a destroyed notification,
+        // otherwise pins its slot forever and the three-slot pool drains. Both
+        // fences completing means nothing can still be reading or writing that
+        // capture, so dropping the stale bookkeeping cannot race in-flight work.
+        for (auto& value : frames)
+        {
+            if (!value.number || value.number >= number) continue;
+            if (!completed(producerFence.Get(), value.producerValue) ||
+                !completed(consumerFence.Get(), value.consumerValue))
+                continue;
+            ++counters.slotReclaimed;
+            value.number = number;
+            for (unsigned i = 0; i < value.constantsUsed; ++i) value.pipelines[i].reset();
+            value.mappingUsed = value.constantsUsed = 0;
+            value.recordings = {};
+            value.consumerCommand = nullptr;
+            value.producerQueue.Reset(); value.consumerQueue.Reset(); value.orderedQueue.Reset();
+            value.syncFence.Reset();
+            value.producerValue = value.consumerValue = value.syncValue = 0;
+            value.clearSubmitted = value.syncPending = false;
+            return &value;
+        }
         ++counters.slotBusy;
         return nullptr;
     }

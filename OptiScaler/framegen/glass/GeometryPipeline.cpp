@@ -3,12 +3,20 @@
 #include "DxilVertexHistory.h"
 #include "MaterialCaptureBlend.h"
 #include <dxcapi.h>
+#include <atomic>
 #include <array>
 #include <stdexcept>
 
 namespace GlassFg
 {
 using Microsoft::WRL::ComPtr;
+// Packed variants that fell back to coverage-only capture because the material
+// exports could not be read safely. Diagnostics only.
+std::atomic<std::uint64_t> packedCoverageFallbacks { 0 };
+std::uint64_t ReadPackedCoverageFallbackCount() noexcept
+{
+    return packedCoverageFallbacks.load(std::memory_order_relaxed);
+}
 namespace
 {
 HRESULT reject(std::string& error, const char* reason, HRESULT result = E_INVALIDARG)
@@ -376,10 +384,31 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     ComPtr<IDxcBlob> vs, ps;
     unsigned historyRegister = UINT32_MAX;
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
-                                            root.layout, target, capture, clipPair, nullptr, inputPair)) ||
-        (!vertexOnly && FAILED(hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                            root.layout, target, nullptr, nullptr, nativeInputs))))
+                                            root.layout, target, capture, clipPair, nullptr, inputPair)))
         return hr;
+    if (!vertexOnly)
+    {
+        hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
+                                     root.layout, target, nullptr, nullptr, nativeInputs);
+        if (FAILED(hr) && packedMotion && destination != MaterialDestination::CoverageOnly)
+        {
+            // The material equation needs colour exports this pixel shader does
+            // not expose (MRT index above one, branch-local stores, depth
+            // exports or no colour output at all). Recover as a coverage-only
+            // packed variant: the boundary still receives the object's motion
+            // and depth while the interior keeps the engine's own motion. The
+            // original exports, discard and blend state stay untouched.
+            ps.Reset();
+            error.clear();
+            hr = implementation->rewrite(original.PS, false, MaterialSource::Zero,
+                                         MaterialDestination::CoverageOnly, ps, error, historyRegister, root.layout,
+                                         target, nullptr, nullptr, nativeInputs);
+            if (SUCCEEDED(hr))
+                ++packedCoverageFallbacks;
+        }
+        if (FAILED(hr))
+            return hr;
+    }
     // Same-draw capture retains every original export/attachment. Extra MRT
     // slots do not turn the RT0 material equation into a single-target PSO.
     auto modified = original;

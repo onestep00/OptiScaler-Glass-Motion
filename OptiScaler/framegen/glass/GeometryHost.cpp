@@ -186,13 +186,14 @@ void ReportGeometryHost(FILE* log) noexcept
                 "fg_frames=%llu missing_pipeline=%llu unknown_identity=%llu topology_rejected=%llu mapping_overflow=%llu "
                 "history_overflow=%llu slot_busy=%llu ordering_rejected=%llu no_fg_frame=%llu no_fg_queue=%llu "
                 "packed_ready=%llu packed_rejected=%llu acquire_no_candidate=%llu acquire_stale=%llu "
-                "acquire_ambiguous=%llu acquire_consumer_busy=%llu\n",
+                "acquire_ambiguous=%llu acquire_consumer_busy=%llu coverage_fallback=%llu\n",
                 packed.initialized, packed.healthy, packed.registered, packed.width, packed.height,
                 packed.admittedDraws, packed.capturedFrames, packed.fgFrames, packed.missingPipeline,
                 packed.unknownIdentity, packed.topologyRejected, packed.mappingOverflow, packed.historyOverflow,
                 packed.slotBusy, packed.orderingRejected, packed.noFgFrame, packed.noFgQueue,
                 creation.cache.packedReady, creation.cache.packedRejected, packed.acquireNoCandidate,
-                packed.acquireStalePair, packed.acquireAmbiguous, packed.acquireConsumerBusy);
+                packed.acquireStalePair, packed.acquireAmbiguous, packed.acquireConsumerBusy,
+                static_cast<unsigned long long>(ReadPackedCoverageFallbackCount()));
         fprintf(log,
                 "GEOMETRY_PACKED_SPLIT unknown_owner_span=%llu unknown_resolve=%llu unknown_owner_mismatch=%llu "
                 "unknown_field_mismatch=%llu unknown_no_array_generation=%llu raster_rejected=%llu shape_rejected=%llu "
