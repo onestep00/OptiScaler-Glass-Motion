@@ -45,6 +45,11 @@ struct PackedMotionCaptureStatus
     // Heaviest rejection chunks (engine draw chunk ids) for attribution.
     struct ChunkCount { std::uint32_t chunk = 0; std::uint64_t count = 0; };
     std::array<ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
+    // Vertex history reuse: hits keep a key across frames, inserted means the
+    // key changed (no usable previous transform for that element yet).
+    std::uint64_t historyHits = 0, historyInserted = 0, historyReclaimed = 0;
+    std::uint64_t historyRejectedTopology = 0, historySetFull = 0, historyArenaFull = 0;
+    unsigned historyLive = 0;
 };
 
 struct PackedMotionProvider

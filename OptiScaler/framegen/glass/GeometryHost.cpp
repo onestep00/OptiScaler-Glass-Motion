@@ -208,6 +208,17 @@ void ReportGeometryHost(FILE* log) noexcept
         for (const auto& entry : packed.missingChunks)
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
         std::fprintf(log, "\n");
+        // N-1 stability: inserted grows when an element key changes between
+        // frames, which means that element had no usable previous transform.
+        std::fprintf(log,
+                     "GEOMETRY_HISTORY hits=%llu inserted=%llu reclaimed=%llu rejected_topology=%llu set_full=%llu "
+                     "arena_full=%llu live=%u\n",
+                     static_cast<unsigned long long>(packed.historyHits),
+                     static_cast<unsigned long long>(packed.historyInserted),
+                     static_cast<unsigned long long>(packed.historyReclaimed),
+                     static_cast<unsigned long long>(packed.historyRejectedTopology),
+                     static_cast<unsigned long long>(packed.historySetFull),
+                     static_cast<unsigned long long>(packed.historyArenaFull), packed.historyLive);
     }
     catch (...)
     {

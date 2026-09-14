@@ -76,5 +76,12 @@ class PackedMotionMappings
     }
     std::uint32_t frame() const { return current; }
     unsigned reservedVertices() const { return histories.reservedVertices(); }
+    // N-1 stability evidence: inserted grows when the element key changes
+    // between frames, hits grows when the same key reuses its history.
+    const typename VertexHistoryCache<Sets, Ways, Pages, PageVertices>::Stats& historyStats() const
+    {
+        return histories.stats;
+    }
+    unsigned liveHistories() const { return histories.liveEntries(); }
 };
 } // namespace GlassFg

@@ -37,6 +37,10 @@ void writeStatus(std::ofstream& file)
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected
          << " no_owner=" << identity.noOwner << " no_view=" << identity.noView
          << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex << "\n";
+    file << "history hits=" << packed.historyHits << " inserted=" << packed.historyInserted
+         << " reclaimed=" << packed.historyReclaimed << " rejected_topology=" << packed.historyRejectedTopology
+         << " set_full=" << packed.historySetFull << " arena_full=" << packed.historyArenaFull
+         << " live=" << packed.historyLive << "\n";
     file << "ok=1\n";
 }
 } // namespace

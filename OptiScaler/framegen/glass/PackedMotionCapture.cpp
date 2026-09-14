@@ -651,6 +651,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         value.topologyChunks = topologyChunks;
         value.missingChunks = missingChunks;
         value.healthy = counters.initialized && !failed;
+        const auto& history = objectMappings.historyStats();
+        value.historyHits = history.hits;
+        value.historyInserted = history.inserted;
+        value.historyReclaimed = history.reclaimed;
+        value.historyRejectedTopology = history.rejectedTopology;
+        value.historySetFull = history.setFull;
+        value.historyArenaFull = history.arenaFull;
+        value.historyLive = objectMappings.liveHistories();
         return value;
     }
 
