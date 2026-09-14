@@ -59,5 +59,5 @@ Read `dump-N.txt` for `dispatched/packed/edge/interior` pixels and the paired `m
 
 | Artifact | Hash | Note |
 | --- | --- | --- |
-| `dxgi.dll` (resident module) | `BABB5E53` | replaced only while the game is closed |
+| `dxgi.dll` (resident module) | `620BD6BF` | replaced only while the game is closed; compose copies are limited to the dispatched rows |
 | `Glass\glass-plugin.dll` | `5F84A6DA` | loaded on demand through the file channel (auto-load request armed); replacement requires the game to be closed (hot reload dropped) |
