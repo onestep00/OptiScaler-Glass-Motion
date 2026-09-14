@@ -66,6 +66,7 @@ void trace(const char* text)
 
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 {
+    (void)container;
     if (current.valid && sourceMatrix >= current.arrayBase &&
         sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30)
     {
@@ -74,37 +75,52 @@ void hookedAppend(void* container, std::uintptr_t sourceMatrix)
             firstIndices[firstCount++] = index;
         appends.fetch_add(1, std::memory_order_relaxed);
     }
-    if (originalAppend)
-        originalAppend(container, sourceMatrix);
 }
 
 void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
 {
-    if (proxy)
+    // Unreadable proxy fields must never crash the game: this hook runs on the
+    // engine's render path.
+    __try
     {
-        current.proxy = proxy;
-        current.arrayBase = *reinterpret_cast<std::uintptr_t*>(proxy + 0x108);
-        current.count = *reinterpret_cast<std::uint32_t*>(proxy + 0x110);
-        current.outputStart = *reinterpret_cast<std::uint32_t*>(proxy + 0x114);
-        current.flags = *reinterpret_cast<std::uint16_t*>(proxy + 0xea);
-        current.valid = current.arrayBase != 0 && current.count != 0;
-        appends.store(0, std::memory_order_relaxed);
-        for (auto& seen : firstIndices)
-            seen = 0;
-        firstCount = 0;
+        if (proxy)
+        {
+            current.proxy = proxy;
+            current.arrayBase = *reinterpret_cast<std::uintptr_t*>(proxy + 0x108);
+            current.count = *reinterpret_cast<std::uint32_t*>(proxy + 0x110);
+            current.outputStart = *reinterpret_cast<std::uint32_t*>(proxy + 0x114);
+            current.flags = *reinterpret_cast<std::uint16_t*>(proxy + 0xea);
+            current.valid = current.arrayBase != 0 && current.count != 0;
+            appends.store(0, std::memory_order_relaxed);
+            for (auto& seen : firstIndices)
+                seen = 0;
+            firstCount = 0;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        current.valid = false;
+        trace("ARRAY_MAP read_fault=1");
     }
     if (originalGrouped)
         originalGrouped(proxy, context);
     if (current.valid && firstCount && host && host->publishArrayMapping)
     {
-        GlassArrayMappingEntry entry;
-        entry.proxy = current.proxy;
-        entry.outputStart = current.outputStart;
-        entry.count = firstCount;
-        entry.frame = ++publishedFrames;
-        for (unsigned i = 0; i < firstCount && i < 64; ++i)
-            entry.indices[i] = firstIndices[i];
-        host->publishArrayMapping(&entry);
+        __try
+        {
+            GlassArrayMappingEntry entry;
+            entry.proxy = current.proxy;
+            entry.outputStart = current.outputStart;
+            entry.count = firstCount;
+            entry.frame = ++publishedFrames;
+            for (unsigned i = 0; i < firstCount && i < 64; ++i)
+                entry.indices[i] = firstIndices[i];
+            host->publishArrayMapping(&entry);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            trace("ARRAY_MAP publish_fault=1");
+        }
     }
     if (current.valid)
     {
@@ -123,6 +139,17 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
     current.valid = false;
 }
 } // namespace
+
+// Fresh-hook entry points used by GlassPluginAppendHook.asm. The trampoline
+// saves every volatile argument register around this call, so a function with
+// more parameters than the decompiler shows still receives its own values.
+extern "C" void glassArrayMapAppendHook(void* container, std::uintptr_t sourceMatrix) noexcept
+{
+    hookedAppend(container, sourceMatrix);
+}
+
+extern "C" void glassArrayMapAppendTrampoline();
+extern "C" void* glassArrayMapAppendTarget = nullptr;
 
 extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* api)
 {
@@ -158,7 +185,7 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     const bool detached = DetourAttach(reinterpret_cast<PVOID*>(&originalGrouped),
                                        reinterpret_cast<PVOID>(&hookedGrouped)) == NO_ERROR &&
                           DetourAttach(reinterpret_cast<PVOID*>(&originalAppend),
-                                       reinterpret_cast<PVOID>(&hookedAppend)) == NO_ERROR;
+                                       reinterpret_cast<PVOID>(&glassArrayMapAppendTrampoline)) == NO_ERROR;
     if (!detached || !threads.enlist() || DetourTransactionCommit() != NO_ERROR)
     {
         DetourTransactionAbort();
@@ -167,6 +194,8 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
         trace("ARRAY_MAP rejected=1 reason=transaction_commit");
         return false;
     }
+    // The trampoline tail-jumps here, so it must hold the real body.
+    glassArrayMapAppendTarget = reinterpret_cast<void*>(originalAppend);
     trace("ARRAY_MAP attached=1");
     return true;
 }
@@ -181,7 +210,8 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
         if (originalGrouped)
             DetourDetach(reinterpret_cast<PVOID*>(&originalGrouped), reinterpret_cast<PVOID>(&hookedGrouped));
         if (originalAppend)
-            DetourDetach(reinterpret_cast<PVOID*>(&originalAppend), reinterpret_cast<PVOID>(&hookedAppend));
+            DetourDetach(reinterpret_cast<PVOID*>(&originalAppend),
+                         reinterpret_cast<PVOID>(&glassArrayMapAppendTrampoline));
         threads.enlist();
         DetourTransactionCommit();
     }
