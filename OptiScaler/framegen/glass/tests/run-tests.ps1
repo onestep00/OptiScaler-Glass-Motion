@@ -63,7 +63,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Observed session test build failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Observed session callback or lifetime test failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'
-$sources = @((Join-Path $PSScriptRoot 'Settings.cpp'))
+$sources = @((Join-Path $PSScriptRoot 'Settings.cpp'),
+             (Join-Path $PSScriptRoot '../GlassArrayMapping.cpp'))
 foreach ($name in @('imgui.cpp', 'imgui_draw.cpp', 'imgui_widgets.cpp', 'imgui_tables.cpp')) {
     $sources += Join-Path $imgui $name
 }

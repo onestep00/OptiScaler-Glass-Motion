@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GlassControls.h"
+#include "GlassArrayMapping.h"
 #include "GeometryHealth.h"
 #include "PackedMotionCapture.h"
 #include <Util.h>
@@ -270,6 +271,39 @@ void RenderSettings()
                 static_cast<unsigned long long>(packed.topologyRejected),
                 static_cast<unsigned long long>(packed.mappingOverflow + packed.historyOverflow + packed.slotBusy),
                 static_cast<unsigned long long>(packed.orderingRejected));
+    ImGui::Text("N-1 element history: hits %llu; inserted %llu; live %llu",
+                static_cast<unsigned long long>(packed.historyHits),
+                static_cast<unsigned long long>(packed.historyInserted),
+                static_cast<unsigned long long>(packed.historyLive));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("inserted grows when an element key changes between frames, which means the\n"
+                          "previous transform was not reused for that element.");
+    ImGui::Text("Identity rejects: owner %llu; resolve %llu; raster %llu; shape %llu; viewport %llu",
+                static_cast<unsigned long long>(packed.unknownOwnerSpan + packed.unknownOwnerMismatch),
+                static_cast<unsigned long long>(packed.unknownResolve + packed.unknownFieldMismatch),
+                static_cast<unsigned long long>(packed.rasterRejected),
+                static_cast<unsigned long long>(packed.shapeRejected),
+                static_cast<unsigned long long>(packed.viewportRejected));
+    ImGui::Text("FG boundary misses: frame %llu; queue %llu; acquire n/s/a/b %llu/%llu/%llu/%llu",
+                static_cast<unsigned long long>(packed.noFgFrame),
+                static_cast<unsigned long long>(packed.noFgQueue),
+                static_cast<unsigned long long>(packed.acquireNoCandidate),
+                static_cast<unsigned long long>(packed.acquireStalePair),
+                static_cast<unsigned long long>(packed.acquireAmbiguous),
+                static_cast<unsigned long long>(packed.acquireConsumerBusy));
+    const auto mapping = ReadArrayMappingStats();
+    ImGui::Text("Array element mapping: entries %u; published %llu; replaced %llu; evictions %llu", mapping.entries,
+                static_cast<unsigned long long>(mapping.published),
+                static_cast<unsigned long long>(mapping.replaced),
+                static_cast<unsigned long long>(mapping.evictions));
+    ImGui::Text("Mapping lookups: %llu; hits %llu; misses %llu; out of range %llu",
+                static_cast<unsigned long long>(mapping.lookups),
+                static_cast<unsigned long long>(mapping.hits),
+                static_cast<unsigned long long>(mapping.misses),
+                static_cast<unsigned long long>(mapping.outOfRange));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("misses = the queried object has no published entry; out of range = the entry\n"
+                          "exists but the draw ordinal is outside its output range.");
     if (health.sampledMs && now >= health.sampledMs)
         ImGui::TextDisabled("Report %.1f s ago; engine frame %u", (now - health.sampledMs) / 1000.0, health.frame);
     ImGui::TextDisabled("UI samples once per second without waiting. Paused/menu scenes can stop progress.");
