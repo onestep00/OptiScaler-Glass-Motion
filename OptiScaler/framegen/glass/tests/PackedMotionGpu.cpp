@@ -97,6 +97,78 @@ static UINT64 pack(float depth, bool reverse, int mx, int my, unsigned alpha, un
            (reverse ? 0x8000u : 0u) | (id & 0x7fffu);
 }
 
+// Readback path check: run two frames, request a dump on the second, then
+// verify the deferred write-out produced the four images and the sample text.
+static int runDump(const wchar_t* shader)
+{
+    constexpr unsigned Width = 32, Height = 20;
+    // Keep dump output next to the fixture, not in the source tree.
+    const auto folder = std::filesystem::current_path() / L"glass-dump-fixture";
+    std::filesystem::create_directories(folder);
+    const auto localShader = folder / L"GlassObjectMotion.hlsl";
+    std::filesystem::copy_file(std::filesystem::path(shader), localShader,
+                               std::filesystem::copy_options::overwrite_existing);
+    ComPtr<ID3D12Device> device;
+    checked(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "device");
+    D3D12_COMMAND_QUEUE_DESC queueDescription {};
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> command;
+    checked(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)), "queue");
+    checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "allocator");
+    checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                      IID_PPV_ARGS(&command)), "command");
+    auto motion = texture(device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    auto depth = texture(device.Get(), DXGI_FORMAT_R32_TYPELESS);
+    std::vector<UINT64> packedData(Width * Height);
+    for (unsigned y = 2; y < Height - 2; ++y)
+        for (unsigned x = 2; x < Width - 2; ++x)
+            packedData[y * Width + x] = pack(.7f, true, 8, -4, 128, 3);
+    auto packedUpload = buffer(device.Get(), packedData.size() * sizeof(UINT64), D3D12_HEAP_TYPE_UPLOAD,
+                               D3D12_RESOURCE_STATE_GENERIC_READ);
+    auto packed = buffer(device.Get(), packedData.size() * sizeof(UINT64), D3D12_HEAP_TYPE_DEFAULT,
+                         D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    void* mapped = nullptr;
+    checked(packedUpload->Map(0, nullptr, &mapped), "packed map");
+    std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
+    packedUpload->Unmap(0, nullptr);
+    command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
+    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    GlassFg::PackedMotionGpu gpu;
+    require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), localShader.c_str(), stdout),
+            "initialize");
+    GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
+    require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                         D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), { true, 50, false, 2 }),
+            "dispatch");
+    gpu.requestDump();
+    frame.frame = 2;
+    require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                         D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), { true, 50, false, 2 }),
+            "dump dispatch");
+    checked(command->Close(), "close");
+    ID3D12CommandList* lists[] = { command.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    drain(device.Get(), queue.Get());
+    gpu.dumpSubmitted(queue.Get());
+    drain(device.Get(), queue.Get());
+    require(gpu.serviceDump(), "dump was not written");
+    struct Expected { const wchar_t* name; };
+    const Expected expected[] { { L"dump-1-mv.ppm" }, { L"dump-1-depth.ppm" }, { L"dump-1-original-mv.ppm" },
+                                { L"dump-1-original-depth.ppm" }, { L"dump-1.txt" } };
+    unsigned long long bytes = 0;
+    for (const auto& entry : expected)
+    {
+        const auto path = folder / entry.name;
+        require(std::filesystem::exists(path), "dump file missing");
+        bytes += std::filesystem::file_size(path);
+    }
+    std::printf("PACKED_MOTION_DUMP_OK files=%u bytes=%llu folder=%ls\n",
+                static_cast<unsigned>(std::size(expected)), bytes, folder.c_str());
+    gpu.releaseAfterGpuDrain();
+    return 0;
+}
+
 static ComPtr<ID3D12Resource> sizedTexture(ID3D12Device* device, DXGI_FORMAT format, UINT width, UINT height,
                                            D3D12_RESOURCE_STATES state)
 {
@@ -252,6 +324,8 @@ int wmain(int argc, wchar_t** argv)
         require(argc == 2 || argc == 3, "shader path required");
         if (argc == 3 && std::wcscmp(argv[2], L"--scale") == 0)
             return runScale(argv[1]);
+        if (argc == 3 && std::wcscmp(argv[2], L"--dump") == 0)
+            return runDump(argv[1]);
         require(argc == 2, "unexpected argument");
         constexpr unsigned Width = 32, Height = 20;
         ComPtr<ID3D12Device> device;

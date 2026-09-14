@@ -30,9 +30,11 @@ class PackedMotionGpu
     unsigned width = 0, height = 0, increment = 0;
     // Diagnostic readback. Nothing is allocated or copied until the live
     // channel asks for a dump, so the correction path pays nothing by default.
-    ID3D12Resource* readback[3] {};
-    UINT64 readbackBytes[3] {};
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[3] {};
+    // 0 composed motion, 1 composed depth, 2 coverage counters,
+    // 3 original motion, 4 original depth (same-frame comparison).
+    ID3D12Resource* readback[5] {};
+    UINT64 readbackBytes[5] {};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[5] {};
     ID3D12Fence* dumpFence = nullptr;
     UINT64 dumpValue = 0;
     unsigned dumpSerial = 0, dumpFrame = 0;
@@ -266,8 +268,8 @@ class PackedMotionGpu
         const auto completed = dumpFence->GetCompletedValue();
         if (completed == UINT64_MAX || completed < dumpValue)
             return false;
-        void* data[3] {};
-        for (unsigned i = 0; i < 3; ++i)
+        void* data[5] {};
+        for (unsigned i = 0; i < 5; ++i)
             if (FAILED(readback[i]->Map(0, nullptr, &data[i])) || !data[i])
             {
                 for (unsigned j = 0; j < i; ++j)
@@ -282,9 +284,12 @@ class PackedMotionGpu
         const auto base = (folder / L"dump").wstring() + L"-" + suffix;
         writeMotion(base + L"-mv.ppm", static_cast<const std::byte*>(data[0]));
         writeDepth(base + L"-depth.ppm", static_cast<const std::byte*>(data[1]));
+        writeMotion(base + L"-original-mv.ppm", static_cast<const std::byte*>(data[3]));
+        writeDepth(base + L"-original-depth.ppm", static_cast<const std::byte*>(data[4]));
         writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]),
-                     static_cast<const std::byte*>(data[2]));
-        for (unsigned i = 0; i < 3; ++i)
+                     static_cast<const std::byte*>(data[2]), static_cast<const std::byte*>(data[3]),
+                     static_cast<const std::byte*>(data[4]));
+        for (unsigned i = 0; i < 5; ++i)
             readback[i]->Unmap(0, nullptr);
         if (logFile)
         {
@@ -299,11 +304,13 @@ class PackedMotionGpu
   private:
     bool prepareReadback()
     {
-        if (readback[0] && readback[1])
+        if (readback[0] && readback[1] && readback[2] && readback[3] && readback[4])
             return true;
         ID3D12Resource* targets[] { motion, depth };
         for (unsigned i = 0; i < 2; ++i)
         {
+            if (readback[i])
+                continue;
             auto description = targets[i]->GetDesc();
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
             UINT64 bytes = 0;
@@ -345,6 +352,30 @@ class PackedMotionGpu
                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&created))))
                 return false;
             readback[2] = created;
+        }
+        // The original FG inputs share the owned textures' descriptions, so
+        // the same footprint and size serve the comparison readbacks.
+        for (unsigned i = 3; i < 5; ++i)
+        {
+            if (readback[i])
+                continue;
+            const auto source = i - 3;
+            D3D12_HEAP_PROPERTIES properties {};
+            properties.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC bufferDescription {};
+            bufferDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bufferDescription.Width = readbackBytes[source];
+            bufferDescription.Height = 1;
+            bufferDescription.DepthOrArraySize = 1;
+            bufferDescription.MipLevels = 1;
+            bufferDescription.SampleDesc.Count = 1;
+            bufferDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ID3D12Resource* created = nullptr;
+            if (FAILED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&created))))
+                return false;
+            readback[i] = created;
+            readbackFootprint[i] = readbackFootprint[source];
         }
         ++dumpSerial;
         return true;
@@ -430,7 +461,8 @@ class PackedMotionGpu
     }
 
     void writeSamples(const std::wstring& path, const std::byte* motionData, const std::byte* depthData,
-                      const std::byte* counterData) const
+                      const std::byte* counterData, const std::byte* originalMotionData,
+                      const std::byte* originalDepthData) const
     {
         FILE* file = _wfopen(path.c_str(), L"wb");
         if (!file)
@@ -449,8 +481,15 @@ class PackedMotionGpu
                 const auto x = (gx * width) / 16, y = (gy * height) / 9;
                 const auto* row = reinterpret_cast<const unsigned short*>(readbackRow(motionData, 0, y));
                 const auto* depthRow = reinterpret_cast<const float*>(readbackRow(depthData, 1, y));
-                std::fprintf(file, "x=%u y=%u mv=(%.6f,%.6f) depth=%.6f\n", x, y,
-                             halfToFloat(row[x * 4 + 0]), halfToFloat(row[x * 4 + 1]), depthRow[x]);
+                const auto* originalRow =
+                    reinterpret_cast<const unsigned short*>(readbackRow(originalMotionData, 3, y));
+                const auto* originalDepthRow =
+                    reinterpret_cast<const float*>(readbackRow(originalDepthData, 4, y));
+                std::fprintf(file,
+                             "x=%u y=%u mv=(%.6f,%.6f) original_mv=(%.6f,%.6f) depth=%.6f original_depth=%.6f\n", x, y,
+                             halfToFloat(row[x * 4 + 0]), halfToFloat(row[x * 4 + 1]),
+                             halfToFloat(originalRow[x * 4 + 0]), halfToFloat(originalRow[x * 4 + 1]), depthRow[x],
+                             originalDepthRow[x]);
             }
         }
         std::fclose(file);
@@ -542,6 +581,26 @@ class PackedMotionGpu
             transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             command->CopyBufferRegion(readback[2], 0, counters, 0, 64);
+            // Same-frame originals for a direct before/after comparison.
+            if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                transition(command, originalDepth, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            ID3D12Resource* originals[] { originalMotion, originalDepth };
+            for (unsigned i = 0; i < 2; ++i)
+            {
+                D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+                source.pResource = originals[i];
+                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                target.pResource = readback[3 + i];
+                target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                target.PlacedFootprint = readbackFootprint[3 + i];
+                command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+            }
+            if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                transition(command, originalMotion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionState);
+            if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
             dumpFrame = packed.frame;
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;
@@ -564,7 +623,8 @@ class PackedMotionGpu
                 (*resource)->Release();
             *resource = nullptr;
         }
-        for (auto** resource : { &readback[0], &readback[1], &readback[2], &counters, &zeroCounters })
+        for (auto** resource :
+             { &readback[0], &readback[1], &readback[2], &readback[3], &readback[4], &counters, &zeroCounters })
         {
             if (*resource)
                 (*resource)->Release();
