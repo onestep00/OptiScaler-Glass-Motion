@@ -71,6 +71,11 @@ Consequences per family: single glass, railings, windows, liquid, holograms, wor
    `Pixel depth/stencil exports require separate coverage validation` 62. Rejections cluster in
    `renderstage_distortion` 260, `renderstage_hair_alpha_accum` 62 and `renderstage_hologram_depth` 24.
    Evidence: `work/glass-decompile/rewrite-scan/`, `work/glass-decompile/pair-scan/`.
+   The 380 rejects have 99 unique pixel shaders: 89 carry SV_Target0, four carry SV_Target2+, six have no
+   output signature at all (50 pairs). By pair, 330 have a colour output and 50 are empty pixel shaders.
+   `Required material output missing` 209 = colour 151 + empty 50 + target2+ 8; the 109 branch-local
+   rejects are all `renderstage_distortion`; the 62 depth/stencil rejects are all
+   `renderstage_hair_alpha_accum`. Evidence: `work/glass-decompile/reject-classification/`.
    This is shader acceptance, not identity resolution or live FG quality.
 1. Grouped-array element order comes from the plugin's owner scan. A candidate is published only when its element count matches the object's array count, every entry is a valid source index, and no index repeats; otherwise the element stays unresolved instead of being guessed (`no_element_index`).
 2. Pixel shaders whose final colour store sits in a branch are rejected by the rewriter; the rejection now logs the actual exit shape so the next session can classify it (`GEOMETRY_PACKED_ERROR`).
@@ -87,6 +92,12 @@ Consequences per family: single glass, railings, windows, liquid, holograms, wor
     `pipeline_ready=0`, `object_capture=0` and `admitted=0`, `acquire_no_candidate=80`, `plugin loaded=0`.
     No draw was replaced, so no correction could be applied in that session. Earlier sessions reached
     `admitted=1012806` and `fg_frames=169`, but `host substitutions` stayed 0.
+12. `OptiScaler.Glass.log` across 50 sessions: the pre-packed path substituted up to 1,573,140 FG inputs.
+    In the packed sessions (27-47) `admitted` reached 1,012,806 and `fg_frames` 169, but `substitutions`
+    stayed 0; only session 28 recorded one `Object MV inputs are reaching FG`. The packed FG input
+    replacement has therefore never run in a live session. Sessions with `pipeline_ready=0` are short
+    (`compiled` around 192) and look like menu/loading states, so the 19:43 snapshot must not be read as a
+    world-scene admission failure.
 
 ## How to collect the pending evidence in one session
 
