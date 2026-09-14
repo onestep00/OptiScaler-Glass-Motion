@@ -59,7 +59,9 @@ void writeStatus(std::ofstream& file)
          << " acquire_consumer_busy=" << packed.acquireConsumerBusy << "\n";
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected
          << " no_owner=" << identity.noOwner << " no_view=" << identity.noView
-         << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex << "\n";
+         << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex
+         << " no_view_state=" << identity.noViewState << " no_view_unknown=" << identity.noViewUnknown
+         << " no_view_descriptor=" << identity.noViewDescriptor << "\n";
     file << "history hits=" << packed.historyHits << " inserted=" << packed.historyInserted
          << " reclaimed=" << packed.historyReclaimed << " rejected_topology=" << packed.historyRejectedTopology
          << " set_full=" << packed.historySetFull << " arena_full=" << packed.historyArenaFull

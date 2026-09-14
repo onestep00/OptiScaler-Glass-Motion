@@ -16,7 +16,8 @@ namespace GlassFg
 namespace
 {
 std::atomic<std::uint64_t> resolvedCount = 0, rejectedCount = 0, noOwnerCount = 0, noViewCount = 0,
-                           noLifetimeCount = 0, noElementIndexCount = 0;
+                           noLifetimeCount = 0, noElementIndexCount = 0, noViewStateCount = 0,
+                           noViewUnknownCount = 0, noViewDescriptorCount = 0;
 
 // Deterministic mesh-topology identity. The shape has no topology id of its own
 // and VertexHistoryKey requires a nonzero topology value.
@@ -84,6 +85,12 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
         }
         if (!view)
         {
+            if (!raster)
+                noViewStateCount.fetch_add(1, std::memory_order_relaxed);
+            else if (!raster->targetsKnown)
+                noViewUnknownCount.fetch_add(1, std::memory_order_relaxed);
+            else
+                noViewDescriptorCount.fetch_add(1, std::memory_order_relaxed);
             reject(noViewCount);
             return false;
         }
@@ -157,6 +164,9 @@ GlassMotionIdentityStats ReadGlassMotionIdentityStats() noexcept
     value.rejected = rejectedCount.load(std::memory_order_relaxed);
     value.noOwner = noOwnerCount.load(std::memory_order_relaxed);
     value.noView = noViewCount.load(std::memory_order_relaxed);
+    value.noViewState = noViewStateCount.load(std::memory_order_relaxed);
+    value.noViewUnknown = noViewUnknownCount.load(std::memory_order_relaxed);
+    value.noViewDescriptor = noViewDescriptorCount.load(std::memory_order_relaxed);
     value.noLifetime = noLifetimeCount.load(std::memory_order_relaxed);
     value.noElementIndex = noElementIndexCount.load(std::memory_order_relaxed);
     return value;

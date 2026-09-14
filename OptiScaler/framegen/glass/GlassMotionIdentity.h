@@ -14,6 +14,10 @@ PackedMotionIdentityProvider MakeGlassMotionIdentityProvider() noexcept;
 struct GlassMotionIdentityStats
 {
     std::uint64_t resolved = 0, rejected = 0, noOwner = 0, noView = 0, noLifetime = 0, noElementIndex = 0;
+    // Split of noView: the command has no raster state yet, the raster state is
+    // deliberately unknown (render pass, bundle or a >8 target call), or the
+    // targets are known but their descriptors are not in the tracked view map.
+    std::uint64_t noViewState = 0, noViewUnknown = 0, noViewDescriptor = 0;
 };
 GlassMotionIdentityStats ReadGlassMotionIdentityStats() noexcept;
 }
