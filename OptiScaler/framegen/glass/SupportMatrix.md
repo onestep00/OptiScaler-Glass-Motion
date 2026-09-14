@@ -35,6 +35,32 @@
 | Destruction, procedural deformation | original deformation input | Not implemented | same |
 | HUD | excluded by design | n/a | – |
 
+## Which code gate decides each family
+
+Coverage is decided per draw, not per scene: a transparent object receives object motion when its pipeline produces a packed variant and its draw resolves an identity. The gates are fixed in code, so a family is covered wherever it is drawn once those gates pass.
+
+Pipeline gates (`GeometryPipeline.cpp` / `DxilVertexHistory.cpp`), per pixel shader:
+
+| Gate | Effect |
+| --- | --- |
+| root signature conversion fails, or reserved capture registers collide | no packed variant |
+| render-target count > 8, multisampling, geometry/hull/domain stages, stream output, non-triangle topology | no packed variant |
+| material capture with a writable depth/stencil target | no packed variant |
+| material blend unknown and blending disabled | no packed variant |
+| shader model < 6.6 or no 64-bit shader ops (packed), no ROV (non-vertex-only) | no packed variant |
+| rewriter rejections: branch-local final colour store, depth/stencil exports, multiple returns, side effects, missing required output | no packed variant |
+
+Identity gates (`GlassMotionIdentity.cpp`), per draw:
+
+| Gate | Counter | Effect |
+| --- | --- | --- |
+| owner proxy/slot missing | `no_owner` | element unresolved, no object motion |
+| depth target, else first colour target, not resolvable | `no_view` (`no_view_state` / `no_view_unknown` / `no_view_descriptor`) | element unresolved |
+| object lifetime serial missing | `no_lifetime` | element unresolved |
+| span.count > 1 without the engine's original order and without a published array mapping | `no_element_index` | element unresolved |
+
+Consequences per family: single glass, railings, windows, liquid, holograms, world icons, decals and vehicle glass only need the pipeline gates, so they are covered wherever their pixel shader passes. Repeated arrays additionally need the element index, which the engine's original order or the plugin mapping provides. Particles, smoke and ribbons are the family where the element-index gate fails today: their instanced draws have no original order and no published mapping, so they are rejected as `no_element_index` regardless of which scene shows them. Garments, cloth, destruction and procedural deformation pass both gates but their deformed vertices' previous-frame input is not connected to the vertex-history path, so their motion correctness is unverified.
+
 ## Current limitations
 
 1. Grouped-array element order comes from the plugin's owner scan. A candidate is published only when its element count matches the object's array count, every entry is a valid source index, and no index repeats; otherwise the element stays unresolved instead of being guessed (`no_element_index`).
