@@ -23,12 +23,16 @@ class PackedMotionGpu
     ID3D12Resource* motion = nullptr;
     ID3D12Resource* depth = nullptr;
     ID3D12Resource* selection = nullptr;
+    // Diagnostic coverage counters written by the compose shader:
+    // [dispatched, packed_id, edge, interior].
+    ID3D12Resource* counters = nullptr;
+    ID3D12Resource* zeroCounters = nullptr;
     unsigned width = 0, height = 0, increment = 0;
     // Diagnostic readback. Nothing is allocated or copied until the live
     // channel asks for a dump, so the correction path pays nothing by default.
-    ID3D12Resource* readback[2] {};
-    UINT64 readbackBytes[2] {};
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[2] {};
+    ID3D12Resource* readback[3] {};
+    UINT64 readbackBytes[3] {};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[3] {};
     ID3D12Fence* dumpFence = nullptr;
     UINT64 dumpValue = 0;
     unsigned dumpSerial = 0, dumpFrame = 0;
@@ -141,9 +145,38 @@ class PackedMotionGpu
         if (!createTexture(selected, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &selection))
             return false;
 
+        D3D12_HEAP_PROPERTIES counterHeap {};
+        counterHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC counterDescription {};
+        counterDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        counterDescription.Width = 64;
+        counterDescription.Height = 1;
+        counterDescription.DepthOrArraySize = 1;
+        counterDescription.MipLevels = 1;
+        counterDescription.SampleDesc.Count = 1;
+        counterDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        counterDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (FAILED(device->CreateCommittedResource(&counterHeap, D3D12_HEAP_FLAG_NONE, &counterDescription,
+                                                   D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                   IID_PPV_ARGS(&counters))))
+            return false;
+        counterDescription.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES uploadCounterHeap {};
+        uploadCounterHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        if (FAILED(device->CreateCommittedResource(&uploadCounterHeap, D3D12_HEAP_FLAG_NONE, &counterDescription,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&zeroCounters))))
+            return false;
+        void* zeros = nullptr;
+        if (SUCCEEDED(zeroCounters->Map(0, nullptr, &zeros)) && zeros)
+        {
+            std::memset(zeros, 0, 64);
+            zeroCounters->Unmap(0, nullptr);
+        }
+
         D3D12_DESCRIPTOR_HEAP_DESC heapDescription {};
         heapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heapDescription.NumDescriptors = 3;
+        heapDescription.NumDescriptors = 4;
         heapDescription.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&heapDescription, IID_PPV_ARGS(&heap))))
             return false;
@@ -157,10 +190,16 @@ class PackedMotionGpu
             view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             device->CreateUnorderedAccessView(outputs[i], nullptr, &view, cpu(i));
         }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC counterView {};
+        counterView.Format = DXGI_FORMAT_R32_TYPELESS;
+        counterView.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        counterView.Buffer.NumElements = 16;
+        counterView.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device->CreateUnorderedAccessView(counters, nullptr, &counterView, cpu(3));
 
         D3D12_DESCRIPTOR_RANGE range {};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        range.NumDescriptors = 3;
+        range.NumDescriptors = 4;
         D3D12_ROOT_PARAMETER parameters[3] {};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         parameters[0].Descriptor = { 0, 0 };
@@ -227,8 +266,8 @@ class PackedMotionGpu
         const auto completed = dumpFence->GetCompletedValue();
         if (completed == UINT64_MAX || completed < dumpValue)
             return false;
-        void* data[2] {};
-        for (unsigned i = 0; i < 2; ++i)
+        void* data[3] {};
+        for (unsigned i = 0; i < 3; ++i)
             if (FAILED(readback[i]->Map(0, nullptr, &data[i])) || !data[i])
             {
                 for (unsigned j = 0; j < i; ++j)
@@ -243,8 +282,9 @@ class PackedMotionGpu
         const auto base = (folder / L"dump").wstring() + L"-" + suffix;
         writeMotion(base + L"-mv.ppm", static_cast<const std::byte*>(data[0]));
         writeDepth(base + L"-depth.ppm", static_cast<const std::byte*>(data[1]));
-        writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]));
-        for (unsigned i = 0; i < 2; ++i)
+        writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]),
+                     static_cast<const std::byte*>(data[2]));
+        for (unsigned i = 0; i < 3; ++i)
             readback[i]->Unmap(0, nullptr);
         if (logFile)
         {
@@ -288,6 +328,24 @@ class PackedMotionGpu
         }
         if (!dumpFence && FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&dumpFence))))
             return false;
+        if (!readback[2])
+        {
+            D3D12_HEAP_PROPERTIES properties {};
+            properties.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC bufferDescription {};
+            bufferDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bufferDescription.Width = 64;
+            bufferDescription.Height = 1;
+            bufferDescription.DepthOrArraySize = 1;
+            bufferDescription.MipLevels = 1;
+            bufferDescription.SampleDesc.Count = 1;
+            bufferDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ID3D12Resource* created = nullptr;
+            if (FAILED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&created))))
+                return false;
+            readback[2] = created;
+        }
         ++dumpSerial;
         return true;
     }
@@ -371,12 +429,19 @@ class PackedMotionGpu
         std::fclose(file);
     }
 
-    void writeSamples(const std::wstring& path, const std::byte* motionData, const std::byte* depthData) const
+    void writeSamples(const std::wstring& path, const std::byte* motionData, const std::byte* depthData,
+                      const std::byte* counterData) const
     {
         FILE* file = _wfopen(path.c_str(), L"wb");
         if (!file)
             return;
         std::fprintf(file, "serial=%u frame=%u size=%ux%u\n", dumpSerial, dumpFrame, width, height);
+        if (counterData)
+        {
+            const auto* value = reinterpret_cast<const unsigned*>(counterData);
+            std::fprintf(file, "dispatched_pixels=%u packed_pixels=%u edge_pixels=%u interior_pixels=%u\n", value[0],
+                         value[1], value[2], value[3]);
+        }
         for (unsigned gy = 0; gy < 9; ++gy)
         {
             for (unsigned gx = 0; gx < 16; ++gx)
@@ -422,7 +487,8 @@ class PackedMotionGpu
             unsigned edgeWidth;
             float interiorStrength;
             unsigned debug, reserved;
-        } constants { width, height, scaleX, scaleY, (std::min)(controls.edgeWidth, 4u), controls.coverage(), 0, 0 };
+        } constants { width, height, scaleX, scaleY, (std::min)(controls.edgeWidth, 4u), controls.coverage(),
+                       dumpRequests.load(std::memory_order_relaxed) ? 1u : 0u, 0 };
         static_assert(sizeof(Constants) == 32);
         command->SetDescriptorHeaps(1, &heap);
         command->SetComputeRootSignature(root);
@@ -438,6 +504,14 @@ class PackedMotionGpu
         packedBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         packedBarrier.UAV.pResource = packed.resource;
         command->ResourceBarrier(1, &packedBarrier);
+        // Coverage counters are per measured frame: reset, then let the shader
+        // count dispatched, packed, edge and interior pixels.
+        command->CopyBufferRegion(counters, 0, zeroCounters, 0, 64);
+        D3D12_RESOURCE_BARRIER counterBarrier {};
+        counterBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        counterBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        counterBarrier.UAV.pResource = counters;
+        command->ResourceBarrier(1, &counterBarrier);
         // Staged coverage: run the real dispatch over the configured top rows so
         // a pathological cost cannot time out the GPU; the rest of the frame
         // keeps the copied original motion. Raise GlassFG/PackedRows after a
@@ -467,6 +541,7 @@ class PackedMotionGpu
             }
             transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            command->CopyBufferRegion(readback[2], 0, counters, 0, 64);
             dumpFrame = packed.frame;
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;
@@ -489,7 +564,7 @@ class PackedMotionGpu
                 (*resource)->Release();
             *resource = nullptr;
         }
-        for (auto** resource : { &readback[0], &readback[1] })
+        for (auto** resource : { &readback[0], &readback[1], &readback[2], &counters, &zeroCounters })
         {
             if (*resource)
                 (*resource)->Release();

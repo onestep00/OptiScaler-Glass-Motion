@@ -2,6 +2,7 @@ ByteAddressBuffer ObjectMotion : register(t0);
 RWTexture2D<float4> Motion : register(u0);
 RWTexture2D<float> Depth : register(u1);
 RWTexture2D<float> Selection : register(u2);
+RWByteAddressBuffer Counters : register(u3);
 
 cbuffer Parameters : register(b0)
 {
@@ -57,11 +58,17 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     float originalDepth = Depth[pixel];
     uint2 packed = packedAt(pixel);
     uint id = objectId(packed);
+    uint ignored = 0;
+    bool count = DebugMode != 0;
+    if (count)
+        Counters.InterlockedAdd(0, 1, ignored);
     if (!id)
     {
         Selection[pixel] = 0;
         return;
     }
+    if (count)
+        Counters.InterlockedAdd(4, 1, ignored);
 
     uint motionX = (packed.y >> 3) & 0x7ffu;
     uint motionY = ((packed.x >> 24) | (packed.y << 8)) & 0x7ffu;
@@ -70,6 +77,13 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     float opacity = float((packed.x >> 16) & 0xffu) / 255.0;
     bool edge = EdgeWidth != 0 && objectBoundary(pixel, id);
     float weight = edge ? 1.0 : saturate(opacity * InteriorStrength);
+    if (count)
+    {
+        if (edge)
+            Counters.InterlockedAdd(8, 1, ignored);
+        else if (weight > 0.0)
+            Counters.InterlockedAdd(12, 1, ignored);
+    }
 
     originalMotion.xy = lerp(originalMotion.xy, objectMotion, weight);
     if (edge)
