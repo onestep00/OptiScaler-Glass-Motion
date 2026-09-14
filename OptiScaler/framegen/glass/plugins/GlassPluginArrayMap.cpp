@@ -270,6 +270,14 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
                 for (unsigned i = 0; i < count; ++i)
                     entry.indices[i] = indices[i];
                 api->publishArrayMapping(&entry);
+                // The published payload is the only way to correlate a consumer
+                // miss with what the plugin actually sent.
+                static std::atomic<unsigned> publishLogs { 0 };
+                if (publishLogs.fetch_add(1, std::memory_order_relaxed) < 24)
+                    directLog("published proxy=%llx output_start=%u count=%u indices=%u,%u,%u,%u,%u,%u",
+                              static_cast<unsigned long long>(entry.proxy), entry.outputStart, entry.count,
+                              entry.indices[0], entry.indices[1], entry.indices[2], entry.indices[3], entry.indices[4],
+                              entry.indices[5]);
             }
         }
         if (current.valid)
