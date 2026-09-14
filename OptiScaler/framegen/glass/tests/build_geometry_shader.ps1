@@ -1,4 +1,7 @@
 param([string]$OutputDirectory)
+if (Get-Process -Name Cyberpunk2077 -ErrorAction SilentlyContinue) {
+    throw 'Cyberpunk2077 is running; GPU test binaries must not run during a game session.'
+}
 $ErrorActionPreference = 'Stop'
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $repository 'artifacts/glass-geometry-shader' }

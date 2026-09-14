@@ -29,6 +29,9 @@ struct Controls
     // Integration without foreign resources: copy the composed motion/depth
     // back into the game's own FG inputs instead of substituting parameters.
     bool packedWriteBack = false;
+    // Consume the live plugin's grouped-array element mapping for element
+    // identity. Off until the published list is verified.
+    bool arrayMapping = false;
 
     bool active() const { return enabled && strength > 0; }
     float coverage() const { return std::min(strength, 100u) / 100.f; }
@@ -40,7 +43,8 @@ struct Controls
                (std::uint64_t((std::min)(packedRows, 0xffffu)) << 13) |
                (packedSubstitute ? (std::uint64_t(1) << 29) : 0u) | (trace ? (std::uint64_t(1) << 30) : 0u) |
                (autoStage ? (std::uint64_t(1) << 31) : 0u) | (packedCompute ? (std::uint64_t(1) << 32) : 0u) |
-               (packedWriteBack ? (std::uint64_t(1) << 33) : 0u);
+               (packedWriteBack ? (std::uint64_t(1) << 33) : 0u) |
+               (arrayMapping ? (std::uint64_t(1) << 34) : 0u);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -49,7 +53,7 @@ struct Controls
                  std::clamp(edge ? edge : 2u, 1u, 4u), (value & (1ull << 12)) != 0,
                  unsigned((value >> 13) & 0xffffu), (value & (1ull << 29)) != 0, (value & (1ull << 30)) != 0,
                  (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
-                 (value & (std::uint64_t(1) << 33)) != 0 };
+                 (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 34)) != 0 };
     }
 };
 

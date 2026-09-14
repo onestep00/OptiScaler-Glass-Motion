@@ -44,7 +44,8 @@ bool load()
                               ini.GetBoolValue("GlassFG", "Trace", false),
                               ini.GetBoolValue("GlassFG", "AutoStage", false),
                               ini.GetBoolValue("GlassFG", "PackedCompute", true),
-                              ini.GetBoolValue("GlassFG", "PackedWriteBack", false) }
+                              ini.GetBoolValue("GlassFG", "PackedWriteBack", false),
+                              ini.GetBoolValue("GlassFG", "ArrayMapping", false) }
                        .packed(),
                    std::memory_order_relaxed);
     return true;
@@ -69,6 +70,7 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "AutoStage", value.autoStage);
     ini.SetBoolValue("GlassFG", "PackedCompute", value.packedCompute);
     ini.SetBoolValue("GlassFG", "PackedWriteBack", value.packedWriteBack);
+    ini.SetBoolValue("GlassFG", "ArrayMapping", value.arrayMapping);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -168,6 +170,12 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Copies the composed motion and depth back into the engine's own\n"
                           "FG inputs instead of substituting foreign resources.");
+    bool arrayMapping = value.arrayMapping;
+    changed |= ImGui::Checkbox("Use engine array element mapping", &arrayMapping);
+    value.arrayMapping = arrayMapping;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Consumes the grouped-array element mapping published by the live\n"
+                          "plugin so repeated objects keep per-element motion history.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);

@@ -1,4 +1,7 @@
 param([string]$OutputDirectory)
+if (Get-Process -Name Cyberpunk2077 -ErrorAction SilentlyContinue) {
+    throw 'Cyberpunk2077 is running; GPU test binaries must not run during a game session.'
+}
 $ErrorActionPreference = 'Stop'
 $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
 $optiDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))

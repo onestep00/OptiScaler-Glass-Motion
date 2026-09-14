@@ -6,6 +6,8 @@
 #include "GeometryDrawBatch.h"
 #include "GeometryPipelineCache.h"
 #include "GeometryRasterState.h"
+#include "GlassArrayMapping.h"
+#include "GlassControls.h"
 #include "VertexHistoryCache.h"
 #include <atomic>
 
@@ -104,10 +106,19 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
         {
             // Element identity uses the original source index; a missing or
             // unverified original order must not be guessed from the ordinal.
-            if (!span.parent || !span.originalOrder || !span.originalIndex(ordinal, sourceIndex))
+            const bool linear = span.parent && span.originalOrder && span.originalIndex(ordinal, sourceIndex);
+            if (!linear)
             {
-                reject(noElementIndexCount);
-                return false;
+                // Grouped arrays: the live plugin published the engine's own
+                // element -> source-index list while the draw order was built.
+                const auto mapped = span.parent && ReadControls().arrayMapping?
+                                    LookupArrayMapping(span.parent.proxy, span.transformIndex + ordinal) : UINT32_MAX;
+                if (mapped == UINT32_MAX)
+                {
+                    reject(noElementIndexCount);
+                    return false;
+                }
+                sourceIndex = mapped;
             }
         }
         key.object = {owner.proxy, owner.mesh, owner.slot, lifetime};
