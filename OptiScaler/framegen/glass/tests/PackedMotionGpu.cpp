@@ -306,6 +306,46 @@ static int runCompose(const wchar_t* shader, bool manual)
     require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f, "out-of-band compose did not reach the edge pixel");
     read->Unmap(0, nullptr);
     std::printf("PACKED_MOTION_COMPOSE_OK submit_compose=1 fence_ready=1 edge_pixel=1 background=1\n");
+    // Write-back integration: with PackedWriteBack the composed result must be
+    // copied into the engine's own inputs, which is how the product delivers
+    // the correction without handing a foreign resource to the FG runtime.
+    GlassFg::Controls writeBack { true, 50, false, 2 };
+    writeBack.packedWriteBack = true;
+    require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), writeBack),
+            "submitCompose write-back");
+    for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
+        Sleep(5);
+    require(gpu.composeReady(), "write-back fence");
+    drain(device.Get(), queue.Get());
+    auto engineDescription = motion->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT engineFootprint {};
+    UINT64 engineBytes = 0;
+    device->GetCopyableFootprints(&engineDescription, 0, 1, 0, &engineFootprint, nullptr, nullptr, &engineBytes);
+    auto engineRead = buffer(device.Get(), engineBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    allocator->Reset();
+    command->Reset(allocator.Get(), nullptr);
+    transition(command.Get(), motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION engineSource {}, engineTarget {};
+    engineSource.pResource = motion.Get();
+    engineSource.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    engineTarget.pResource = engineRead.Get();
+    engineTarget.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    engineTarget.PlacedFootprint = engineFootprint;
+    command->CopyTextureRegion(&engineTarget, 0, 0, 0, &engineSource, nullptr);
+    checked(command->Close(), "close engine read");
+    queue->ExecuteCommandLists(1, lists);
+    drain(device.Get(), queue.Get());
+    void* engineData = nullptr;
+    checked(engineRead->Map(0, nullptr, &engineData), "engine read map");
+    {
+        auto* row = reinterpret_cast<const HALF*>(static_cast<const std::byte*>(engineData) +
+                                                  8 * engineFootprint.Footprint.RowPitch);
+        const auto value = DirectX::PackedVector::XMConvertHalfToFloat(row[4 * 4 + 0]);
+        require(std::abs(value - .0625f) < .001f, "write-back did not reach the engine input edge pixel");
+    }
+    engineRead->Unmap(0, nullptr);
+    std::printf("PACKED_MOTION_WRITEBACK_OK engine_input_edge=1\n");
     gpu.releaseAfterGpuDrain();
     return 0;
 }

@@ -327,6 +327,12 @@ class PackedMotionGpu
             composePending = false;
         return !composePending;
     }
+    // Diagnostics: raw fence state for the live channel and the offline fixture.
+    std::uint64_t composeCompleted() const
+    {
+        return composeFence ? composeFence->GetCompletedValue() : 0;
+    }
+    std::uint64_t composeSubmitted() const { return composeValue; }
 
     // Records the input copies, the compose dispatch and the optional engine
     // write-back on our own compute list, then submits it on the FG queue. The
