@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "NvngxDlssgBridge.h"
 #include "NativeHost.h"
+#include "GlassControls.h"
 #include <detours/detours.h>
 
 namespace GlassFg
@@ -18,12 +19,15 @@ NVSDK_NGX_Result HookedEvaluate(ID3D12GraphicsCommandList* command, const NVSDK_
     if (!originalEvaluate)
         return NVSDK_NGX_Result_FAIL_FeatureNotFound;
 
+    NvngxDlssgHookCalls().fetch_add(1, std::memory_order_relaxed);
+
     // The host's own native-DLSS branch already runs the correction for this
-    // evaluation; handling it twice would duplicate the history and the GPU work.
-    if (InsideNativeFgHook())
+    // evaluation; handling it twice would duplicate the history and the GPU
+    // work. With the correction switched off this hook is a pure pass-through,
+    // so no other mod's frame generation behaviour changes.
+    if (InsideNativeFgHook() || !ReadControls().active())
         return originalEvaluate(command, handle, parameters, callback);
 
-    NvngxDlssgHookCalls().fetch_add(1, std::memory_order_relaxed);
     try
     {
         return EvaluateNativeFG(command, handle, parameters, callback, originalEvaluate);
@@ -69,5 +73,12 @@ bool InstallNvngxDlssgHook(void* module) noexcept
         originalEvaluate = nullptr;
         return false;
     }
+}
+
+bool InstallNvngxDlssgHookIfLoaded() noexcept
+{
+    if (NvngxDlssgHookInstalled())
+        return true;
+    return InstallNvngxDlssgHook(GetModuleHandleW(L"nvngx_dlssg.dll"));
 }
 } // namespace GlassFg

@@ -11,6 +11,7 @@
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/dlssg/MfgUnlock.h>
+#include <framegen/glass/NvngxDlssgBridge.h>
 #include <framegen/glass/StreamlineTagBridge.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -1147,6 +1148,10 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     if (dlssgPotentiallyActive && state.streamlineVersion >= feature_version { 2, 7, 1 })
     {
+        // Late safety net for the load-order case where nvngx_dlssg.dll was
+        // already loaded before the load hook ran. Independent of the unlocker.
+        GlassFg::InstallNvngxDlssgHookIfLoaded();
+
         // Before the read, so the count this captures is the patched one. Five stays under the
         // sanity bound below.
         MfgUnlock::TryApply();
@@ -1218,6 +1223,7 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
                                               const sl::DLSSGOptions* options)
 {
     // Ahead of every read of numFramesToGenerateMax, which is the value the patch raises.
+    GlassFg::InstallNvngxDlssgHookIfLoaded();
     MfgUnlock::TryApply();
 
     sl::Result result {};

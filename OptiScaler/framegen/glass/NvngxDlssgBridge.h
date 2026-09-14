@@ -16,6 +16,10 @@ namespace GlassFg
 // missing or the detour transaction failed and the process is left untouched.
 bool InstallNvngxDlssgHook(void* module) noexcept;
 
+// Installs the hook when nvngx_dlssg.dll is already present. Safe to call from
+// any periodic path: the install latches, and a missing module is not an error.
+bool InstallNvngxDlssgHookIfLoaded() noexcept;
+
 // Header-only state: the settings panel reads it and the GPU fixtures must not
 // need the bridge object file to link.
 inline std::atomic<bool>& NvngxDlssgHookFlag() noexcept

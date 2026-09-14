@@ -3,7 +3,6 @@
 #include "MfgUnlock.h"
 
 #include <Config.h>
-#include <framegen/glass/NvngxDlssgBridge.h>
 #include <Util.h>
 #include <scanner/scanner.h>
 #include <misc/IdentifyGpu.h>
@@ -325,15 +324,6 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
 
 void MfgUnlock::TryApply()
 {
-    // Independent of the MFG option: Streamline evaluates DLSS-G directly through
-    // nvngx_dlssg.dll, so the correction hook has to be installed on that export
-    // in every configuration. Latches on the module load.
-    if (auto module = GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr && !GlassFg::NvngxDlssgHookInstalled())
-    {
-        const bool hooked = GlassFg::InstallNvngxDlssgHook(module);
-        LOG_INFO("Glass FG: nvngx_dlssg evaluate hook installed={}", hooked ? 1 : 0);
-    }
-
     if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
         return;
 

@@ -26,6 +26,11 @@ class NativeSession
     GpuTimer timer;
     FILE* log = nullptr;
     ID3D12GraphicsCommandList* fgCommand = nullptr;
+    // The FG path decides the list type: the game's own NGX passthrough submits
+    // a compute list, while Streamline's DLSS-G evaluation arrives on a direct
+    // list. bindFgCommand used to accept only compute and marked the whole
+    // session unavailable for the Streamline path.
+    D3D12_COMMAND_LIST_TYPE fgCommandType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     ID3D12CommandQueue* fgQueue = nullptr;
     ID3D12Fence* completion = nullptr;
     CommandLifetime fgLifetime;
@@ -135,11 +140,14 @@ class NativeSession
     // host hooks. Never call repeatedly: rebinding would erase Reset evidence.
     bool bindFgCommand(ID3D12GraphicsCommandList* command, uint32_t supported, uint32_t observed)
     {
+        const auto type = command ? command->GetType() : D3D12_COMMAND_LIST_TYPE_DIRECT;
         if (!initialized || stopped || failed || !command || fgCommand ||
-            command->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE || !link.registerFgCommand(command) ||
+            (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT) ||
+            !link.registerFgCommand(command) ||
             !fgLifetime.attach(command))
             return false;
         fgCommand = command;
+        fgCommandType = type;
         recording.bind(command, true, supported, observed);
         return true;
     }
@@ -193,8 +201,22 @@ class NativeSession
         {
             if (commands[i] == fgCommand)
             {
-                if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+                if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != fgCommandType)
+                {
+                    // Streamline's own DLSS-G evaluation may arrive on a direct
+                    // queue; the compose list has to match that type, so log the
+                    // rejection instead of failing silently.
+                    if (log)
+                    {
+                        std::fprintf(log,
+                                     "NATIVE_HOST unsupported_fg_queue type=%u expected=%u known=%p queue=%p\n",
+                                     static_cast<unsigned>(queue->GetDesc().Type),
+                                     static_cast<unsigned>(fgCommandType), static_cast<void*>(fgQueue),
+                                     static_cast<void*>(queue));
+                        std::fflush(log);
+                    }
                     failed = true;
+                }
                 else if (!fgQueue)
                 {
                     fgQueue = queue;
@@ -211,7 +233,7 @@ class NativeSession
             failed = true;
         if (usesOutput)
         {
-            if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+            if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != fgCommandType)
                 failed = true;
             else
             {

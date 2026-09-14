@@ -57,6 +57,10 @@ class PackedMotionGpu
     ID3D12CommandAllocator* composeAllocator = nullptr;
     ID3D12GraphicsCommandList* composeList = nullptr;
     ID3D12Fence* composeFence = nullptr;
+    // The compose list has to match the queue that carries the FG command list:
+    // the NGX passthrough path submits a compute list, Streamline's DLSS-G path
+    // a direct list.
+    D3D12_COMMAND_LIST_TYPE composeType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     std::uint64_t composeValue = 0;
     bool composePending = false;
     // The compose list is submitted without the host completion signal whenever
@@ -406,14 +410,21 @@ class PackedMotionGpu
                        D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, Controls controls,
                        GpuTimer* timer)
     {
-        if (!queue || !composeReady() || !ensureCompose())
+        if (!queue)
+            return false;
+        const auto type = queue->GetDesc().Type;
+        if (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+            return false;
+        if (!composeReady() || !ensureCompose(type))
             return false;
         if (FAILED(composeAllocator->Reset()) || FAILED(composeList->Reset(composeAllocator, nullptr)))
             return false;
         // Sparse GPU timing on the host's existing timer. This is a compute list
         // on the FG queue, the same shape the timer already accepts; a full
         // eight-slot window skips the sample instead of waiting.
-        const auto timing = timer && controls.measureGpuTime ? timer->begin(composeList) : GpuTimer::Ticket {};
+        const auto timing = timer && controls.measureGpuTime && type == D3D12_COMMAND_LIST_TYPE_COMPUTE
+                                ? timer->begin(composeList)
+                                : GpuTimer::Ticket {};
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
         const bool recorded =
             dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
@@ -446,13 +457,35 @@ class PackedMotionGpu
     }
 
   private:
-    bool ensureCompose()
+    bool ensureCompose(D3D12_COMMAND_LIST_TYPE type)
     {
-        if (composeList)
+        if (composeList && composeType == type)
             return true;
+        // A new FG path can carry a different list type. The old objects are only
+        // dropped when nothing of theirs can still be executing.
+        if (composeList && composePending)
+            return false;
+        if (composeAllocator)
+        {
+            composeAllocator->Release();
+            composeAllocator = nullptr;
+        }
+        if (composeList)
+        {
+            composeList->Release();
+            composeList = nullptr;
+        }
+        if (composeFence)
+        {
+            composeFence->Release();
+            composeFence = nullptr;
+        }
+        composeValue = 0;
+        composePending = false;
+        composeType = type;
         if (!device ||
-            FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&composeAllocator))) ||
-            FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, composeAllocator, nullptr,
+            FAILED(device->CreateCommandAllocator(type, IID_PPV_ARGS(&composeAllocator))) ||
+            FAILED(device->CreateCommandList(0, type, composeAllocator, nullptr,
                                              IID_PPV_ARGS(&composeList))) ||
             FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&composeFence))))
             return false;

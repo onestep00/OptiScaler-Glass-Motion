@@ -37,23 +37,12 @@ inline static std::vector<void*> oldBackBuffers;
 
 static bool CheckForFGStatus()
 {
-    // Diagnostic for the glass module: the resolved FG input/output decide
-    // whether the swapchain FG path exists at all in this session.
-    LOG_DEBUG("FG check: input={} (config {}) output={} (config {}) nvngxReplacement={}",
-              (int) State::Instance().activeFgInput, (int) Config::Instance()->FGInput.value_or_default(),
-              (int) State::Instance().activeFgOutput, (int) Config::Instance()->FGOutput.value_or_default(),
-              (int) State::Instance().activeFgNvngx);
-
     // Need to check overlay menu parameter, goes to places it shouldn't go
     // if (!Config::Instance()->OverlayMenu.value_or_default())
     //    return false;
 
     if (State::Instance().activeFgInput == FGInput::NoFG || State::Instance().activeFgInput == FGInput::NvngxFG)
-    {
-        LOG_DEBUG("FG check: input {} owns frame generation; the swapchain FG is disabled",
-                  (int) State::Instance().activeFgInput);
         return false;
-    }
 
     // Disable FG if amd dll is not found
     if (State::Instance().activeFgOutput == FGOutput::FSRFG)
