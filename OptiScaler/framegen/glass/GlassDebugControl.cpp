@@ -4,6 +4,7 @@
 #include "GlassMotionIdentity.h"
 #include "NativeHost.h"
 #include "PackedMotionCapture.h"
+#include "GlassPluginHost.h"
 #include <Util.h>
 #include <cstdio>
 #include <fstream>
@@ -65,6 +66,7 @@ void writeStatus(std::ofstream& file)
     file << "host evaluations=" << host.evaluations << " substitutions=" << host.substitutions
          << " captures=" << host.captures << " active=" << host.active << " retiring=" << host.retiring
          << " stopped=" << host.stopped << " unavailable=" << host.unavailable << "\n";
+    file << "plugin loaded=" << (GlassPluginLoaded() ? 1 : 0) << "\n";
     file << "ok=1\n";
 }
 } // namespace
@@ -147,6 +149,20 @@ void PollGlassDebugControl() noexcept
             {
                 RequestPackedDump();
                 output << "dump=queued\n";
+                continue;
+            }
+            if (line == "plugin=load" || line == "plugin=reload" || line == "plugin=unload")
+            {
+                char message[160] {};
+                bool okay = false;
+                if (line != "plugin=load")
+                    UnloadGlassPlugin(message, sizeof(message));
+                if (line != "plugin=unload")
+                    okay = LoadGlassPlugin(message, sizeof(message));
+                else
+                    okay = true;
+                output << line << " ok=" << (okay ? 1 : 0) << " " << message << " loaded="
+                       << (GlassPluginLoaded() ? 1 : 0) << "\n";
                 continue;
             }
             auto value = ReadControls();
