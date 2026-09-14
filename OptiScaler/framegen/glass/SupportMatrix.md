@@ -77,6 +77,10 @@ Consequences per family: single glass, railings, windows, liquid, holograms, wor
    rejects are all `renderstage_distortion`; the 62 depth/stencil rejects are all
    `renderstage_hair_alpha_accum`. Evidence: `work/glass-decompile/reject-classification/`.
    This is shader acceptance, not identity resolution or live FG quality.
+   With the coverage-only retry that shipped in `EA3956DC`, all 3592 pairs are accepted: 3212 keep the
+   interior transmittance blend and 380 become coverage-only variants (boundary keeps the object's
+   motion and depth, interior keeps the engine's own motion). The 380 fallbacks are exactly the set
+   above. Evidence: `work/glass-decompile/pair-scan/pair-scan-summary.json`.
 1. Grouped-array element order comes from the plugin's owner scan. A candidate is published only when its element count matches the object's array count, every entry is a valid source index, and no index repeats; otherwise the element stays unresolved instead of being guessed (`no_element_index`).
 2. Pixel shaders whose final colour store sits in a branch are rejected by the rewriter; the rejection now logs the actual exit shape so the next session can classify it (`GEOMETRY_PACKED_ERROR`).
 3. Materials without a packed pipeline variant are counted per draw chunk (`GEOMETRY_CHUNKS missing=`); the families behind the histogram are not yet enumerated.
