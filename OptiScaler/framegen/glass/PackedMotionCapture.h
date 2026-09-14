@@ -25,6 +25,11 @@ struct PackedMotionFrame
     ID3D12Resource* resource = nullptr;
     std::uint32_t width = 0, height = 0, frame = 0;
     std::uint64_t fgFrame = UINT64_MAX;
+    // Borrowed producer dependency. The packed raster runs on the graphics
+    // queue; the queue that executes the compose must wait on this value
+    // before the packed buffer is read.
+    ID3D12Fence* producerFence = nullptr;
+    std::uint64_t producerValue = 0;
     explicit operator bool() const { return resource && width && height && frame; }
 };
 

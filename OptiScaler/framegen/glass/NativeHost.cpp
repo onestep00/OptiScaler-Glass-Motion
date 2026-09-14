@@ -158,10 +158,35 @@ D3D12Callbacks makeCallbacks()
     value.mutation = [](void* p, ID3D12GraphicsCommandList* c)
     { static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onStateMutation(c); }); };
     value.barrier = [](void*, ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*) {};
-    value.beforeSubmit = [](void*, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
+    value.beforeSubmit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {
+        auto& r = *static_cast<Runtime*>(p);
         InternalD3D12Scope ownCalls;
         NotifyGeometryCaptureBeforeSubmit(q, count, lists);
+        // The compose reads the packed raster written on the producer queue.
+        // Establish that dependency before the batch that carries the FG call.
+        r.each([&](Entry& e)
+        {
+            if (!q || !e.command)
+                return;
+            for (UINT i = 0; i < count; ++i)
+                if (lists[i] == e.command)
+                {
+                    ID3D12Fence* fence = nullptr;
+                    std::uint64_t value = 0;
+                    if (e.session.takeProducerWait(fence, value))
+                    {
+                        q->Wait(fence, value);
+                        if (r.log && ReadControls().trace)
+                        {
+                            std::fprintf(r.log, "TRACE_WAIT producer=%llu queue=%p\n",
+                                         static_cast<unsigned long long>(value), q);
+                            std::fflush(r.log);
+                        }
+                    }
+                    break;
+                }
+        });
     };
     value.submit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {

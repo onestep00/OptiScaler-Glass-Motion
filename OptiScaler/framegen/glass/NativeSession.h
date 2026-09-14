@@ -37,6 +37,10 @@ class NativeSession
     unsigned candidates = 0;
     bool initialized = false, stopped = false, failed = false;
     bool outputRecording = false, timing = false, objectMode = false;
+    // Producer dependency for the current packed frame, consumed by the host's
+    // pre-submit hook on the queue that executes the FG command list.
+    ID3D12Fence* pendingProducerFence = nullptr;
+    std::uint64_t pendingProducerValue = 0;
 
     bool retainProducer(ID3D12GraphicsCommandList* command)
     {
@@ -265,11 +269,13 @@ class NativeSession
                 const auto description = inputs.motion->GetDesc();
                 objectFrame = objectProvider.acquire(command, static_cast<std::uint32_t>(description.Width),
                                                      description.Height, inputs.frame, inputs.reset != 0);
+                pendingProducerFence = objectFrame.producerFence;
+                pendingProducerValue = objectFrame.producerValue;
             }
             auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
                                                timing ? &timer : nullptr);
-            if (inputs.index == 1 && prepared.motion)
-                command->ClearState(nullptr);
+            if (inputs.index == 1)
+                command->ClearState(nullptr); // Never leak our PSO/root/heap into the FG call.
             outputRecording |= prepared.motion != nullptr;
             if (controls.trace && log)
             {
@@ -348,6 +354,16 @@ class NativeSession
             objectPass.requestDump();
     }
     bool serviceDump() { return objectMode && objectPass.serviceDump(); }
+    // Cross-queue dependency of the packed raster read. The caller performs the
+    // wait on the queue that submits the FG command list.
+    bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value)
+    {
+        fence = pendingProducerFence;
+        value = pendingProducerValue;
+        pendingProducerFence = nullptr;
+        pendingProducerValue = 0;
+        return fence != nullptr && value != 0;
+    }
     void dumpSubmitted(ID3D12CommandQueue* queue)
     {
         if (objectMode)
