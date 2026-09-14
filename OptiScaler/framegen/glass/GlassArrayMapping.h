@@ -25,6 +25,8 @@ struct GlassArrayMappingStats
     // published range. The distinction tells whether the plugin never published
     // this object or published a different output range than the draw uses.
     std::uint64_t misses = 0, outOfRange = 0;
+    // Table-full evictions: a live proxy lost its slot to a newly published one.
+    std::uint64_t evictions = 0;
     unsigned entries = 0;
 };
 GlassArrayMappingStats ReadArrayMappingStats() noexcept;

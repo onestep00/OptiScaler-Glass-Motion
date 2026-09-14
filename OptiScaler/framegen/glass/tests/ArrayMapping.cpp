@@ -35,6 +35,19 @@ int main()
         check(stats.entries == 2 && stats.published == 2);
         // Eight lookups: five hits, one unknown-proxy miss, two out-of-range.
         check(stats.lookups == 8 && stats.hits == 5 && stats.misses == 1 && stats.outOfRange == 2);
+        // Fill past the capacity: the oldest slot is evicted and counted.
+        for (unsigned i = 0; i < 260; ++i)
+        {
+            GlassFg::GlassArrayMappingEntry fill;
+            fill.proxy = 0x10000 + i;
+            fill.outputStart = i;
+            fill.count = 1;
+            fill.indices[0] = i;
+            GlassFg::PublishArrayMapping(fill);
+        }
+        stats = GlassFg::ReadArrayMappingStats();
+        check(stats.entries == 256 && stats.evictions >= 1);
+        check(GlassFg::LookupArrayMapping(0x10000 + 259, 259) == 259); // Newest entry stayed.
         puts("ARRAY_MAPPING publish_lookup_replace_clamp=pass");
         return 0;
     }

@@ -9,11 +9,14 @@ namespace GlassFg
 namespace
 {
 // Bounded, frame-scoped table. Entries are replaced by proxy, so a live object
-// never accumulates duplicates.
-constexpr unsigned Capacity = 64;
+// never accumulates duplicates. The scene can show more than 64 grouped arrays
+// at once, and an evicted proxy only loses coverage (its elements stay
+// unresolved), never correctness.
+constexpr unsigned Capacity = 256;
 GlassArrayMappingEntry entries[Capacity] {};
 std::mutex mutex;
-std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 }, misses { 0 }, outOfRange { 0 };
+std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 }, misses { 0 }, outOfRange { 0 },
+    evictions { 0 };
 
 std::uint32_t lookupUnlocked(std::uintptr_t proxy, std::uint32_t ordinal, bool& entryFound) noexcept
 {
@@ -59,6 +62,7 @@ void PublishArrayMapping(const GlassArrayMappingEntry& source) noexcept
     }
     // Table full: replace the oldest proxy slot (first entry).
     entries[0] = entry;
+    ++evictions;
     ++replaced;
 }
 
@@ -87,6 +91,7 @@ GlassArrayMappingStats ReadArrayMappingStats() noexcept
     stats.hits = hits.load();
     stats.misses = misses.load();
     stats.outOfRange = outOfRange.load();
+    stats.evictions = evictions.load();
     for (const auto& entry : entries)
         if (entry.count)
             ++stats.entries;

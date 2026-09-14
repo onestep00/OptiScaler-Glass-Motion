@@ -72,7 +72,8 @@ void writeStatus(std::ofstream& file)
     const auto mapping = ReadArrayMappingStats();
     file << "arraymap entries=" << mapping.entries << " published=" << mapping.published
          << " replaced=" << mapping.replaced << " lookups=" << mapping.lookups << " hits=" << mapping.hits
-         << " misses=" << mapping.misses << " out_of_range=" << mapping.outOfRange << "\n";
+         << " misses=" << mapping.misses << " out_of_range=" << mapping.outOfRange
+         << " evictions=" << mapping.evictions << "\n";
     file << "ok=1\n";
 }
 } // namespace
