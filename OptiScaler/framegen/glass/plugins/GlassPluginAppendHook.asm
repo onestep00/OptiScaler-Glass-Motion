@@ -5,8 +5,19 @@
 ; jump. A plain C++ hook could clobber r8/r9 and crash the engine.
 extern glassArrayMapAppendHook:proc
 extern glassArrayMapAppendTarget:qword
+extern glassArrayMapGroupedTarget:qword
 
 .code
+; Bare pass-throughs for the isolation run: patch the function but do no work,
+; so a crash there is caused by the patch itself and not by the hook body.
+glassArrayMapAppendPassTrampoline proc
+    jmp     qword ptr [glassArrayMapAppendTarget]
+glassArrayMapAppendPassTrampoline endp
+
+glassArrayMapGroupedPassTrampoline proc
+    jmp     qword ptr [glassArrayMapGroupedTarget]
+glassArrayMapGroupedPassTrampoline endp
+
 glassArrayMapAppendTrampoline proc
     push    rcx
     push    rdx

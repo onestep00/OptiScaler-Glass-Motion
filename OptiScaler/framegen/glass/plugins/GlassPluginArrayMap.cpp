@@ -225,6 +225,28 @@ extern "C" void glassArrayMapAppendHook(void* container, std::uintptr_t sourceMa
 
 extern "C" void glassArrayMapAppendTrampoline();
 extern "C" void* glassArrayMapAppendTarget = nullptr;
+extern "C" void glassArrayMapAppendPassTrampoline();
+extern "C" void glassArrayMapGroupedPassTrampoline();
+extern "C" void* glassArrayMapGroupedTarget = nullptr;
+
+// Heartbeat from plugin-owned thread: proves whether the process survived the
+// patch and whether the hooks ever ran before a crash.
+std::atomic<bool> monitorStop { false };
+HANDLE monitorThread = nullptr;
+
+DWORD WINAPI monitorLoop(LPVOID) noexcept
+{
+    unsigned beat = 0;
+    while (!monitorStop.load(std::memory_order_relaxed))
+    {
+        Sleep(250);
+        if (monitorStop.load(std::memory_order_relaxed))
+            break;
+        directLog("beat=%u grouped=%u append=%u", ++beat, groupedCalls.load(std::memory_order_relaxed),
+                  appendCalls.load(std::memory_order_relaxed));
+    }
+    return 0;
+}
 
 extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* api)
 {
@@ -268,7 +290,9 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     // on 2026-09-14 16:59.
     const bool skipGrouped = markerPresent(L"plugin-grouped.off");
     const bool skipAppend = markerPresent(L"plugin-append.off");
-    directLog("attach switches grouped=%u append=%u", skipGrouped ? 0u : 1u, skipAppend ? 0u : 1u);
+    const bool passThrough = markerPresent(L"plugin-passthrough.on");
+    directLog("attach switches grouped=%u append=%u passthrough=%u", skipGrouped ? 0u : 1u,
+              skipAppend ? 0u : 1u, passThrough ? 1u : 0u);
     GlassFg::DetourThreads threads;
     if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
     {
@@ -279,11 +303,13 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     if (!skipGrouped)
         attached = attached &&
                    DetourAttach(reinterpret_cast<PVOID*>(&originalGrouped),
-                                reinterpret_cast<PVOID>(&hookedGrouped)) == NO_ERROR;
+                                passThrough ? reinterpret_cast<PVOID>(&glassArrayMapGroupedPassTrampoline)
+                                            : reinterpret_cast<PVOID>(&hookedGrouped)) == NO_ERROR;
     if (!skipAppend)
         attached = attached &&
                    DetourAttach(reinterpret_cast<PVOID*>(&originalAppend),
-                                reinterpret_cast<PVOID>(&glassArrayMapAppendTrampoline)) == NO_ERROR;
+                                passThrough ? reinterpret_cast<PVOID>(&glassArrayMapAppendPassTrampoline)
+                                            : reinterpret_cast<PVOID>(&glassArrayMapAppendTrampoline)) == NO_ERROR;
     const bool detached = attached;
     if (!detached || !threads.enlist() || DetourTransactionCommit() != NO_ERROR)
     {
@@ -296,7 +322,12 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     }
     // The trampoline tail-jumps here, so it must hold the real body.
     glassArrayMapAppendTarget = reinterpret_cast<void*>(originalAppend);
+    glassArrayMapGroupedTarget = reinterpret_cast<void*>(originalGrouped);
     directLog("attach_committed grouped=%u append=%u", originalGrouped ? 1u : 0u, originalAppend ? 1u : 0u);
+    monitorStop.store(false, std::memory_order_relaxed);
+    monitorThread = CreateThread(nullptr, 0, &monitorLoop, nullptr, 0, nullptr);
+    if (!monitorThread)
+        directLog("monitor_thread_failed=1");
     // The build tag makes the module log identify which DLL actually loaded.
     trace("ARRAY_MAP attached=1 build=4-lifetime-veh");
     return true;
@@ -304,6 +335,13 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
 
 extern "C" __declspec(dllexport) void GlassPluginDetach()
 {
+    monitorStop.store(true, std::memory_order_relaxed);
+    if (monitorThread)
+    {
+        WaitForSingleObject(monitorThread, 1000);
+        CloseHandle(monitorThread);
+        monitorThread = nullptr;
+    }
     if (originalGrouped || originalAppend)
     {
         GlassFg::DetourThreads threads;
@@ -319,6 +357,8 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
     }
     originalGrouped = nullptr;
     originalAppend = nullptr;
+    glassArrayMapAppendTarget = nullptr;
+    glassArrayMapGroupedTarget = nullptr;
     directLog("detached");
     trace("ARRAY_MAP detached=1");
     host.store(nullptr, std::memory_order_release);
