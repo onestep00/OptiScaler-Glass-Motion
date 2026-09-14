@@ -63,6 +63,15 @@ Consequences per family: single glass, railings, windows, liquid, holograms, wor
 
 ## Current limitations
 
+0. Offline full-population rewriter acceptance (2026-09-14, shader-level only): 680 of 688 transparent
+   vertex shaders pass the vertex-history rewrite in both layouts (the other 8 are pixel shaders with a
+   different shader model, not vertex candidates). Of 3592 unique transparent-route VS/PS pairs, 3212
+   (89.4%) pass the production `packed-inplace-mapped` rewrite and validation; 380 are rejected:
+   `Required material output missing` 209, `Branch-local final color store unsupported` 109,
+   `Pixel depth/stencil exports require separate coverage validation` 62. Rejections cluster in
+   `renderstage_distortion` 260, `renderstage_hair_alpha_accum` 62 and `renderstage_hologram_depth` 24.
+   Evidence: `work/glass-decompile/rewrite-scan/`, `work/glass-decompile/pair-scan/`.
+   This is shader acceptance, not identity resolution or live FG quality.
 1. Grouped-array element order comes from the plugin's owner scan. A candidate is published only when its element count matches the object's array count, every entry is a valid source index, and no index repeats; otherwise the element stays unresolved instead of being guessed (`no_element_index`).
 2. Pixel shaders whose final colour store sits in a branch are rejected by the rewriter; the rejection now logs the actual exit shape so the next session can classify it (`GEOMETRY_PACKED_ERROR`).
 3. Materials without a packed pipeline variant are counted per draw chunk (`GEOMETRY_CHUNKS missing=`); the families behind the histogram are not yet enumerated.
@@ -73,6 +82,11 @@ Consequences per family: single glass, railings, windows, liquid, holograms, wor
 8. Plugin and module replacement require the game to be closed; the plugin auto-loads from the armed `plugin=load` request in the deploy folder. Unloading a loaded plugin in a live session is no longer used (it crashed twice before the vectored-handler removal and the in-flight drain were added, and the workflow is dropped).
 9. Identity `no_view` rejects are split into `no_view_state`, `no_view_unknown` (render pass, bundle, more than 8 targets) and `no_view_descriptor`, but no fix for any branch is implemented yet.
 10. The 18:36 session crashed inside the plugin probe when `proxy+0x70` was dereferenced as the group owner. Probes now validate readability first and the vectored handler is off by default; any future probe must keep that rule.
+11. Live session 2026-09-14 19:43 (PID 50872, dxgi `7653DF77`): the module was healthy with
+    `packed_ready=192`/`packed_rejected=23`, but `GEOMETRY_PARENT no_selection=73` left
+    `pipeline_ready=0`, `object_capture=0` and `admitted=0`, `acquire_no_candidate=80`, `plugin loaded=0`.
+    No draw was replaced, so no correction could be applied in that session. Earlier sessions reached
+    `admitted=1012806` and `fg_frames=169`, but `host substitutions` stayed 0.
 
 ## How to collect the pending evidence in one session
 
