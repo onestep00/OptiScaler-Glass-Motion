@@ -23,6 +23,10 @@ class PackedMotionGpu
     ID3D12Resource* motion = nullptr;
     ID3D12Resource* depth = nullptr;
     ID3D12Resource* selection = nullptr;
+    // FG-facing copies of motion/depth. They are written only by copy, so the
+    // evaluation never consumes a UAV-written resource (see dispatch()).
+    ID3D12Resource* motionRead = nullptr;
+    ID3D12Resource* depthRead = nullptr;
     // Diagnostic coverage counters written by the compose shader:
     // [dispatched, packed_id, edge, interior].
     ID3D12Resource* counters = nullptr;
@@ -143,6 +147,18 @@ class PackedMotionGpu
         dumpFolder = std::filesystem::path(shader).parent_path();
         width = static_cast<unsigned>(motionDescription.Width);
         height = motionDescription.Height;
+        // Size/format evidence for crash attribution: a copy box larger than a
+        // bound texture or a format mismatch is the first suspect when a driver
+        // reset follows the first full-height frame.
+        if (logFile)
+        {
+            std::fprintf(logFile,
+                         "PACKED_GPU extent=%ux%u motion_format=%u depth_format=%u depth_flags=%u\n",
+                         width, height, static_cast<unsigned>(motionDescription.Format),
+                         static_cast<unsigned>(depthDescription.Format),
+                         static_cast<unsigned>(depthDescription.Flags));
+            std::fflush(logFile);
+        }
 
         auto outputMotion = motionDescription;
         outputMotion.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -151,6 +167,13 @@ class PackedMotionGpu
         auto outputDepth = depthDescription;
         outputDepth.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         if (!createTexture(outputDepth, D3D12_RESOURCE_STATE_COPY_DEST, &depth))
+            return false;
+        // The FG evaluation consumes these two. They are only ever written by a
+        // copy, never by the compose UAV: handing UAV-written resources to the
+        // evaluation reset the driver on 2026-09-14 23:17, while the copy-only
+        // pair was stable in the 22:57 session.
+        if (!createTexture(motionDescription, D3D12_RESOURCE_STATE_COPY_DEST, &motionRead) ||
+            !createTexture(depthDescription, D3D12_RESOURCE_STATE_COPY_DEST, &depthRead))
             return false;
         auto selected = depthDescription;
         selected.Format = DXGI_FORMAT_R16_FLOAT;
@@ -678,17 +701,16 @@ class PackedMotionGpu
             transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalDepth, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        // The staged row limit controls the new compute work only. Any output
+        // that the FG evaluation consumes must hold a complete frame: rows the
+        // compute never touches would otherwise keep stale memory, and NGX
+        // reading that is wrong by construction (the 22:49 reset ran with 240
+        // composed rows and a stale remainder). A pending dump reads the whole
+        // frame as well.
+        const unsigned copyRows = (dumpRequests.load(std::memory_order_relaxed) || controls.packedSubstitute)
+                                      ? height
+                                      : (std::min)(height, (std::max)(1u, controls.packedRows));
         {
-            // The staged row limit controls the new compute work only. Any
-            // output that the FG evaluation consumes must hold a complete
-            // frame: rows the compute never touches would otherwise keep stale
-            // memory, and NGX reading that is wrong by construction (the
-            // 22:49 reset ran with 240 composed rows and a stale remainder).
-            // A pending dump reads the whole frame as well.
-            const unsigned copyRows =
-                (dumpRequests.load(std::memory_order_relaxed) || controls.packedSubstitute)
-                    ? height
-                    : (std::min)(height, (std::max)(1u, controls.packedRows));
             const D3D12_BOX box { 0, 0, 0, width, copyRows, 1 };
             D3D12_TEXTURE_COPY_LOCATION source {}, target {};
             source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -752,9 +774,9 @@ class PackedMotionGpu
             command->Dispatch((width + 7) / 8, (rows + 7) / 8, 1);
         if (controls.trace && logFile)
         {
-            std::fprintf(logFile, "TRACE_DISPATCH frame=%u rows=%u groups=%u edges=%u compute=%u\n", packed.frame,
-                         rows, (width + 7) / 8, (std::min)(controls.edgeWidth, 4u),
-                         controls.packedCompute ? 1u : 0u);
+            std::fprintf(logFile, "TRACE_DISPATCH frame=%u rows=%u groups=%u edges=%u compute=%u copy=%u\n",
+                         packed.frame, rows, (width + 7) / 8, (std::min)(controls.edgeWidth, 4u),
+                         controls.packedCompute ? 1u : 0u, copyRows);
             std::fflush(logFile);
         }
         if (!dumpPending && dumpRequests.load(std::memory_order_relaxed) && prepareReadback())
@@ -817,19 +839,33 @@ class PackedMotionGpu
                 outputBarrier.UAV.pResource = resource;
                 command->ResourceBarrier(1, &outputBarrier);
             }
-        transition(command, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-        transition(command, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        transition(command, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition(command, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        {
+            const D3D12_BOX box { 0, 0, 0, width, height, 1 };
+            D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            source.pResource = motion;
+            target.pResource = motionRead;
+            command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
+            source.pResource = depth;
+            target.pResource = depthRead;
+            command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
+        }
+        transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         transition(command, selection, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         return true;
     }
 
-    ID3D12Resource* motionOutput() const { return motion; }
-    ID3D12Resource* depthOutput() const { return depth; }
+    ID3D12Resource* motionOutput() const { return motionRead; }
+    ID3D12Resource* depthOutput() const { return depthRead; }
     ID3D12Resource* selectionOutput() const { return selection; }
     void releaseAfterGpuDrain()
     {
-        for (auto** resource : { &motion, &depth, &selection })
+        for (auto** resource : { &motion, &depth, &selection, &motionRead, &depthRead })
         {
             if (*resource)
                 (*resource)->Release();
