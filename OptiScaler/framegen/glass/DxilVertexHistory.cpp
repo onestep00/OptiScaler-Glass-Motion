@@ -989,11 +989,19 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                 if (it == end)
                     continue;
                 size_t lastEnd = 0;
+                unsigned stores = 0;
                 for (; it != end; ++it)
                 {
                     color[semanticIndex][c] = (*it)[1];
                     lastEnd = static_cast<size_t>(it->position() + it->length());
+                    ++stores;
                 }
+                // Exactly one store for this target/component cannot be
+                // ambiguous, even when other blocks follow it. LLVM prints
+                // "; <label>:" comments for those blocks, which previously
+                // rejected valid single-store materials.
+                if (stores == 1)
+                    continue;
                 const auto returnAt = source.find("  ret void", lastEnd);
                 need(returnAt != std::string::npos, "Color export does not precede final return");
                 const auto tail = source.substr(lastEnd, returnAt - lastEnd);
@@ -1006,7 +1014,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                         tail, std::regex(
                                   R"(\n\s*(br |switch |indirectbr |unreachable|; <label>|[A-Za-z_][A-Za-z_0-9.]*:))")))
                 {
-                    std::string detail = tail.substr(0, 120);
+                    std::string detail = tail.substr(0, 400);
                     for (auto& character : detail)
                         if (character == '\n' || character == '\r' || character == '\t')
                             character = '|';
