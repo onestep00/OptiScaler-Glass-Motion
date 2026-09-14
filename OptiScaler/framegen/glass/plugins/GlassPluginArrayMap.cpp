@@ -124,6 +124,7 @@ LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) noexcept
 
 void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
 void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
+void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept;
 std::atomic<unsigned> flaggedDumps { 0 };
 
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
@@ -192,7 +193,10 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
         // Arrays (flag 0x2000) are rare; dump the full object so the element
         // list can be located from live bytes instead of another guess.
         if ((current.flags & 0x2000) && flaggedDumps.fetch_add(1, std::memory_order_relaxed) < 12)
+        {
             dumpObject("flagged", call, proxy);
+            dumpOwner("flagged_owner", call, proxy);
+        }
     }
     if (originalGrouped)
         originalGrouped(proxy, previousValid);
@@ -324,6 +328,84 @@ void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
         used += std::snprintf(buffer + used, sizeof(buffer) - used, " %03x=%llx", i * 8, words[i]);
     }
     directLog("%s=%u ptr=%llx %s", tag, call, static_cast<unsigned long long>(pointer), buffer);
+}
+
+// proxy+0x70 is the group owner (NativeOpaqueMvRoutes.md paragraph 198). The
+// element list lives at owner+0x18, the element count at owner+0x3c and the
+// output start at owner+0x50. Log both interpretations of +0x18 (inline 16-bit
+// entries or a pointer to them) so the next run needs no extra guess.
+void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
+{
+    std::uintptr_t owner = 0;
+    bool readOwner = false;
+    __try
+    {
+        owner = *reinterpret_cast<std::uintptr_t*>(proxy + 0x70);
+        readOwner = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        readOwner = false;
+    }
+    if (!readOwner || !owner)
+    {
+        directLog("%s=%u proxy=%llx owner=%llx read=%u", tag, call, static_cast<unsigned long long>(proxy),
+                  static_cast<unsigned long long>(owner), readOwner ? 1u : 0u);
+        return;
+    }
+    char inlineText[160] {};
+    int inlineUsed = 0;
+    unsigned short inlineEntries[8] {};
+    unsigned count = 0, outputStart = 0;
+    std::uintptr_t list = 0;
+    bool read = false;
+    __try
+    {
+        for (unsigned i = 0; i < 8; ++i)
+            inlineEntries[i] = *reinterpret_cast<unsigned short*>(owner + 0x18 + i * 2);
+        list = *reinterpret_cast<std::uintptr_t*>(owner + 0x18);
+        count = *reinterpret_cast<std::uint32_t*>(owner + 0x3c);
+        outputStart = *reinterpret_cast<std::uint32_t*>(owner + 0x50);
+        read = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        read = false;
+    }
+    if (!read)
+    {
+        directLog("%s=%u owner=%llx owner_fault=1", tag, call, static_cast<unsigned long long>(owner));
+        return;
+    }
+    for (unsigned i = 0; i < 8; ++i)
+        inlineUsed += std::snprintf(inlineText + inlineUsed, sizeof(inlineText) - inlineUsed, "%u,", inlineEntries[i]);
+    directLog("%s=%u proxy=%llx owner=%llx count=%u out_start=%u p18=%llx inline16=%s", tag, call,
+              static_cast<unsigned long long>(proxy), static_cast<unsigned long long>(owner), count, outputStart,
+              static_cast<unsigned long long>(list), inlineText);
+    if (list < 0x10000ull || list > 0x7FFFFFFFFFFFull)
+        return;
+    unsigned short entries[16] {};
+    bool readList = false;
+    __try
+    {
+        for (unsigned i = 0; i < 16; ++i)
+            entries[i] = *reinterpret_cast<unsigned short*>(list + i * 2);
+        readList = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        readList = false;
+    }
+    if (!readList)
+    {
+        directLog("%s=%u list=%llx list_fault=1", tag, call, static_cast<unsigned long long>(list));
+        return;
+    }
+    char listText[220] {};
+    int listUsed = 0;
+    for (unsigned i = 0; i < 16; ++i)
+        listUsed += std::snprintf(listText + listUsed, sizeof(listText) - listUsed, "%u,", entries[i]);
+    directLog("%s=%u list=%llx ptr16=%s", tag, call, static_cast<unsigned long long>(list), listText);
 }
 } // namespace
 
