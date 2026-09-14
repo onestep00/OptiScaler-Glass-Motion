@@ -137,7 +137,8 @@ static int runDump(const wchar_t* shader)
     std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
     packedUpload->Unmap(0, nullptr);
     command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
-    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     GlassFg::PackedMotionGpu gpu;
     require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), localShader.c_str(), stdout),
             "initialize");
@@ -250,7 +251,8 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
     std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
     packedUpload->Unmap(0, nullptr);
     command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
-    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     checked(command->Close(), "close");
     ID3D12CommandList* lists[] = { command.Get() };
     queue->ExecuteCommandLists(1, lists);
@@ -574,7 +576,8 @@ static int runScale(const wchar_t* shader)
     std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
     packedUpload->Unmap(0, nullptr);
     command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
-    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     GlassFg::PackedMotionGpu gpu;
     require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), shader, stdout), "initialize");
@@ -709,7 +712,8 @@ int wmain(int argc, wchar_t** argv)
         std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
         packedUpload->Unmap(0, nullptr);
         command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
-        transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         GlassFg::PackedMotionGpu gpu;
         require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), argv[1], stdout), "initialize");

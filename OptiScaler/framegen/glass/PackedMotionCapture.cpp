@@ -31,7 +31,8 @@ void checked(HRESULT value, const char* message)
 }
 
 ComPtr<ID3D12Resource> buffer(ID3D12Device* device, UINT64 bytes, D3D12_HEAP_TYPE heapType,
-                              D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE)
+                              D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE,
+                              D3D12_RESOURCE_STATES initial = D3D12_RESOURCE_STATE_COMMON)
 {
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = heapType;
@@ -45,9 +46,8 @@ ComPtr<ID3D12Resource> buffer(ID3D12Device* device, UINT64 bytes, D3D12_HEAP_TYP
     desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     desc.Flags = flags;
     ComPtr<ID3D12Resource> result;
-    const auto initial = heapType == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ
-                                                           : D3D12_RESOURCE_STATE_COMMON;
-    checked(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, initial,
+    const auto state = heapType == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : initial;
+    checked(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
                                              nullptr, IID_PPV_ARGS(&result)), "Packed buffer creation failed");
     return result;
 }
@@ -345,7 +345,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                                    D3D12_HEAP_TYPE_UPLOAD);
             frame.constantBuffer = buffer(device.Get(), UINT64(ConstantCapacity) * 256, D3D12_HEAP_TYPE_UPLOAD);
             frame.capture = buffer(device.Get(), pixels * 8, D3D12_HEAP_TYPE_DEFAULT,
-                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             D3D12_RANGE noRead { 0, 0 };
             checked(frame.mapping->Map(0, &noRead, reinterpret_cast<void**>(&frame.mappings)),
                     "Packed mapping map failed");

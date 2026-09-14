@@ -243,9 +243,14 @@ class PackedMotionGpu
 
         D3D12_DESCRIPTOR_RANGE range {};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        // The packed object records moved from a root SRV to a root UAV: the
+        // capture writes that buffer only as a UAV, so a shader-resource read
+        // relied on implicit COMMON promotion and left the UAV barrier covering
+        // an ill-defined state pair.
+        range.BaseShaderRegister = 1;
         range.NumDescriptors = 4;
         D3D12_ROOT_PARAMETER parameters[3] {};
-        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
         parameters[0].Descriptor = { 0, 0 };
         parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         parameters[1].DescriptorTable = { 1, &range };
@@ -793,7 +798,7 @@ class PackedMotionGpu
         static_assert(sizeof(Constants) == 32);
         command->SetDescriptorHeaps(1, &heap);
         command->SetComputeRootSignature(root);
-        command->SetComputeRootShaderResourceView(0, packed.resource->GetGPUVirtualAddress());
+        command->SetComputeRootUnorderedAccessView(0, packed.resource->GetGPUVirtualAddress());
         command->SetComputeRootDescriptorTable(1, gpu(0));
         command->SetComputeRoot32BitConstants(2, 8, &constants, 0);
         command->SetPipelineState(pipeline);
@@ -868,9 +873,11 @@ class PackedMotionGpu
             if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
                 transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
             // Engine coverage: the packed object records themselves.
-            transition(command, packed.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(command, packed.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
             command->CopyBufferRegion(readback[5], 0, packed.resource, 0, readbackBytes[5]);
-            transition(command, packed.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            transition(command, packed.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             dumpFrame = packed.frame;
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;

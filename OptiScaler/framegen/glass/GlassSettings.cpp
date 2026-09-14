@@ -3,6 +3,7 @@
 #include "GlassArrayMapping.h"
 #include "GeometryHealth.h"
 #include "PackedMotionCapture.h"
+#include "NvngxDlssgBridge.h"
 #include <Util.h>
 #include <SimpleIni.h>
 #include <imgui/imgui.h>
@@ -46,6 +47,7 @@ bool load()
                               ini.GetBoolValue("GlassFG", "AutoStage", false),
                               ini.GetBoolValue("GlassFG", "PackedCompute", true),
                               ini.GetBoolValue("GlassFG", "PackedWriteBack", false),
+                              ini.GetBoolValue("GlassFG", "PackedSkipRead", false),
                               ini.GetBoolValue("GlassFG", "ArrayMapping", false),
                               ini.GetBoolValue("GlassFG", "CompilePipelines", true) }
                        .packed(),
@@ -73,6 +75,7 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "AutoStage", value.autoStage);
     ini.SetBoolValue("GlassFG", "PackedCompute", value.packedCompute);
     ini.SetBoolValue("GlassFG", "PackedWriteBack", value.packedWriteBack);
+    ini.SetBoolValue("GlassFG", "PackedSkipRead", value.packedSkipRead);
     ini.SetBoolValue("GlassFG", "ArrayMapping", value.arrayMapping);
     ini.SetBoolValue("GlassFG", "CompilePipelines", value.compilePipelines);
     auto temporary = path;
@@ -175,6 +178,12 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Copies the composed motion and depth back into the engine's own\n"
                           "FG inputs instead of substituting foreign resources.");
+    bool packedSkipRead = value.packedSkipRead;
+    changed |= ImGui::Checkbox("Diagnostic: skip packed record read", &packedSkipRead);
+    value.packedSkipRead = packedSkipRead;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Runs the compose dispatch without reading the object records the capture\n"
+                          "raster wrote, so a GPU stall separates the dispatch from the read.");
     bool arrayMapping = value.arrayMapping;
     changed |= ImGui::Checkbox("Use engine array element mapping", &arrayMapping);
     value.arrayMapping = arrayMapping;
@@ -193,8 +202,9 @@ void RenderSettings()
     else
         ImGui::TextDisabled("GPU correction: waiting for a completed sample");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Samples one in 30 rendered frames. Reads completed results without waiting.\n"
-                          "Measures correction input copies and compute passes; excludes DLSS-G and surface capture.");
+        ImGui::SetTooltip("Reads completed results without waiting. With the packed object path active\n"
+                          "this is the compose GPU time: engine input copies plus the correction dispatch.\n"
+                          "DLSS-G evaluation and surface capture are excluded.");
 
     static const char* result = nullptr;
     if (ImGui::Button("Save glass settings"))
@@ -282,6 +292,37 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("inserted grows when an element key changes between frames, which means the\n"
                           "previous transform was not reused for that element.");
+    // Stage verdicts: whether the composed inputs actually reach the FG
+    // evaluation, and whether our own compose work is still executing. The
+    // compose fence pair is what the session teardown waits for.
+    const auto liveEvaluations = ReadLiveStatus(LiveStatusEvaluations);
+    const auto liveSubstitutions = ReadLiveStatus(LiveStatusSubstitutions);
+    const auto liveInFlight = ReadLiveStatus(LiveStatusComposeInFlight) != 0;
+    const auto liveSubmitted = ReadLiveStatus(LiveStatusComposeSubmitted);
+    const auto liveCompleted = ReadLiveStatus(LiveStatusComposeCompleted);
+    const auto liveForced = ReadLiveStatus(LiveStatusComposeForced);
+    const auto liveUnavailable = ReadLiveStatus(LiveStatusUnavailable) != 0;
+    const auto liveRetiring = ReadLiveStatus(LiveStatusRetiring);
+    ImGui::Text("FG swap: %llu applied / %llu evaluations%s",
+                static_cast<unsigned long long>(liveSubstitutions),
+                static_cast<unsigned long long>(liveEvaluations),
+                liveUnavailable ? " (unavailable)" : liveRetiring ? " (draining previous session)" : "");
+    ImGui::Text("Streamline FG hook (nvngx_dlssg): %s; calls %llu",
+                NvngxDlssgHookInstalled() ? "installed" : "not installed",
+                static_cast<unsigned long long>(NvngxDlssgHookCalls().load(std::memory_order_relaxed)));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Streamline evaluates DLSS-G inside nvngx_dlssg.dll without the host's NGX\n"
+                          "proxy. Zero calls with a running FG means this build is not on that path.");
+    if (!liveEvaluations)
+        ImGui::SameLine(), ImGui::TextDisabled("- no FG evaluation yet");
+    else if (!liveSubstitutions && value.packedSubstitute)
+        ImGui::SameLine(), ImGui::TextDisabled("- swap requested but not applied");
+    ImGui::Text("Compose fence: %s; submitted %llu; completed %llu%s", liveInFlight ? "in flight" : "idle",
+                static_cast<unsigned long long>(liveSubmitted), static_cast<unsigned long long>(liveCompleted),
+                liveForced ? " (forced release)" : "");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("submitted > completed means the packed compose is still executing.\n"
+                          "The session teardown now waits for it, so a save load cannot free it early.");
     ImGui::Text("Identity rejects: owner %llu; resolve %llu; raster %llu; shape %llu; viewport %llu",
                 static_cast<unsigned long long>(packed.unknownOwnerSpan + packed.unknownOwnerMismatch),
                 static_cast<unsigned long long>(packed.unknownResolve + packed.unknownFieldMismatch),

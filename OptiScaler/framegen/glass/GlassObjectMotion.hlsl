@@ -1,8 +1,11 @@
-ByteAddressBuffer ObjectMotion : register(t0);
-RWTexture2D<float4> Motion : register(u0);
-RWTexture2D<float> Depth : register(u1);
-RWTexture2D<float> Selection : register(u2);
-RWByteAddressBuffer Counters : register(u3);
+// The packed object records are written by the capture raster as a UAV, so the
+// compose reads them as a UAV too: one state for one resource, and the UAV
+// barrier between the capture writes and this read is well defined.
+RWByteAddressBuffer ObjectMotion : register(u0);
+RWTexture2D<float4> Motion : register(u1);
+RWTexture2D<float> Depth : register(u2);
+RWTexture2D<float> Selection : register(u3);
+RWByteAddressBuffer Counters : register(u4);
 
 cbuffer Parameters : register(b0)
 {
@@ -56,6 +59,15 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
 
     float4 originalMotion = Motion[pixel];
     float originalDepth = Depth[pixel];
+    // Diagnostic bit 2: exercise the dispatch without reading the packed records.
+    // A stall that survives this proves the read is not the cause.
+    if (DebugMode & 2u)
+    {
+        Motion[pixel] = originalMotion;
+        Depth[pixel] = originalDepth;
+        Selection[pixel] = 0.0;
+        return;
+    }
     uint2 packed = packedAt(pixel);
     uint id = objectId(packed);
     uint ignored = 0;

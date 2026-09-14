@@ -30,6 +30,10 @@ struct Controls
     // Integration without foreign resources: copy the composed motion/depth
     // back into the game's own FG inputs instead of substituting parameters.
     bool packedWriteBack = false;
+    // Diagnostic: run the compose dispatch without reading the packed object
+    // records, so a GPU stall can be attributed to the dispatch itself or to
+    // the record read that the capture raster wrote.
+    bool packedSkipRead = false;
     // Consume the live plugin's grouped-array element mapping for element
     // identity. Off until the published list is verified.
     bool arrayMapping = false;
@@ -50,7 +54,8 @@ struct Controls
                (autoStage ? (std::uint64_t(1) << 31) : 0u) | (packedCompute ? (std::uint64_t(1) << 32) : 0u) |
                (packedWriteBack ? (std::uint64_t(1) << 33) : 0u) |
                (arrayMapping ? (std::uint64_t(1) << 34) : 0u) |
-               (compilePipelines ? (std::uint64_t(1) << 35) : 0u);
+               (packedSkipRead ? (std::uint64_t(1) << 36) : 0u) |
+               (compilePipelines ? (std::uint64_t(1) << 37) : 0u);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -59,8 +64,8 @@ struct Controls
                  std::clamp(edge ? edge : 2u, 1u, 4u), (value & (1ull << 12)) != 0,
                  unsigned((value >> 13) & 0xffffu), (value & (1ull << 29)) != 0, (value & (1ull << 30)) != 0,
                  (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
-                 (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 34)) != 0,
-                 (value & (std::uint64_t(1) << 35)) != 0 };
+                 (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 36)) != 0,
+                 (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0 };
     }
 };
 
@@ -84,6 +89,34 @@ inline bool GeometryPipelineCompilationEnabled() noexcept
 }
 void RenderSettings();
 void PublishGpuMilliseconds(double milliseconds);
+// Settings-panel view of the live FG integration. The host publishes a few
+// relaxed counters per evaluation; the panel reads them without a lock, and the
+// compose fence pair is the direct evidence that our own GPU work finished.
+enum LiveStatusField
+{
+    LiveStatusEvaluations,
+    LiveStatusSubstitutions,
+    LiveStatusComposeSubmitted,
+    LiveStatusComposeCompleted,
+    LiveStatusComposeForced,
+    LiveStatusComposeInFlight,
+    LiveStatusUnavailable,
+    LiveStatusRetiring,
+    LiveStatusFieldCount
+};
+inline std::atomic<std::uint64_t>& LiveStatusSlot(unsigned field) noexcept
+{
+    static std::atomic<std::uint64_t> slots[LiveStatusFieldCount] {};
+    return slots[field < LiveStatusFieldCount ? field : 0u];
+}
+inline void PublishLiveStatus(LiveStatusField field, std::uint64_t value) noexcept
+{
+    LiveStatusSlot(field).store(value, std::memory_order_relaxed);
+}
+inline std::uint64_t ReadLiveStatus(LiveStatusField field) noexcept
+{
+    return LiveStatusSlot(field).load(std::memory_order_relaxed);
+}
 enum class RuntimeStatus : unsigned { Waiting, Correcting, Unavailable, Retiring, Stopped };
 void PublishRuntimeStatus(RuntimeStatus status);
 } // namespace GlassFg
