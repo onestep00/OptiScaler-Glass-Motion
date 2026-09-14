@@ -38,6 +38,10 @@ struct PackedMotionCaptureStatus
     // FG-boundary rejection split. noFgFrame counts acquisitions where the native
     // Streamline frame value was absent; noFgQueue counts unknown FG command queue.
     std::uint64_t noFgFrame = 0, noFgQueue = 0;
+    // FG boundary acquisition split: no candidate frame matched the
+    // submission rule, the pair was stale/backward, several candidates made
+    // the batch ambiguous, or the consumer slot was already taken.
+    std::uint64_t acquireNoCandidate = 0, acquireStalePair = 0, acquireAmbiguous = 0, acquireConsumerBusy = 0;
     // Per-reason split for the identity and topology rejection counters above.
     std::uint64_t unknownOwnerSpan = 0, unknownResolve = 0, unknownOwnerMismatch = 0;
     std::uint64_t unknownFieldMismatch = 0, unknownNoArrayGeneration = 0;

@@ -631,13 +631,15 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 value.submitBatch && fg->submitBatch && value.submitBatch <= fg->submitBatch &&
                 (!value.orderedQueue || value.orderedQueue.Get() == fg->queue.Get()))
             {
-                if (selected) { ++counters.orderingRejected; return {}; }
+                if (selected) { ++counters.orderingRejected; ++counters.acquireAmbiguous; return {}; }
                 selected = &value; // One fresh ordered source; never choose the newest of ambiguous frames.
             }
-        if (!selected || (selected->consumerCommand && selected->consumerCommand != command))
-        { ++counters.orderingRejected; return {}; }
+        if (!selected)
+        { ++counters.orderingRejected; ++counters.acquireNoCandidate; return {}; }
+        if (selected->consumerCommand && selected->consumerCommand != command)
+        { ++counters.orderingRejected; ++counters.acquireConsumerBusy; return {}; }
         if (!framePair.advance(selected->number, fgFrame, reset))
-        { ++counters.orderingRejected; return {}; }
+        { ++counters.orderingRejected; ++counters.acquireStalePair; return {}; }
         selected->consumerCommand = command;
         ++counters.fgFrames;
         return { selected->capture.Get(), configuredWidth, configuredHeight, selected->number, fgFrame };

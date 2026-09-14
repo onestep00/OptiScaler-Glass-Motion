@@ -15,12 +15,14 @@ class MotionFramePair
     bool advance(std::uint32_t engineFrame, std::uint64_t fgFrame, bool reset = false)
     {
         if (!engineFrame || fgFrame == UINT64_MAX) return false;
+        // Only stale or backward pairs are rejected. A forward pair may skip
+        // counters (engine draw frames and generated frames do not advance in
+        // lockstep in every scene); the submission-order rule already proves
+        // the producer precedes this FG call.
         if (!reset && engine && (engineFrame <= engine || fgFrame <= fg)) return false;
-        const bool consecutive = !reset && engine && engine != UINT32_MAX &&
-                                 engineFrame == engine + 1 && fg != UINT64_MAX && fgFrame == fg + 1;
         engine = engineFrame;
         fg = fgFrame;
-        return consecutive;
+        return true;
     }
     std::uint32_t engineFrame() const { return engine; }
     std::uint64_t fgFrame() const { return fg; }

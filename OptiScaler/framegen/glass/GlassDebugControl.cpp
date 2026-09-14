@@ -49,7 +49,10 @@ void writeStatus(std::ofstream& file)
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
          << " unknown_identity=" << packed.unknownIdentity << " topology_rejected=" << packed.topologyRejected
          << " slot_busy=" << packed.slotBusy << " ordering_rejected=" << packed.orderingRejected
-         << " no_fg_frame=" << packed.noFgFrame << " no_fg_queue=" << packed.noFgQueue << "\n";
+         << " no_fg_frame=" << packed.noFgFrame << " no_fg_queue=" << packed.noFgQueue
+         << " acquire_no_candidate=" << packed.acquireNoCandidate << " acquire_stale=" << packed.acquireStalePair
+         << " acquire_ambiguous=" << packed.acquireAmbiguous
+         << " acquire_consumer_busy=" << packed.acquireConsumerBusy << "\n";
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected
          << " no_owner=" << identity.noOwner << " no_view=" << identity.noView
          << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex << "\n";
