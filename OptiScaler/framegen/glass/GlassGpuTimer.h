@@ -60,7 +60,12 @@ class GpuTimer
         D3D12_RESOURCE_DESC desc {};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         desc.Width = Capacity * 2 * sizeof(uint64_t);
-        desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+        // Assign separately: the chained form converts UINT to UINT16 and /WX
+        // builds (the GPU fixtures) reject the narrowing warning.
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
         desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         void* data = nullptr;
         const D3D12_RANGE range { 0, static_cast<SIZE_T>(desc.Width) };

@@ -38,6 +38,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Packed motion GPU test build failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Packed object composition GPU test build failed' }
 & $objectMotion (Join-Path $PSScriptRoot '../GlassObjectMotion.hlsl')
 if ($LASTEXITCODE -ne 0) { throw 'Packed object composition GPU test failed' }
+# The compose modes only run when asked for, so the row-limited path and the
+# release gate had no coverage in this suite.
+& $objectMotion (Join-Path $PSScriptRoot '../GlassObjectMotion.hlsl') --compose
+if ($LASTEXITCODE -ne 0) { throw 'Packed object composition (feed) GPU test failed' }
+& $objectMotion (Join-Path $PSScriptRoot '../GlassObjectMotion.hlsl') --compose-partial
+if ($LASTEXITCODE -ne 0) { throw 'Packed object composition (row-limited) GPU test failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryTargetViews.cpp') `
     "$build/GeometryViews.obj" "$build/GeometryCommands.obj" "$build/GeometryCommandFixture.obj" `
     "$build/GeometryPipelineCache.obj" "$build/GeometryCreation.obj" "$build/GeometryPipeline.obj" "$build/DxilVertexHistory.obj" `

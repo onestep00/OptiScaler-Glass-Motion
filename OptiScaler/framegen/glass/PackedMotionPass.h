@@ -23,6 +23,8 @@ class PackedMotionPass
     float pendingScaleX = 1.f, pendingScaleY = 1.f;
     Controls pendingControls {};
     bool pendingValid = false;
+    // Host timer for the deferred compose sample; never owned here.
+    GpuTimer* pendingTimer = nullptr;
 
   public:
     bool initialize(ID3D12Device* device, const D3D12_RESOURCE_DESC (&descriptions)[3],
@@ -75,6 +77,7 @@ class PackedMotionPass
             pendingScaleX = inputs.scaleX;
             pendingScaleY = inputs.scaleY;
             pendingControls = controls;
+            pendingTimer = timer;
             pendingValid = true;
             ++dispatches;
             if (!controls.packedSubstitute)
@@ -101,6 +104,19 @@ class PackedMotionPass
         return { inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput() };
     }
     std::uint64_t renderedDispatches() const { return dispatches; }
+    // Session teardown: a compose prepared for a retired FG command must not be
+    // submitted afterwards.
+    void cancelPending()
+    {
+        pendingValid = false;
+        pendingTimer = nullptr;
+    }
+    // Release gate used by the host before the session resources are freed.
+    bool drained() { return gpu.drained(); }
+    bool composeInFlight() const { return gpu.composeInFlight(); }
+    std::uint64_t composeSubmitted() const { return gpu.composeSubmitted(); }
+    std::uint64_t composeCompleted() const { return gpu.composeCompleted(); }
+    std::uint64_t composeForced() const { return gpu.composeForced(); }
     // Live debug channel: recompile the compose shader without a restart.
     bool reloadShader(const wchar_t* shader, FILE* log) { return gpu.reload(shader, log); }
     // Submit the deferred compose on the FG queue. Called from the host's
@@ -109,8 +125,10 @@ class PackedMotionPass
     {
         if (!pendingValid)
             return false;
+        auto* timer = pendingTimer;
+        pendingTimer = nullptr;
         const auto result = gpu.submitCompose(queue, pendingFrame, pendingMotion, pendingDepth, pendingMotionState,
-                                              pendingDepthState, pendingScaleX, pendingScaleY, pendingControls);
+                                              pendingDepthState, pendingScaleX, pendingScaleY, pendingControls, timer);
         pendingValid = false;
         return result;
     }

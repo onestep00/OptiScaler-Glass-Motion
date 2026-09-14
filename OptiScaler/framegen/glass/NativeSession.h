@@ -37,6 +37,11 @@ class NativeSession
     unsigned candidates = 0;
     bool initialized = false, stopped = false, failed = false;
     bool outputRecording = false, timing = false, objectMode = false;
+    // Our compose list is queued on the FG queue immediately before the batch
+    // that carries the FG command. Nothing else covers it with the completion
+    // fence while the input swap is inactive, so it is tracked explicitly and
+    // the teardown waits for it before freeing the packed outputs.
+    bool composeInFlight = false;
     // Producer dependency for the current packed frame, consumed by the host's
     // pre-submit hook on the queue that executes the FG command list.
     ID3D12Fence* pendingProducerFence = nullptr;
@@ -198,7 +203,9 @@ class NativeSession
             }
             if (!objectMode)
                 link.submit(queue, commands[i]);
-            usesOutput |= outputRecording && commands[i] == fgCommand;
+            // A deferred compose was queued on this queue just before the batch,
+            // so the completion signal covers it as well as a substituted input.
+            usesOutput |= (outputRecording || composeInFlight) && commands[i] == fgCommand;
         }
         if (!objectMode && (!pool.afterSubmit(queue, count, commands) || !link.healthy()))
             failed = true;
@@ -210,8 +217,12 @@ class NativeSession
             {
                 if (FAILED(queue->Signal(completion, ++submitted)))
                     failed = true;
-                else if (timing && !timer.submitted(fgCommand, queue, completion, submitted))
-                    timing = false;
+                else
+                {
+                    composeInFlight = false;
+                    if (timing && !timer.submitted(fgCommand, queue, completion, submitted))
+                        timing = false;
+                }
             }
         }
         return !failed;
@@ -355,8 +366,20 @@ class NativeSession
     // Deferred compose submission (called from the host pre-submit hook).
     bool executePending(ID3D12CommandQueue* queue)
     {
-        return objectMode && objectPass.executePending(queue);
+        if (!objectMode || !objectPass.executePending(queue))
+            return false;
+        composeInFlight = true;
+        return true;
     }
+    // Release diagnostics for the host log: proves that our own GPU work never
+    // outlives the packed outputs it writes into.
+    bool packedComposeInFlight() const
+    {
+        return composeInFlight || (objectMode && objectPass.composeInFlight());
+    }
+    std::uint64_t packedComposeSubmitted() const { return objectMode ? objectPass.composeSubmitted() : 0; }
+    std::uint64_t packedComposeCompleted() const { return objectMode ? objectPass.composeCompleted() : 0; }
+    std::uint64_t packedComposeForced() const { return objectMode ? objectPass.composeForced() : 0; }
     // Cross-queue dependency of the packed raster read. The caller performs the
     // wait on the queue that submits the FG command list.
     bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value)
@@ -383,7 +406,12 @@ class NativeSession
     {
         stopped = true;
         if (objectMode)
+        {
             objectPass.invalidateHistory();
+            // Retired sessions must not submit a compose that was prepared for
+            // the frame they no longer own.
+            objectPass.cancelPending();
+        }
         else
         {
             pass.invalidateHistory();
@@ -394,6 +422,13 @@ class NativeSession
     bool readyToRelease()
     {
         collectDestroyed();
+        // The completion fence only covers a compose once the batch that carried
+        // the FG command was submitted, so the packed fence is the direct proof
+        // that our own GPU work finished. Checking it first also releases the
+        // in-flight flag when the signal path never ran.
+        if (objectMode && !objectPass.drained())
+            return false;
+        composeInFlight = false;
         if (!stopped || failed || outputRecording || (!objectMode && !pool.idle()))
             return false;
         for (const auto& producer : producers)
@@ -410,8 +445,12 @@ class NativeSession
     // No hidden destructor releases resources still used by a GPU recording.
     void releaseAfterGpuDrain()
     {
+        composeInFlight = false;
         if (objectMode)
+        {
+            objectPass.cancelPending();
             objectPass.releaseAfterGpuDrain();
+        }
         else
         {
             pass.releaseAfterGpuDrain();

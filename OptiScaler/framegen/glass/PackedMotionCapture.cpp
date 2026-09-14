@@ -117,6 +117,10 @@ class Capture final : public GeometryDrawCaptureOwner
     unsigned nextObservedSignal = 0;
     std::uint64_t submitSequence = 0;
     std::uint64_t submitBatchSequence = 0;
+    // Diagnostic only: module log and the last frame that produced a replay
+    // trace line, so the line appears once per captured frame.
+    FILE* log = nullptr;
+    std::uint32_t lastReplayFrame = 0;
     mutable std::mutex mutex;
     PackedMotionCaptureStatus counters;
     std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
@@ -315,7 +319,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     }
 
   public:
-    Capture(ID3D12Device* value, std::uint32_t width, std::uint32_t height, PackedMotionIdentityProvider source)
+    Capture(ID3D12Device* value, std::uint32_t width, std::uint32_t height, PackedMotionIdentityProvider source,
+            FILE* logFile = nullptr)
         : device(value), identitySource(source)
     {
         if (!identitySource) throw std::invalid_argument("Verified motion identity source unavailable");
@@ -323,6 +328,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::uint64_t(width) * height > UINT32_MAX / 8)
             throw std::invalid_argument("Invalid packed capture extent");
         configuredWidth = width; configuredHeight = height;
+        log = logFile;
         compileClear();
         history[0] = buffer(device.Get(), UINT64(HistoryCapacity) * 32, D3D12_HEAP_TYPE_DEFAULT,
                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -484,6 +490,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         prepared.material = frameSlot->constantBuffer->GetGPUVirtualAddress() + UINT64(constantIndex) * 256;
         prepared.capture = frameSlot->capture->GetGPUVirtualAddress();
         prepared.mapping = frameSlot->mapping->GetGPUVirtualAddress();
+        // Crash attribution for the replay path: one bounded line per captured
+        // frame, so a reset leaves evidence that the packed raster was drawn.
+        if (log && draw.frame != lastReplayFrame)
+        {
+            lastReplayFrame = draw.frame;
+            std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", draw.frame, draw.chunk);
+            std::fflush(log);
+        }
         return true;
     }
 
@@ -730,7 +744,7 @@ bool InitializePackedMotionCapture(ID3D12Device* device, std::uint32_t width, st
             const auto status = current->status();
             return status.healthy && status.width == width && status.height == height;
         }
-        auto* capture = new Capture(device, width, height, identities);
+        auto* capture = new Capture(device, width, height, identities, log);
         if (!RegisterGeometryDrawCapture(capture))
         {
             delete capture;

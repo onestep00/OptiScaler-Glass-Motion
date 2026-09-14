@@ -27,6 +27,7 @@ struct Entry
     ID3D12GraphicsCommandList* command = nullptr;
     D3D12_RESOURCE_DESC descriptions[3] {};
     unsigned evaluations = 0;
+    bool releaseLogged = false;
 
     bool matches(ID3D12GraphicsCommandList* candidate, const Inputs& inputs) const
     {
@@ -60,8 +61,35 @@ struct Runtime
     {
         InternalD3D12Scope ownCalls;
         for (auto& entry : retiring)
-            if (entry && !entry->evaluations && entry->session.readyToRelease())
+            if (entry && !entry->evaluations)
             {
+                if (!entry->session.readyToRelease())
+                {
+                    // Evidence for the 2026-09-15 reset: the previous build
+                    // released the packed outputs here while the compose list
+                    // was still executing on the FG queue.
+                    if (log && !entry->releaseLogged)
+                    {
+                        entry->releaseLogged = true;
+                        std::fprintf(log,
+                                     "NATIVE_RETIRE blocked compose_inflight=%u submitted=%llu completed=%llu\n",
+                                     entry->session.packedComposeInFlight() ? 1u : 0u,
+                                     static_cast<unsigned long long>(entry->session.packedComposeSubmitted()),
+                                     static_cast<unsigned long long>(entry->session.packedComposeCompleted()));
+                        std::fflush(log);
+                    }
+                    continue;
+                }
+                if (log)
+                {
+                    std::fprintf(
+                        log, "NATIVE_RETIRE release compose_inflight=%u submitted=%llu completed=%llu forced=%llu\n",
+                        entry->session.packedComposeInFlight() ? 1u : 0u,
+                        static_cast<unsigned long long>(entry->session.packedComposeSubmitted()),
+                        static_cast<unsigned long long>(entry->session.packedComposeCompleted()),
+                        static_cast<unsigned long long>(entry->session.packedComposeForced()));
+                    std::fflush(log);
+                }
                 entry->session.releaseAfterGpuDrain();
                 entry.reset();
             }
@@ -196,20 +224,25 @@ D3D12Callbacks makeCallbacks()
                 {
                     ID3D12Fence* fence = nullptr;
                     std::uint64_t value = 0;
-                    if (e.session.takeProducerWait(fence, value))
+                    const bool waited = e.session.takeProducerWait(fence, value);
+                    if (waited)
                     {
-                        writeComposeMarker(value, true);
                         q->Wait(fence, value);
                         if (r.log && ReadControls().trace)
                         {
-                            std::fprintf(r.log, "TRACE_WAIT producer=%llu queue=%p\n",
-                                         static_cast<unsigned long long>(value), q);
+                            // The fence value at the moment of the wait separates
+                            // "work still running" from "waiting for a value that
+                            // was never signaled".
+                            std::fprintf(r.log, "TRACE_WAIT producer=%llu completed=%llu queue=%p\n",
+                                         static_cast<unsigned long long>(value),
+                                         static_cast<unsigned long long>(fence->GetCompletedValue()), q);
                             std::fflush(r.log);
                         }
                     }
-                    else
-                        writeComposeMarker(0, true); // Compose without a producer wait.
-                    e.session.executePending(q);
+                    // The marker now describes the queued compose on the GPU, not
+                    // the CPU window, so it is written only when one was queued.
+                    if (e.session.executePending(q))
+                        writeComposeMarker(waited ? value : 0, true);
                     break;
                 }
         });
@@ -220,12 +253,18 @@ D3D12Callbacks makeCallbacks()
         InternalD3D12Scope ownSignals;
         NotifyGeometryCaptureSubmit(q, count, lists);
         r.each([&](Entry& e) { e.session.afterSubmit(q, count, lists); });
-        // The FG batch is submitted; the marker only survives a reset.
+        // Crash forensics: the marker describes the GPU state, not the CPU
+        // submission window, so it is cleared only once the deferred compose of
+        // every live entry has actually completed. A reset that frees the packed
+        // outputs while the compose is still executing therefore leaves it.
         if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
             for (UINT i = 0; i < count; ++i)
                 if (lists[i] == fg)
                 {
-                    writeComposeMarker(0, false);
+                    bool inFlight = false;
+                    r.each([&](Entry& e) { inFlight |= e.session.packedComposeInFlight(); });
+                    if (!inFlight)
+                        writeComposeMarker(0, false);
                     break;
                 }
         // Attribute a driver reset to the exact submitted batch that carried

@@ -1,10 +1,12 @@
 #pragma once
 #include "GlassControls.h"
+#include "GlassGpuTimer.h"
 #include "PackedMotionCapture.h"
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -57,6 +59,12 @@ class PackedMotionGpu
     ID3D12Fence* composeFence = nullptr;
     std::uint64_t composeValue = 0;
     bool composePending = false;
+    // The compose list is submitted without the host completion signal whenever
+    // the input swap is inactive, so the session teardown needs its own proof
+    // that the list finished before these outputs are freed. Freeing them while
+    // the GPU still executes the compose is the 2026-09-15 reset.
+    std::chrono::steady_clock::time_point composeSubmittedAt {};
+    std::uint64_t composeForcedReleases = 0;
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(unsigned index) const
     {
@@ -356,6 +364,33 @@ class PackedMotionGpu
         return composeFence ? composeFence->GetCompletedValue() : 0;
     }
     std::uint64_t composeSubmitted() const { return composeValue; }
+    bool composeInFlight() const { return composePending; }
+    std::uint64_t composeForced() const { return composeForcedReleases; }
+    // Teardown gate: true only when no compose list of this object can still be
+    // executing on the GPU. A submission whose completion never arrives would
+    // otherwise block admission forever, so past the driver reset window the
+    // outputs are released with a counted, logged escape.
+    bool drained()
+    {
+        if (!composePending)
+            return true;
+        if (composeFence)
+        {
+            const auto completed = composeFence->GetCompletedValue();
+            if (completed != UINT64_MAX && completed >= composeValue)
+            {
+                composePending = false;
+                return true;
+            }
+        }
+        if (std::chrono::steady_clock::now() - composeSubmittedAt > std::chrono::seconds(5))
+        {
+            composePending = false;
+            ++composeForcedReleases;
+            return true;
+        }
+        return false;
+    }
 
     // Records the input copies, the compose dispatch and the optional engine
     // write-back on our own compute list, then submits it on the FG queue. The
@@ -363,24 +398,39 @@ class PackedMotionGpu
     // engine's command list state and the NGX recording sequence stay clean.
     bool submitCompose(ID3D12CommandQueue* queue, const PackedMotionFrame& packed, ID3D12Resource* originalMotion,
                        ID3D12Resource* originalDepth, D3D12_RESOURCE_STATES motionState,
-                       D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, Controls controls)
+                       D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, Controls controls,
+                       GpuTimer* timer)
     {
         if (!queue || !composeReady() || !ensureCompose())
             return false;
         if (FAILED(composeAllocator->Reset()) || FAILED(composeList->Reset(composeAllocator, nullptr)))
             return false;
+        // Sparse GPU timing on the host's existing timer. This is a compute list
+        // on the FG queue, the same shape the timer already accepts; a full
+        // eight-slot window skips the sample instead of waiting.
+        const auto timing = timer && controls.measureGpuTime ? timer->begin(composeList) : GpuTimer::Ticket {};
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
-        if (!dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
-                      controls) ||
-            (controls.packedWriteBack && !writeBack(composeList, originalMotion, originalDepth, motionState,
-                                                    depthState, rows)) ||
-            FAILED(composeList->Close()))
+        const bool recorded =
+            dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
+                     controls) &&
+            (!controls.packedWriteBack ||
+             writeBack(composeList, originalMotion, originalDepth, motionState, depthState, rows));
+        if (timing)
+            timer->end(composeList, timing);
+        if (!recorded || FAILED(composeList->Close()))
             return false;
         ID3D12CommandList* lists[] { composeList };
         queue->ExecuteCommandLists(1, lists);
-        if (FAILED(queue->Signal(composeFence, ++composeValue)))
-            return false;
+        composeSubmittedAt = std::chrono::steady_clock::now();
+        const auto value = ++composeValue;
+        // Pending is set before the signal on purpose: a list that was already
+        // submitted must never be reclaimed by a later Reset while its
+        // completion is unknown.
         composePending = true;
+        if (FAILED(queue->Signal(composeFence, value)))
+            return false;
+        if (timing)
+            timer->submitted(composeList, queue, composeFence, composeValue);
         if (controls.trace && logFile)
         {
             std::fprintf(logFile, "TRACE_COMPOSE queue=%p frame=%u rows=%u writeback=%u\n", queue, packed.frame,
@@ -888,6 +938,7 @@ class PackedMotionGpu
         composeAllocator = nullptr;
         composeList = nullptr;
         composeFence = nullptr;
+        composeValue = 0;
         composePending = false;
         if (pipeline) pipeline->Release();
         if (root) root->Release();

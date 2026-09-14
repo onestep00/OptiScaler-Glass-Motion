@@ -313,6 +313,10 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         sentinelTarget.pResource = composed;
         sentinelTarget.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         command->CopyTextureRegion(&sentinelTarget, 0, 0, 0, &sentinelSource, nullptr);
+        // The engine input carries the same sentinel: a write-back wider than the
+        // composed rows would replace it with the composed value.
+        sentinelTarget.pResource = motion.Get();
+        command->CopyTextureRegion(&sentinelTarget, 0, 0, 0, &sentinelSource, nullptr);
         checked(command->Close(), "sentinel close");
         queue->ExecuteCommandLists(1, lists);
         drain(device.Get(), queue.Get());
@@ -320,12 +324,24 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         GlassFg::Controls controls { true, 50, false, 2 };
         controls.packedRows = partialRows;
         controls.packedWriteBack = true;
+        // Deterministic release-gate check: the queue is blocked on a fence the
+        // CPU owns, so the submitted compose provably cannot have completed.
+        ComPtr<ID3D12Fence> gate;
+        checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "gate fence");
+        require(SUCCEEDED(queue->Wait(gate.Get(), 1)), "gate wait");
         require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                  D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), controls),
+                                  D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), controls, nullptr),
                 "partial submitCompose");
+        // The release gate must refuse to free the outputs while the submitted
+        // compose can still be executing.
+        require(!gpu.drained(), "drained while the compose is still in flight");
+        // CPU-side signal: a queue-side Signal would be recorded behind the wait
+        // it is meant to release.
+        require(SUCCEEDED(gate->Signal(1)), "gate signal");
         for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
             Sleep(5);
         require(gpu.composeReady(), "partial compose fence");
+        require(gpu.drained(), "drained after the compose fence");
         drain(device.Get(), queue.Get());
 
         std::vector<std::byte> composedRead, engineRead;
@@ -340,16 +356,21 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         const auto engineEdge = halfAt(engineRead, engineFootprint, 4, 6, 0);
         const auto engineOutside = halfAt(engineRead, engineFootprint, 4, 14, 0);
         require(std::abs(composedEdge - .0625f) < .001f, "partial compose did not reach the edge pixel");
-        require(std::abs(composedOutside - 9.0f) < .01f, "partial input copy was not limited to the composed rows");
+        // Outside the composed rows the FG-facing copy must hold neither the
+        // engine sentinel (input copy too wide) nor the object motion (dispatch
+        // too wide).
+        require(std::abs(composedOutside - 9.0f) > .01f && std::abs(composedOutside - .0625f) > .01f,
+                "input copy or dispatch reached rows outside the composed range");
         require(std::abs(engineEdge - .0625f) < .001f, "partial write-back did not reach the edge pixel");
-        require(std::abs(engineOutside) < .001f, "partial write-back copied rows outside the composed range");
-        std::printf("PACKED_MOTION_PARTIAL_OK rows=%u edge=1 outside_untouched=1 stale_outside=1\n", partialRows);
+        require(std::abs(engineOutside - 9.0f) < .01f, "partial write-back copied rows outside the composed range");
+        std::printf("PACKED_MOTION_PARTIAL_OK rows=%u edge=1 outside_untouched=1 gate_blocks_release=1\n",
+                    partialRows);
         gpu.releaseAfterGpuDrain();
         return 0;
     }
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                               D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
-                              { true, 50, false, 2 }),
+                              { true, 50, false, 2 }, nullptr),
             "submitCompose");
     if (const auto removed = device->GetDeviceRemovedReason(); removed != S_OK)
     {
@@ -420,7 +441,7 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
     GlassFg::Controls writeBack { true, 50, false, 2 };
     writeBack.packedWriteBack = true;
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), writeBack),
+                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), writeBack, nullptr),
             "submitCompose write-back");
     for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
         Sleep(5);
