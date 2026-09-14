@@ -355,17 +355,21 @@ void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
 // element list lives at owner+0x18, the element count at owner+0x3c and the
 // output start at owner+0x50. Log both interpretations of +0x18 (inline 16-bit
 // entries or a pointer to them) so the next run needs no extra guess.
-void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
+struct OwnerCandidate
 {
-    // The documented +0x70 lookup is not a plain pointer in practice
-    // (0x13d300000337e on 2026-09-14). Scan every pointer-sized field for an
-    // object that has the documented group shape instead of guessing.
-    if (!readableRange(proxy, 0x200))
-    {
-        directLog("%s=%u proxy=%llx object_unreadable=1", tag, call, static_cast<unsigned long long>(proxy));
-        return;
-    }
-    for (unsigned offset = 0; offset < 0x200; offset += 8)
+    unsigned offset = 0;
+    std::uintptr_t pointer = 0, list = 0;
+    unsigned count = 0, outputStart = 0;
+};
+
+// Pure search so the offline self-test can assert on the same code the live
+// probe uses. Never dereferences an unvalidated pointer.
+unsigned findOwnerCandidates(std::uintptr_t proxy, OwnerCandidate* out, unsigned max) noexcept
+{
+    if (!out || !max || !readableRange(proxy, 0x200))
+        return 0;
+    unsigned found = 0;
+    for (unsigned offset = 0; offset < 0x200 && found < max; offset += 8)
     {
         const auto candidate = *reinterpret_cast<std::uintptr_t*>(proxy + offset);
         if (candidate < 0x10000ull || candidate > 0x7FFFFFFFFFFFull || !readableRange(candidate, 0x60))
@@ -375,14 +379,35 @@ void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
         const auto outputStart = *reinterpret_cast<std::uint32_t*>(candidate + 0x50);
         if (count == 0 || count > 0x4000)
             continue;
-        directLog("%s=%u candidate_off=%03x candidate=%llx count=%u out_start=%u p18=%llx", tag, call, offset,
-                  static_cast<unsigned long long>(candidate), count, outputStart,
-                  static_cast<unsigned long long>(list));
-        if (list < 0x10000ull || list > 0x7FFFFFFFFFFFull || !readableRange(list, 32))
+        out[found].offset = offset;
+        out[found].pointer = candidate;
+        out[found].list = list;
+        out[found].count = count;
+        out[found].outputStart = outputStart;
+        ++found;
+    }
+    return found;
+}
+
+void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
+{
+    // The documented +0x70 lookup is not a plain pointer in practice
+    // (0x13d300000337e on 2026-09-14), so scan for the documented group shape.
+    OwnerCandidate candidates[8] {};
+    const auto found = findOwnerCandidates(proxy, candidates, 8);
+    if (!found)
+        directLog("%s=%u proxy=%llx owner_candidates=0", tag, call, static_cast<unsigned long long>(proxy));
+    for (unsigned index = 0; index < found; ++index)
+    {
+        const auto& candidate = candidates[index];
+        directLog("%s=%u candidate_off=%03x candidate=%llx count=%u out_start=%u p18=%llx", tag, call, candidate.offset,
+                  static_cast<unsigned long long>(candidate.pointer), candidate.count, candidate.outputStart,
+                  static_cast<unsigned long long>(candidate.list));
+        if (candidate.list < 0x10000ull || candidate.list > 0x7FFFFFFFFFFFull || !readableRange(candidate.list, 32))
             continue;
         unsigned short entries[16] {};
         for (unsigned i = 0; i < 16; ++i)
-            entries[i] = *reinterpret_cast<unsigned short*>(list + i * 2);
+            entries[i] = *reinterpret_cast<unsigned short*>(candidate.list + i * 2);
         char text[220] {};
         int used = 0;
         for (unsigned i = 0; i < 16; ++i)
@@ -653,3 +678,42 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD, LPVOID)
     selfModule = instance;
     return TRUE;
 }
+
+#ifdef GLASS_PLUGIN_SELFTEST
+// Offline verification of the exact probe code that runs on the render thread.
+// Built and run by build-plugin.ps1 before the DLL is deployed.
+int main()
+{
+    int failures = 0;
+    alignas(16) unsigned char buffer[0x200] {};
+    failures += !readableRange(reinterpret_cast<std::uintptr_t>(buffer), 0x100);
+    failures += readableRange(0ull, 8);
+    failures += readableRange(0x13d300000337eull, 8); // exact live value that crashed the game
+    alignas(8) unsigned char object[0x200] {};
+    OwnerCandidate candidates[8] {};
+    *reinterpret_cast<std::uintptr_t*>(object + 0x70) = 0x13d300000337eull;
+    auto found = findOwnerCandidates(reinterpret_cast<std::uintptr_t>(object), candidates, 8);
+    if (found != 0)
+        ++failures;
+    dumpOwner("selftest_bogus", 1, reinterpret_cast<std::uintptr_t>(object));
+    alignas(8) unsigned short list[16] = {7, 9, 42, 1, 2, 3};
+    alignas(8) unsigned char group[0x60] {};
+    *reinterpret_cast<std::uintptr_t*>(group + 0x18) = reinterpret_cast<std::uintptr_t>(list);
+    *reinterpret_cast<std::uint32_t*>(group + 0x3c) = 40;
+    *reinterpret_cast<std::uint32_t*>(group + 0x50) = 0x5300;
+    *reinterpret_cast<std::uintptr_t*>(object + 0xd8) = reinterpret_cast<std::uintptr_t>(group);
+    found = findOwnerCandidates(reinterpret_cast<std::uintptr_t>(object), candidates, 8);
+    if (found != 1)
+        ++failures;
+    else
+    {
+        failures += candidates[0].offset != 0xd8;
+        failures += candidates[0].count != 40;
+        failures += candidates[0].outputStart != 0x5300;
+        failures += candidates[0].list != reinterpret_cast<std::uintptr_t>(list);
+    }
+    dumpOwner("selftest_group", 2, reinterpret_cast<std::uintptr_t>(object));
+    std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u\n", failures, found);
+    return failures ? 1 : 0;
+}
+#endif
