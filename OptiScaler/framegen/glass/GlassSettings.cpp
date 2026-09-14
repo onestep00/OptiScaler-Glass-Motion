@@ -13,7 +13,7 @@ namespace GlassFg
 {
 namespace
 {
-std::atomic<uint32_t> controls { Controls {}.packed() };
+std::atomic<uint64_t> controls { Controls {}.packed() };
 std::once_flag loaded;
 std::atomic<double> latestMilliseconds { -1.0 };
 std::atomic<RuntimeStatus> runtimeStatus { RuntimeStatus::Waiting };
@@ -42,7 +42,9 @@ bool load()
                               static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "PackedRows", 240), 1L, 32768L)),
                               ini.GetBoolValue("GlassFG", "PackedSubstitute", false),
                               ini.GetBoolValue("GlassFG", "Trace", false),
-                              ini.GetBoolValue("GlassFG", "AutoStage", false) }
+                              ini.GetBoolValue("GlassFG", "AutoStage", false),
+                              ini.GetBoolValue("GlassFG", "PackedCompute", true),
+                              ini.GetBoolValue("GlassFG", "PackedWriteBack", false) }
                        .packed(),
                    std::memory_order_relaxed);
     return true;
@@ -65,6 +67,8 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "PackedSubstitute", value.packedSubstitute);
     ini.SetBoolValue("GlassFG", "Trace", value.trace);
     ini.SetBoolValue("GlassFG", "AutoStage", value.autoStage);
+    ini.SetBoolValue("GlassFG", "PackedCompute", value.packedCompute);
+    ini.SetBoolValue("GlassFG", "PackedWriteBack", value.packedWriteBack);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -152,6 +156,18 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Unattended order: 240 rows, then full rows, then the FG input swap.\n"
                           "Each step is logged as AUTO_STAGE so a reset is attributable.");
+    bool packedCompute = value.packedCompute;
+    changed |= ImGui::Checkbox("Packed compose compute", &packedCompute);
+    value.packedCompute = packedCompute;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Off keeps the input copies and the FG swap but skips the compose\n"
+                          "dispatch, so the swap can be tested with no new GPU work.");
+    bool packedWriteBack = value.packedWriteBack;
+    changed |= ImGui::Checkbox("Write correction into game inputs", &packedWriteBack);
+    value.packedWriteBack = packedWriteBack;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Copies the composed motion and depth back into the engine's own\n"
+                          "FG inputs instead of substituting foreign resources.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);

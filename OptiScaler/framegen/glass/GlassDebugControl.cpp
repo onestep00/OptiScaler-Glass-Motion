@@ -43,7 +43,8 @@ void writeStatus(std::ofstream& file)
     file << "controls enabled=" << controls.enabled << " strength=" << controls.strength
          << " edge=" << controls.edgeWidth << " packed_dispatch=" << controls.packedDispatch
          << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute
-         << " trace=" << controls.trace << " autostage=" << controls.autoStage << "\n";
+         << " packed_compute=" << controls.packedCompute << " trace=" << controls.trace
+         << " autostage=" << controls.autoStage << " writeback=" << controls.packedWriteBack << "\n";
     file << "packed initialized=" << packed.initialized << " healthy=" << packed.healthy
          << " admitted=" << packed.admittedDraws << " captured_frames=" << packed.capturedFrames
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
@@ -163,6 +164,10 @@ void PollGlassDebugControl() noexcept
                 value.trace = line.substr(6) == "on";
             else if (line.rfind("autostage=", 0) == 0)
                 value.autoStage = line.substr(10) == "on";
+            else if (line.rfind("compute=", 0) == 0)
+                value.packedCompute = line.substr(8) == "on";
+            else if (line.rfind("writeback=", 0) == 0)
+                value.packedWriteBack = line.substr(10) == "on";
             else
             {
                 output << "unknown=" << line << "\n";

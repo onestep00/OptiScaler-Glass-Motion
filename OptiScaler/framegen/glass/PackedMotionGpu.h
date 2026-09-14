@@ -552,6 +552,31 @@ class PackedMotionGpu
     }
 
   public:
+    // Integration without foreign resources: write the composed motion/depth
+    // back into the game's own FG inputs. Both targets are already in
+    // COPY_DEST, the state the FG boundary hands them over in.
+    bool writeBack(ID3D12GraphicsCommandList* command, ID3D12Resource* targetMotion, ID3D12Resource* targetDepth,
+                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState)
+    {
+        if (!command || !targetMotion || !targetDepth || !motion || !depth)
+            return false;
+        transition(command, motion, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition(command, depth, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (motionState != D3D12_RESOURCE_STATE_COPY_DEST)
+            transition(command, targetMotion, motionState, D3D12_RESOURCE_STATE_COPY_DEST);
+        if (depthState != D3D12_RESOURCE_STATE_COPY_DEST)
+            transition(command, targetDepth, depthState, D3D12_RESOURCE_STATE_COPY_DEST);
+        command->CopyResource(targetMotion, motion);
+        command->CopyResource(targetDepth, depth);
+        if (motionState != D3D12_RESOURCE_STATE_COPY_DEST)
+            transition(command, targetMotion, D3D12_RESOURCE_STATE_COPY_DEST, motionState);
+        if (depthState != D3D12_RESOURCE_STATE_COPY_DEST)
+            transition(command, targetDepth, D3D12_RESOURCE_STATE_COPY_DEST, depthState);
+        transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        return true;
+    }
+
     bool dispatch(ID3D12GraphicsCommandList* command, const PackedMotionFrame& packed,
                   ID3D12Resource* originalMotion, ID3D12Resource* originalDepth,
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState,
@@ -612,11 +637,15 @@ class PackedMotionGpu
         // keeps the copied original motion. Raise GlassFG/PackedRows after a
         // clean run; the INI and settings UI control this without a rebuild.
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
-        command->Dispatch((width + 7) / 8, (rows + 7) / 8, 1);
+        // Isolation: the copies and the swap stay, only the compute dispatch is
+        // optional, so a reset can be attributed to the swap or to the compute.
+        if (controls.packedCompute)
+            command->Dispatch((width + 7) / 8, (rows + 7) / 8, 1);
         if (controls.trace && logFile)
         {
-            std::fprintf(logFile, "TRACE_DISPATCH frame=%u rows=%u groups=%u edges=%u\n", packed.frame, rows,
-                         (width + 7) / 8, (std::min)(controls.edgeWidth, 4u));
+            std::fprintf(logFile, "TRACE_DISPATCH frame=%u rows=%u groups=%u edges=%u compute=%u\n", packed.frame,
+                         rows, (width + 7) / 8, (std::min)(controls.edgeWidth, 4u),
+                         controls.packedCompute ? 1u : 0u);
             std::fflush(logFile);
         }
         if (!dumpPending && dumpRequests.load(std::memory_order_relaxed) && prepareReadback())

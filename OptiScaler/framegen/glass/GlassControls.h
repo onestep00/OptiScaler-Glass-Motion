@@ -23,23 +23,33 @@ struct Controls
     // Automatic staged ramp: 0-20 s dispatch on/swap off at 240 rows,
     // 20-40 s full rows, then the FG input swap. Off by default.
     bool autoStage = false;
+    // Isolation switch: keep the input copies and the FG swap but skip the
+    // compose compute dispatch, so the swap can be tested with zero new GPU work.
+    bool packedCompute = true;
+    // Integration without foreign resources: copy the composed motion/depth
+    // back into the game's own FG inputs instead of substituting parameters.
+    bool packedWriteBack = false;
 
     bool active() const { return enabled && strength > 0; }
     float coverage() const { return std::min(strength, 100u) / 100.f; }
-    uint32_t packed() const
+    uint64_t packed() const
     {
-        return (std::min(strength, 100u) << 1) | (enabled ? 1u : 0u) | (measureGpuTime ? 256u : 0u) |
-               (std::clamp(edgeWidth, 1u, 4u) << 9) | (packedDispatch ? (1u << 12) : 0u) |
-               ((std::min)(packedRows, 0xffffu) << 13) | (packedSubstitute ? (1u << 29) : 0u) |
-               (trace ? (1u << 30) : 0u) | (autoStage ? (1u << 31) : 0u);
+        return (std::uint64_t(std::min(strength, 100u)) << 1) | (enabled ? 1u : 0u) |
+               (measureGpuTime ? 256u : 0u) | (std::uint64_t(std::clamp(edgeWidth, 1u, 4u)) << 9) |
+               (packedDispatch ? (std::uint64_t(1) << 12) : 0u) |
+               (std::uint64_t((std::min)(packedRows, 0xffffu)) << 13) |
+               (packedSubstitute ? (std::uint64_t(1) << 29) : 0u) | (trace ? (std::uint64_t(1) << 30) : 0u) |
+               (autoStage ? (std::uint64_t(1) << 31) : 0u) | (packedCompute ? (std::uint64_t(1) << 32) : 0u) |
+               (packedWriteBack ? (std::uint64_t(1) << 33) : 0u);
     }
-    static Controls unpack(uint32_t value)
+    static Controls unpack(std::uint64_t value)
     {
-        const auto edge = (value >> 9) & 7u;
-        return { (value & 1u) != 0, std::min((value >> 1) & 127u, 100u), (value & 256u) != 0,
-                 std::clamp(edge ? edge : 2u, 1u, 4u), (value & (1u << 12)) != 0,
-                 (value >> 13) & 0xffffu, (value & (1u << 29)) != 0, (value & (1u << 30)) != 0,
-                 (value & (1u << 31)) != 0 };
+        const auto edge = unsigned((value >> 9) & 7u);
+        return { (value & 1u) != 0, std::min(unsigned((value >> 1) & 127u), 100u), (value & 256u) != 0,
+                 std::clamp(edge ? edge : 2u, 1u, 4u), (value & (1ull << 12)) != 0,
+                 unsigned((value >> 13) & 0xffffu), (value & (1ull << 29)) != 0, (value & (1ull << 30)) != 0,
+                 (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
+                 (value & (std::uint64_t(1) << 33)) != 0 };
     }
 };
 

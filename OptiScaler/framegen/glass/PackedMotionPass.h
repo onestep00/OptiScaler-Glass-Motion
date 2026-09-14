@@ -59,6 +59,14 @@ class PackedMotionPass
             if (timer && ticket)
                 timer->end(value, ticket);
             ++dispatches;
+            if (controls.packedWriteBack)
+            {
+                // The composed data goes back into the game's own inputs, so the
+                // FG runtime never sees a foreign resource.
+                gpu.writeBack(value, inputs.motion, inputs.depth, states[0], states[2]);
+                invalidateHistory();
+                return {};
+            }
             if (!packedDispatchEnabled || !controls.packedSubstitute)
             {
                 // Isolation staging: the new GPU work ran, but the FG inputs
