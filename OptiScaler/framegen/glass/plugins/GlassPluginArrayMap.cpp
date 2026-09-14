@@ -106,11 +106,14 @@ struct Group
     std::uint16_t flags = 0;
     bool valid = false;
 };
-Group current {};
+// The mesh hook runs on several render threads. The per-call fields and the
+// append collection must stay thread-local, otherwise thread B overwrites the
+// object identity that thread A is about to publish.
+thread_local Group current {};
 std::atomic<unsigned> appends { 0 };
-std::uint32_t firstIndices[64] {};
-unsigned firstCount = 0;
-std::uint64_t publishedFrames = 0;
+thread_local std::uint32_t firstIndices[64] {};
+thread_local unsigned firstCount = 0;
+std::atomic<std::uint64_t> publishedFrames { 0 };
 
 void trace(const char* text)
 {
