@@ -48,7 +48,7 @@ void writeStatus(std::ofstream& file)
          << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute
          << " packed_compute=" << controls.packedCompute << " trace=" << controls.trace
          << " autostage=" << controls.autoStage << " writeback=" << controls.packedWriteBack
-         << " arraymap=" << controls.arrayMapping << "\n";
+         << " arraymap=" << controls.arrayMapping << " pipelines=" << controls.compilePipelines << "\n";
     file << "packed initialized=" << packed.initialized << " healthy=" << packed.healthy
          << " admitted=" << packed.admittedDraws << " captured_frames=" << packed.capturedFrames
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
@@ -211,6 +211,8 @@ void PollGlassDebugControl() noexcept
                 value.packedWriteBack = line.substr(10) == "on";
             else if (line.rfind("arraymap=", 0) == 0)
                 value.arrayMapping = line.substr(9) == "on";
+            else if (line.rfind("pipelines=", 0) == 0)
+                value.compilePipelines = line.substr(10) == "on";
             else
             {
                 output << "unknown=" << line << "\n";

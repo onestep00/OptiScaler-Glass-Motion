@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GeometryPipelineCache.h"
+#include "GlassControls.h"
 #include "MaterialCaptureBlend.h"
 #include <condition_variable>
 #include <deque>
@@ -244,6 +245,9 @@ bool GeometryPipelineCache::rootCreated(ID3D12RootSignature* identity, UINT node
 bool GeometryPipelineCache::pipelineCreated(ID3D12PipelineState* identity,
                                             const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc, bool vertexOnly) noexcept
 {
+    // Bisect switch: observe without ever creating a rewritten pipeline.
+    if (!GeometryPipelineCompilationEnabled())
+        return false;
     if (compilingGeometry || !identity || !candidate(desc, vertexOnly))
         return false;
     try

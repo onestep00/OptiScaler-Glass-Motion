@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 
 namespace GlassFg
@@ -32,6 +33,10 @@ struct Controls
     // Consume the live plugin's grouped-array element mapping for element
     // identity. Off until the published list is verified.
     bool arrayMapping = false;
+    // Bisect switch: when false the module still observes draws and FG frames
+    // but never creates its rewritten pipelines. Used to separate the D3D12
+    // hooks from the pipeline-creation path in the 2026-09-14 resets.
+    bool compilePipelines = true;
 
     bool active() const { return enabled && strength > 0; }
     float coverage() const { return std::min(strength, 100u) / 100.f; }
@@ -44,7 +49,8 @@ struct Controls
                (packedSubstitute ? (std::uint64_t(1) << 29) : 0u) | (trace ? (std::uint64_t(1) << 30) : 0u) |
                (autoStage ? (std::uint64_t(1) << 31) : 0u) | (packedCompute ? (std::uint64_t(1) << 32) : 0u) |
                (packedWriteBack ? (std::uint64_t(1) << 33) : 0u) |
-               (arrayMapping ? (std::uint64_t(1) << 34) : 0u);
+               (arrayMapping ? (std::uint64_t(1) << 34) : 0u) |
+               (compilePipelines ? (std::uint64_t(1) << 35) : 0u);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -53,13 +59,29 @@ struct Controls
                  std::clamp(edge ? edge : 2u, 1u, 4u), (value & (1ull << 12)) != 0,
                  unsigned((value >> 13) & 0xffffu), (value & (1ull << 29)) != 0, (value & (1ull << 30)) != 0,
                  (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
-                 (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 34)) != 0 };
+                 (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 34)) != 0,
+                 (value & (std::uint64_t(1) << 35)) != 0 };
     }
 };
 
 // UI and the native host share one atomic snapshot. No INI reads per FG call.
 Controls ReadControls();
 void WriteControls(Controls value);
+// Bisect switch shared with the pipeline cache. Inline so every build target
+// (module, settings test, GPU fixtures) resolves it without extra linkage.
+inline std::atomic<bool>& GeometryPipelineCompilationFlag() noexcept
+{
+    static std::atomic<bool> value { true };
+    return value;
+}
+inline void SetGeometryPipelineCompilation(bool enabled) noexcept
+{
+    GeometryPipelineCompilationFlag().store(enabled, std::memory_order_relaxed);
+}
+inline bool GeometryPipelineCompilationEnabled() noexcept
+{
+    return GeometryPipelineCompilationFlag().load(std::memory_order_relaxed);
+}
 void RenderSettings();
 void PublishGpuMilliseconds(double milliseconds);
 enum class RuntimeStatus : unsigned { Waiting, Correcting, Unavailable, Retiring, Stopped };

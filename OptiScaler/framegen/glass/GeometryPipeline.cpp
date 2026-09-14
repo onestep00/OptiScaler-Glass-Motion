@@ -10,6 +10,58 @@
 namespace GlassFg
 {
 using Microsoft::WRL::ComPtr;
+namespace
+{
+// Crash forensics: the marker exists only while one of our rewritten pipelines
+// is being created. A driver reset during pipeline creation leaves the file
+// behind, which separates "our PSO" from "our compose" in the crash evidence.
+std::wstring pipelineMarkerPath()
+{
+    wchar_t path[MAX_PATH] {};
+    const auto length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (!length || length == MAX_PATH)
+        return {};
+    std::wstring text(path, length);
+    const auto cut = text.find_last_of(L"\\/");
+    if (cut == std::wstring::npos)
+        return {};
+    text.resize(cut);
+    return text + L"\\Glass\\glass-pso.pending";
+}
+void writePipelineMarker(const char* stage, unsigned target, std::uint64_t key) noexcept
+{
+    const auto path = pipelineMarkerPath();
+    if (path.empty())
+        return;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || !file)
+        return;
+    std::fprintf(file, "stage=%s target=%u key=%016llx tick=%llu\n", stage, target,
+                 static_cast<unsigned long long>(key), static_cast<unsigned long long>(GetTickCount64()));
+    std::fclose(file);
+}
+void clearPipelineMarker() noexcept
+{
+    const auto path = pipelineMarkerPath();
+    if (!path.empty())
+    {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+    }
+}
+std::uint64_t pipelineKey(const ComPtr<IDxcBlob>& vs, const ComPtr<IDxcBlob>& ps) noexcept
+{
+    std::uint64_t hash = 0xcbf29ce484222325ull;
+    for (auto* blob : { vs.Get(), ps.Get() })
+        if (blob)
+        {
+            const auto* bytes = static_cast<const unsigned char*>(blob->GetBufferPointer());
+            for (SIZE_T i = 0; i < blob->GetBufferSize(); ++i)
+                hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+        }
+    return hash;
+}
+} // namespace
 // Packed variants that fell back to coverage-only capture because the material
 // exports could not be read safely. Diagnostics only.
 std::atomic<std::uint64_t> packedCoverageFallbacks { 0 };

@@ -46,9 +46,11 @@ bool load()
                               ini.GetBoolValue("GlassFG", "AutoStage", false),
                               ini.GetBoolValue("GlassFG", "PackedCompute", true),
                               ini.GetBoolValue("GlassFG", "PackedWriteBack", false),
-                              ini.GetBoolValue("GlassFG", "ArrayMapping", false) }
+                              ini.GetBoolValue("GlassFG", "ArrayMapping", false),
+                              ini.GetBoolValue("GlassFG", "CompilePipelines", true) }
                        .packed(),
                    std::memory_order_relaxed);
+    SetGeometryPipelineCompilation(Controls::unpack(controls.load(std::memory_order_relaxed)).compilePipelines);
     return true;
 }
 
@@ -72,6 +74,7 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "PackedCompute", value.packedCompute);
     ini.SetBoolValue("GlassFG", "PackedWriteBack", value.packedWriteBack);
     ini.SetBoolValue("GlassFG", "ArrayMapping", value.arrayMapping);
+    ini.SetBoolValue("GlassFG", "CompilePipelines", value.compilePipelines);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -94,6 +97,7 @@ void WriteControls(Controls value)
         previous.strength != value.strength || previous.edgeWidth != value.edgeWidth)
         latestMilliseconds.store(-1.0, std::memory_order_relaxed);
     controls.store(value.packed(), std::memory_order_relaxed);
+    SetGeometryPipelineCompilation(value.compilePipelines);
 }
 
 void PublishGpuMilliseconds(double milliseconds)

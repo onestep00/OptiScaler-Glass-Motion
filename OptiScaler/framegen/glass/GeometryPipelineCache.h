@@ -30,6 +30,7 @@ struct GeometryCacheStats
     std::string lastError, lastPackedError;
 };
 
+
 // Captures successful public creation calls, then builds the paired shaders on
 // one worker. find() never compiles, waits for a result, or calls a D3D12 method.
 // A caller recording a returned entry must retain its shared_ptr until both GPU
