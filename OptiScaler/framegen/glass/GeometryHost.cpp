@@ -11,6 +11,7 @@
 #include "PackedMotionCapture.h"
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
+#include "NativeHost.h"
 #include <Util.h>
 #include <mutex>
 
@@ -24,6 +25,9 @@ void refreshHealth() noexcept
     {
         // One-second live control poll: no new thread and no per-draw cost.
         PollGlassDebugControl();
+        // Deferred diagnostic write-out (reads back a finished dump and stops
+        // as soon as nothing is pending).
+        ServiceNativeDiagnostics();
         GeometryCreationStats creation;
         auto health = ReadGeometryHealth();
         if (TryGeometryCreationCounters(creation))

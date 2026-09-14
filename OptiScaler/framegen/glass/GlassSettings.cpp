@@ -40,7 +40,8 @@ bool load()
                               static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "EdgeWidth", 2), 1L, 4L)),
                               ini.GetBoolValue("GlassFG", "PackedDispatch", true),
                               static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "PackedRows", 240), 1L, 32768L)),
-                              ini.GetBoolValue("GlassFG", "PackedSubstitute", false) }
+                              ini.GetBoolValue("GlassFG", "PackedSubstitute", false),
+                              ini.GetBoolValue("GlassFG", "Trace", false) }
                        .packed(),
                    std::memory_order_relaxed);
     return true;
@@ -61,6 +62,7 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "PackedDispatch", value.packedDispatch);
     ini.SetLongValue("GlassFG", "PackedRows", std::clamp(value.packedRows, 1u, 32768u));
     ini.SetBoolValue("GlassFG", "PackedSubstitute", value.packedSubstitute);
+    ini.SetBoolValue("GlassFG", "Trace", value.trace);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -136,6 +138,12 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Swaps the FG motion/depth inputs for the composed object-motion outputs.\n"
                           "Off runs the dispatch without touching the FG inputs to isolate driver resets.");
+    bool trace = value.trace;
+    changed |= ImGui::Checkbox("Step trace log", &trace);
+    value.trace = trace;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Writes one flushed line per dispatch, substitution and submit step.\n"
+                          "A driver reset then leaves the last executed step in the log.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);

@@ -18,4 +18,7 @@ bool NativeCaptureSubmissionReady() noexcept;
 // Live control: retire every native recording and re-admit on the next
 // evaluation. Equivalent to a module restart without touching the process.
 void RequestNativeSoftReload() noexcept;
+// Live diagnostics: one-frame motion/depth dump and its deferred write-out.
+void RequestPackedDump() noexcept;
+void ServiceNativeDiagnostics() noexcept;
 } // namespace GlassFg

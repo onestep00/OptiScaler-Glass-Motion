@@ -26,7 +26,8 @@ void writeStatus(std::ofstream& file)
     const auto controls = ReadControls();
     file << "controls enabled=" << controls.enabled << " strength=" << controls.strength
          << " edge=" << controls.edgeWidth << " packed_dispatch=" << controls.packedDispatch
-         << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute << "\n";
+         << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute
+         << " trace=" << controls.trace << "\n";
     file << "packed initialized=" << packed.initialized << " healthy=" << packed.healthy
          << " admitted=" << packed.admittedDraws << " captured_frames=" << packed.capturedFrames
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
@@ -104,6 +105,12 @@ void PollGlassDebugControl() noexcept
                 output << "apply=substitute_on\n";
                 continue;
             }
+            if (line == "dump")
+            {
+                RequestPackedDump();
+                output << "dump=queued\n";
+                continue;
+            }
             auto value = ReadControls();
             if (line.rfind("packed=", 0) == 0)
                 value.packedDispatch = line.substr(7) == "on";
@@ -115,6 +122,8 @@ void PollGlassDebugControl() noexcept
                 value.strength = static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 9, nullptr, 10), 0ul, 100ul));
             else if (line.rfind("substitute=", 0) == 0)
                 value.packedSubstitute = line.substr(11) == "on";
+            else if (line.rfind("trace=", 0) == 0)
+                value.trace = line.substr(6) == "on";
             else
             {
                 output << "unknown=" << line << "\n";

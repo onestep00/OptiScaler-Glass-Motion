@@ -24,6 +24,7 @@ class NativeSession
     SurfaceQueueLink link;
     ComputeRecording recording;
     GpuTimer timer;
+    FILE* log = nullptr;
     ID3D12GraphicsCommandList* fgCommand = nullptr;
     ID3D12CommandQueue* fgQueue = nullptr;
     ID3D12Fence* completion = nullptr;
@@ -96,6 +97,7 @@ class NativeSession
             return false;
         }
         timing = timer.initialize(device); // Optional measurement must not disable correction.
+        this->log = log;
         initialized = true;
         return true;
     }
@@ -113,6 +115,7 @@ class NativeSession
             return false;
         }
         timing = timer.initialize(device);
+        this->log = log;
         objectMode = true;
         objectProvider = provider;
         initialized = true;
@@ -268,6 +271,12 @@ class NativeSession
             if (inputs.index == 1 && prepared.motion)
                 command->ClearState(nullptr);
             outputRecording |= prepared.motion != nullptr;
+            if (controls.trace && log)
+            {
+                std::fprintf(log, "TRACE_SUBSTITUTE index=%u applied=%u frame=%llu\n", inputs.index,
+                             prepared.motion ? 1u : 0u, static_cast<unsigned long long>(inputs.frame));
+                std::fflush(log);
+            }
             return prepared;
         }
         if (inputs.index == 1)
@@ -331,6 +340,18 @@ class NativeSession
     bool reloadPackedShader(const wchar_t* shader, FILE* log)
     {
         return objectMode && objectPass.reloadShader(shader, log);
+    }
+    // Live diagnostics: motion/depth dump and submit correlation.
+    void requestDump()
+    {
+        if (objectMode)
+            objectPass.requestDump();
+    }
+    bool serviceDump() { return objectMode && objectPass.serviceDump(); }
+    void dumpSubmitted(ID3D12CommandQueue* queue)
+    {
+        if (objectMode)
+            objectPass.dumpSubmitted(queue);
     }
     uint64_t renderedDispatches() const
     {

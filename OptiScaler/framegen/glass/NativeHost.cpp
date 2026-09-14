@@ -102,6 +102,7 @@ Runtime& runtime()
 // consumed on the FG evaluation thread, which is the only place the native
 // recordings may be retired while the game keeps running.
 std::atomic<bool> softReloadRequested = false;
+std::atomic<bool> dumpRequested = false;
 
 std::filesystem::path packedShaderPath()
 {
@@ -137,6 +138,21 @@ D3D12Callbacks makeCallbacks()
         InternalD3D12Scope ownSignals;
         NotifyGeometryCaptureSubmit(q, count, lists);
         r.each([&](Entry& e) { e.session.afterSubmit(q, count, lists); });
+        // Attribute a driver reset to the exact submitted batch that carried
+        // our substituted inputs.
+        if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
+            for (UINT i = 0; i < count; ++i)
+                if (lists[i] == fg)
+                {
+                    if (r.active)
+                        r.active->session.dumpSubmitted(q);
+                    if (r.log && ReadControls().trace)
+                    {
+                        std::fprintf(r.log, "TRACE_SUBMIT fg=1 batch=%u queue=%p\n", count, q);
+                        std::fflush(r.log);
+                    }
+                    break;
+                }
         r.reap();
     };
     value.signal = [](void* p, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
@@ -235,6 +251,18 @@ void RequestNativeSoftReload() noexcept
     softReloadRequested.store(true, std::memory_order_release);
 }
 
+void RequestPackedDump() noexcept
+{
+    dumpRequested.store(true, std::memory_order_release);
+}
+
+void ServiceNativeDiagnostics() noexcept
+{
+    auto& r = runtime();
+    std::lock_guard lock(r.mutex);
+    r.each([&](Entry& e) { e.session.serviceDump(); });
+}
+
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                   NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
                                   NativeEvaluate original)
@@ -259,6 +287,17 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         }
         else
             softReloadRequested.store(true, std::memory_order_release); // Retry after a drain.
+    }
+    if (dumpRequested.exchange(false, std::memory_order_acq_rel))
+    {
+        std::lock_guard lock(r.mutex);
+        if (r.active)
+            r.active->session.requestDump();
+        else if (r.log)
+        {
+            std::fprintf(r.log, "PACKED_DUMP skipped reason=no_active_entry\n");
+            std::fflush(r.log);
+        }
     }
     if (TakeShaderReloadRequest())
     {

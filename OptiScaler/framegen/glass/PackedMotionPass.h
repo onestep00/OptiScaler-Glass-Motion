@@ -85,6 +85,10 @@ class PackedMotionPass
     std::uint64_t renderedDispatches() const { return dispatches; }
     // Live debug channel: recompile the compose shader without a restart.
     bool reloadShader(const wchar_t* shader, FILE* log) { return gpu.reload(shader, log); }
+    // Live diagnostics: one-frame motion/depth dump and submit correlation.
+    void requestDump() { gpu.requestDump(); }
+    bool serviceDump() { return gpu.serviceDump(); }
+    void dumpSubmitted(ID3D12CommandQueue* queue) { gpu.dumpSubmitted(queue); }
     ID3D12Resource* selection() const { return gpu.selectionOutput(); }
     void releaseAfterGpuDrain()
     {

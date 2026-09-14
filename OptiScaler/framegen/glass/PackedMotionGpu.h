@@ -3,7 +3,13 @@
 #include "PackedMotionCapture.h"
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 namespace GlassFg
@@ -18,6 +24,18 @@ class PackedMotionGpu
     ID3D12Resource* depth = nullptr;
     ID3D12Resource* selection = nullptr;
     unsigned width = 0, height = 0, increment = 0;
+    // Diagnostic readback. Nothing is allocated or copied until the live
+    // channel asks for a dump, so the correction path pays nothing by default.
+    ID3D12Resource* readback[2] {};
+    UINT64 readbackBytes[2] {};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[2] {};
+    ID3D12Fence* dumpFence = nullptr;
+    UINT64 dumpValue = 0;
+    unsigned dumpSerial = 0, dumpFrame = 0;
+    bool dumpPending = false;
+    std::atomic<unsigned> dumpRequests { 0 };
+    std::filesystem::path dumpFolder;
+    FILE* logFile = nullptr;
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(unsigned index) const
     {
@@ -104,6 +122,8 @@ class PackedMotionGpu
             (depthDescription.Format != DXGI_FORMAT_R32_FLOAT && depthDescription.Format != DXGI_FORMAT_R32_TYPELESS))
             return false;
         device = value;
+        this->logFile = log;
+        dumpFolder = std::filesystem::path(shader).parent_path();
         width = static_cast<unsigned>(motionDescription.Width);
         height = motionDescription.Height;
 
@@ -183,6 +203,195 @@ class PackedMotionGpu
         return true;
     }
 
+    // Live channel: dump one frame's composed motion and depth as PPM images
+    // plus a text sample grid. Diagnostic only: one copy of each texture and a
+    // blocking map on the health thread, nothing on the normal path.
+    void requestDump() noexcept { dumpRequests.fetch_add(1, std::memory_order_relaxed); }
+
+    void dumpSubmitted(ID3D12CommandQueue* queue) noexcept
+    {
+        if (!dumpPending || !queue || !dumpFence)
+            return;
+        if (SUCCEEDED(queue->Signal(dumpFence, ++dumpValue)) && logFile)
+        {
+            std::fprintf(logFile, "PACKED_DUMP submitted serial=%u frame=%u value=%llu\n", dumpSerial, dumpFrame,
+                         static_cast<unsigned long long>(dumpValue));
+            std::fflush(logFile);
+        }
+    }
+
+    bool serviceDump() noexcept
+    {
+        if (!dumpPending || !dumpFence || !readback[0] || !readback[1])
+            return false;
+        const auto completed = dumpFence->GetCompletedValue();
+        if (completed == UINT64_MAX || completed < dumpValue)
+            return false;
+        void* data[2] {};
+        for (unsigned i = 0; i < 2; ++i)
+            if (FAILED(readback[i]->Map(0, nullptr, &data[i])) || !data[i])
+            {
+                for (unsigned j = 0; j < i; ++j)
+                    readback[j]->Unmap(0, nullptr);
+                dumpPending = false;
+                return false;
+            }
+        const auto folder = dumpFolder.empty() ? std::filesystem::path(L"Glass") : dumpFolder;
+        std::error_code error;
+        std::filesystem::create_directories(folder, error);
+        const auto suffix = std::to_wstring(dumpSerial);
+        const auto base = (folder / L"dump").wstring() + L"-" + suffix;
+        writeMotion(base + L"-mv.ppm", static_cast<const std::byte*>(data[0]));
+        writeDepth(base + L"-depth.ppm", static_cast<const std::byte*>(data[1]));
+        writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]));
+        for (unsigned i = 0; i < 2; ++i)
+            readback[i]->Unmap(0, nullptr);
+        if (logFile)
+        {
+            std::fprintf(logFile, "PACKED_DUMP written serial=%u frame=%u path=%ls\n", dumpSerial, dumpFrame,
+                         base.c_str());
+            std::fflush(logFile);
+        }
+        dumpPending = false;
+        return true;
+    }
+
+  private:
+    bool prepareReadback()
+    {
+        if (readback[0] && readback[1])
+            return true;
+        ID3D12Resource* targets[] { motion, depth };
+        for (unsigned i = 0; i < 2; ++i)
+        {
+            auto description = targets[i]->GetDesc();
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+            UINT64 bytes = 0;
+            device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+            D3D12_HEAP_PROPERTIES properties {};
+            properties.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC bufferDescription {};
+            bufferDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bufferDescription.Width = bytes;
+            bufferDescription.Height = 1;
+            bufferDescription.DepthOrArraySize = 1;
+            bufferDescription.MipLevels = 1;
+            bufferDescription.SampleDesc.Count = 1;
+            bufferDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ID3D12Resource* created = nullptr;
+            if (FAILED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&created))))
+                return false;
+            readback[i] = created;
+            readbackBytes[i] = bytes;
+            readbackFootprint[i] = footprint;
+        }
+        if (!dumpFence && FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&dumpFence))))
+            return false;
+        ++dumpSerial;
+        return true;
+    }
+
+    const std::byte* readbackRow(const std::byte* data, unsigned index, unsigned y) const
+    {
+        return data + readbackFootprint[index].Offset + UINT64(y) * readbackFootprint[index].Footprint.RowPitch;
+    }
+
+    static std::byte toByte(float value)
+    {
+        return static_cast<std::byte>(std::clamp(value, 0.f, 255.f));
+    }
+
+    static float halfToFloat(unsigned short value)
+    {
+        const auto sign = unsigned(value & 0x8000u) << 16;
+        auto exponent = unsigned((value >> 10) & 0x1fu);
+        auto mantissa = unsigned(value & 0x3ffu);
+        unsigned bits = 0;
+        if (!exponent)
+        {
+            if (!mantissa)
+                bits = sign;
+            else
+            {
+                auto adjusted = 127 - 15 + 1;
+                while (!(mantissa & 0x400u))
+                {
+                    mantissa <<= 1;
+                    --adjusted;
+                }
+                bits = sign | (unsigned(adjusted) << 23) | ((mantissa & 0x3ffu) << 13);
+            }
+        }
+        else if (exponent == 31)
+            bits = sign | 0x7f800000u | (mantissa << 13);
+        else
+            bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+        float result = 0.f;
+        std::memcpy(&result, &bits, sizeof(result));
+        return result;
+    }
+
+    void writeMotion(const std::wstring& path, const std::byte* data) const
+    {
+        FILE* file = _wfopen(path.c_str(), L"wb");
+        if (!file)
+            return;
+        std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+        for (unsigned y = 0; y < height; ++y)
+        {
+            const auto* row = reinterpret_cast<const unsigned short*>(readbackRow(data, 0, y));
+            for (unsigned x = 0; x < width; ++x)
+            {
+                const auto mx = halfToFloat(row[x * 4 + 0]);
+                const auto my = halfToFloat(row[x * 4 + 1]);
+                const std::byte pixel[3] { toByte(128.f + mx * 512.f), toByte(128.f + my * 512.f),
+                                           toByte(128.f + std::sqrt(mx * mx + my * my) * 1024.f) };
+                std::fwrite(pixel, 1, 3, file);
+            }
+        }
+        std::fclose(file);
+    }
+
+    void writeDepth(const std::wstring& path, const std::byte* data) const
+    {
+        FILE* file = _wfopen(path.c_str(), L"wb");
+        if (!file)
+            return;
+        std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+        for (unsigned y = 0; y < height; ++y)
+        {
+            const auto* row = reinterpret_cast<const float*>(readbackRow(data, 1, y));
+            for (unsigned x = 0; x < width; ++x)
+            {
+                const std::byte pixel[3] { toByte(row[x] * 255.f), toByte(row[x] * 255.f), toByte(row[x] * 255.f) };
+                std::fwrite(pixel, 1, 3, file);
+            }
+        }
+        std::fclose(file);
+    }
+
+    void writeSamples(const std::wstring& path, const std::byte* motionData, const std::byte* depthData) const
+    {
+        FILE* file = _wfopen(path.c_str(), L"wb");
+        if (!file)
+            return;
+        std::fprintf(file, "serial=%u frame=%u size=%ux%u\n", dumpSerial, dumpFrame, width, height);
+        for (unsigned gy = 0; gy < 9; ++gy)
+        {
+            for (unsigned gx = 0; gx < 16; ++gx)
+            {
+                const auto x = (gx * width) / 16, y = (gy * height) / 9;
+                const auto* row = reinterpret_cast<const unsigned short*>(readbackRow(motionData, 0, y));
+                const auto* depthRow = reinterpret_cast<const float*>(readbackRow(depthData, 1, y));
+                std::fprintf(file, "x=%u y=%u mv=(%.6f,%.6f) depth=%.6f\n", x, y,
+                             halfToFloat(row[x * 4 + 0]), halfToFloat(row[x * 4 + 1]), depthRow[x]);
+            }
+        }
+        std::fclose(file);
+    }
+
+  public:
     bool dispatch(ID3D12GraphicsCommandList* command, const PackedMotionFrame& packed,
                   ID3D12Resource* originalMotion, ID3D12Resource* originalDepth,
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState,
@@ -235,6 +444,33 @@ class PackedMotionGpu
         // clean run; the INI and settings UI control this without a rebuild.
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
         command->Dispatch((width + 7) / 8, (rows + 7) / 8, 1);
+        if (controls.trace && logFile)
+        {
+            std::fprintf(logFile, "TRACE_DISPATCH frame=%u rows=%u groups=%u edges=%u\n", packed.frame, rows,
+                         (width + 7) / 8, (std::min)(controls.edgeWidth, 4u));
+            std::fflush(logFile);
+        }
+        if (!dumpPending && dumpRequests.load(std::memory_order_relaxed) && prepareReadback())
+        {
+            transition(command, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(command, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            ID3D12Resource* sources[] { motion, depth };
+            for (unsigned i = 0; i < 2; ++i)
+            {
+                D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+                source.pResource = sources[i];
+                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                target.pResource = readback[i];
+                target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                target.PlacedFootprint = readbackFootprint[i];
+                command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+            }
+            transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            dumpFrame = packed.frame;
+            dumpRequests.fetch_sub(1, std::memory_order_relaxed);
+            dumpPending = true;
+        }
         transition(command, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         transition(command, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         transition(command, selection, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -253,6 +489,15 @@ class PackedMotionGpu
                 (*resource)->Release();
             *resource = nullptr;
         }
+        for (auto** resource : { &readback[0], &readback[1] })
+        {
+            if (*resource)
+                (*resource)->Release();
+            *resource = nullptr;
+        }
+        if (dumpFence) dumpFence->Release();
+        dumpFence = nullptr;
+        dumpPending = false;
         if (pipeline) pipeline->Release();
         if (root) root->Release();
         if (heap) heap->Release();
