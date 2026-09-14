@@ -49,6 +49,9 @@ struct GlassPluginApi
 GlassPluginApi hostStorage {};
 std::atomic<const GlassPluginApi*> host { nullptr };
 std::atomic<unsigned> groupedCalls { 0 }, appendCalls { 0 };
+std::atomic<bool> draining { false };
+std::atomic<int> inFlight { 0 };
+std::atomic<unsigned> hitsBase { 0 }, hitsFlag { 0 };
 HMODULE selfModule = nullptr;
 std::wstring ownLogPath;
 using GroupedPathFn = void (*)(std::uintptr_t proxy, std::uintptr_t* context);
@@ -116,9 +119,14 @@ LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) noexcept
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
+
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 {
     (void)container;
+    if (draining.load(std::memory_order_relaxed))
+        return;
+    ++inFlight;
     const auto call = appendCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (call <= 4)
         directLog("append_enter=%u source=%llx valid=%u", call,
@@ -131,10 +139,20 @@ void hookedAppend(void* container, std::uintptr_t sourceMatrix)
             firstIndices[firstCount++] = index;
         appends.fetch_add(1, std::memory_order_relaxed);
     }
+    --inFlight;
 }
 
 void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
 {
+    // During detach the hook must still forward the original call, but it must
+    // stop touching plugin state so the DLL can be unmapped safely.
+    if (draining.load(std::memory_order_relaxed))
+    {
+        if (originalGrouped)
+            originalGrouped(proxy, context);
+        return;
+    }
+    ++inFlight;
     const auto call = groupedCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (call <= 4)
         directLog("grouped_enter=%u proxy=%llx context=%llx", call,
@@ -163,6 +181,14 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
             current.valid = false;
             directLog("read_fault=1");
         }
+    // Raw field probe so a wrong base object or a wrong layout shows up as zeros
+    // instead of looking like "the path never has elements".
+    if (call <= 4 || (call % 256) == 0)
+    {
+        probeFields("grouped_proxy", call, proxy);
+        if (context)
+            probeFields("grouped_context", call, reinterpret_cast<std::uintptr_t>(context));
+    }
     if (originalGrouped)
         originalGrouped(proxy, context);
     const auto* api = host.load(std::memory_order_acquire);
@@ -199,6 +225,7 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
         }
     }
     current.valid = false;
+    --inFlight;
 }
 
 bool markerPresent(const wchar_t* name) noexcept
@@ -212,6 +239,36 @@ bool markerPresent(const wchar_t* name) noexcept
     directory.resize(cut);
     const auto candidate = directory + L"\\" + name;
     return GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Layout probe: reads the four fields the decompiled grouped path uses from an
+// arbitrary candidate object, so a wrong base object or wrong offsets show up
+// as zeros instead of silently producing no elements.
+void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
+{
+    std::uintptr_t base = 0;
+    std::uint32_t count = 0, start = 0;
+    std::uint16_t flags = 0;
+    bool read = false;
+    __try
+    {
+        base = *reinterpret_cast<std::uintptr_t*>(pointer + 0x108);
+        count = *reinterpret_cast<std::uint32_t*>(pointer + 0x110);
+        start = *reinterpret_cast<std::uint32_t*>(pointer + 0x114);
+        flags = *reinterpret_cast<std::uint16_t*>(pointer + 0xea);
+        read = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        read = false;
+    }
+    if (base)
+        hitsBase.fetch_add(1, std::memory_order_relaxed);
+    if (flags & 0x2000)
+        hitsFlag.fetch_add(1, std::memory_order_relaxed);
+    directLog("%s=%u ptr=%llx base=%llx count=%u start=%u flags=%04x read=%u", tag, call,
+              static_cast<unsigned long long>(pointer), static_cast<unsigned long long>(base), count, start, flags,
+              read ? 1u : 0u);
 }
 } // namespace
 
@@ -242,8 +299,9 @@ DWORD WINAPI monitorLoop(LPVOID) noexcept
         Sleep(250);
         if (monitorStop.load(std::memory_order_relaxed))
             break;
-        directLog("beat=%u grouped=%u append=%u", ++beat, groupedCalls.load(std::memory_order_relaxed),
-                  appendCalls.load(std::memory_order_relaxed));
+        directLog("beat=%u grouped=%u append=%u basehits=%u flaghits=%u", ++beat,
+                  groupedCalls.load(std::memory_order_relaxed), appendCalls.load(std::memory_order_relaxed),
+                  hitsBase.load(std::memory_order_relaxed), hitsFlag.load(std::memory_order_relaxed));
     }
     return 0;
 }
@@ -335,6 +393,14 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
 
 extern "C" __declspec(dllexport) void GlassPluginDetach()
 {
+    // A hook body can still be running on a render thread when the module calls
+    // FreeLibrary. Unloading straight away crashed the game on 2026-09-14
+    // 17:48:55. Drain the hook bodies first and give the engine one more frame
+    // after the detour transaction before the DLL disappears.
+    draining.store(true, std::memory_order_relaxed);
+    for (unsigned i = 0; i < 200 && inFlight.load(std::memory_order_relaxed) != 0; ++i)
+        Sleep(5);
+    Sleep(250);
     monitorStop.store(true, std::memory_order_relaxed);
     if (monitorThread)
     {
@@ -355,6 +421,7 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
         threads.enlist();
         DetourTransactionCommit();
     }
+    Sleep(250);
     originalGrouped = nullptr;
     originalAppend = nullptr;
     glassArrayMapAppendTarget = nullptr;
@@ -362,6 +429,7 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
     directLog("detached");
     trace("ARRAY_MAP detached=1");
     host.store(nullptr, std::memory_order_release);
+    draining.store(false, std::memory_order_relaxed);
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD, LPVOID)
