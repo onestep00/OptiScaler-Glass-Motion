@@ -179,7 +179,7 @@ D3D12Callbacks makeCallbacks()
                         r.active->session.dumpSubmitted(q);
                     if (r.log && ReadControls().trace)
                     {
-                        std::fprintf(r.log, "TRACE_SUBMIT fg=1 batch=%u queue=%p\n", count, q);
+                        std::fprintf(r.log, "TRACE_SUBMIT fg=1 lists=%u queue=%p\n", count, q);
                         std::fflush(r.log);
                     }
                     break;
@@ -295,6 +295,21 @@ void ServiceNativeDiagnostics() noexcept
     auto& r = runtime();
     std::lock_guard lock(r.mutex);
     r.each([&](Entry& e) { e.session.serviceDump(); });
+}
+
+NativeHostStatus ReadNativeHostStatus() noexcept
+{
+    auto& r = runtime();
+    std::lock_guard lock(r.mutex);
+    NativeHostStatus status;
+    status.evaluations = r.evaluations;
+    status.substitutions = r.substitutions;
+    status.captures = r.captures;
+    status.active = r.active ? 1u : 0u;
+    status.retiring = (r.retiring[0] ? 1u : 0u) + (r.retiring[1] ? 1u : 0u);
+    status.stopped = r.stopped ? 1u : 0u;
+    status.unavailable = r.unavailable ? 1u : 0u;
+    return status;
 }
 
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,

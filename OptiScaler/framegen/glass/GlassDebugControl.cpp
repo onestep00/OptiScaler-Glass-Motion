@@ -60,6 +60,10 @@ void writeStatus(std::ofstream& file)
          << " reclaimed=" << packed.historyReclaimed << " rejected_topology=" << packed.historyRejectedTopology
          << " set_full=" << packed.historySetFull << " arena_full=" << packed.historyArenaFull
          << " live=" << packed.historyLive << "\n";
+    const auto host = ReadNativeHostStatus();
+    file << "host evaluations=" << host.evaluations << " substitutions=" << host.substitutions
+         << " captures=" << host.captures << " active=" << host.active << " retiring=" << host.retiring
+         << " stopped=" << host.stopped << " unavailable=" << host.unavailable << "\n";
     file << "ok=1\n";
 }
 } // namespace

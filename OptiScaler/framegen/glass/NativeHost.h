@@ -21,4 +21,12 @@ void RequestNativeSoftReload() noexcept;
 // Live diagnostics: one-frame motion/depth dump and its deferred write-out.
 void RequestPackedDump() noexcept;
 void ServiceNativeDiagnostics() noexcept;
+// Snapshot for the live status response: whether the native host is consuming
+// FG frames at all, independent of the log.
+struct NativeHostStatus
+{
+    std::uint64_t evaluations = 0, substitutions = 0, captures = 0;
+    unsigned active = 0, retiring = 0, stopped = 0, unavailable = 0;
+};
+NativeHostStatus ReadNativeHostStatus() noexcept;
 } // namespace GlassFg
