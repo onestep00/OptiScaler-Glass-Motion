@@ -156,6 +156,12 @@ LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) noexcept
 void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
 void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
 void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept;
+struct ArrayMappingDraft
+{
+    unsigned count = 0;
+    std::uint16_t indices[64] {};
+};
+bool buildMappingFromOwner(std::uintptr_t proxy, std::uint32_t arrayCount, ArrayMappingDraft& draft) noexcept;
 std::atomic<unsigned> flaggedDumps { 0 };
 
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
@@ -234,22 +240,36 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
     if (active)
     {
         const auto* api = host.load(std::memory_order_acquire);
-        if (current.valid && firstCount && api && api->publishArrayMapping)
+        if (current.valid && current.outputStart != 0xFFFFFFFFu && api && api->publishArrayMapping)
         {
-            __try
+            unsigned count = 0;
+            unsigned short indices[64] {};
+            if (firstCount)
+            {
+                count = (std::min)(firstCount, 64u);
+                for (unsigned i = 0; i < count; ++i)
+                    indices[i] = static_cast<unsigned short>(firstIndices[i]);
+            }
+            else
+            {
+                ArrayMappingDraft draft;
+                if (buildMappingFromOwner(proxy, current.count, draft))
+                {
+                    count = draft.count;
+                    for (unsigned i = 0; i < count; ++i)
+                        indices[i] = draft.indices[i];
+                }
+            }
+            if (count)
             {
                 GlassArrayMappingEntry entry;
                 entry.proxy = current.proxy;
                 entry.outputStart = current.outputStart;
-                entry.count = firstCount;
+                entry.count = count;
                 entry.frame = ++publishedFrames;
-                for (unsigned i = 0; i < firstCount && i < 64; ++i)
-                    entry.indices[i] = firstIndices[i];
+                for (unsigned i = 0; i < count; ++i)
+                    entry.indices[i] = indices[i];
                 api->publishArrayMapping(&entry);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                directLog("publish_fault=1");
             }
         }
         if (current.valid)
@@ -387,6 +407,44 @@ unsigned findOwnerCandidates(std::uintptr_t proxy, OwnerCandidate* out, unsigned
         ++found;
     }
     return found;
+}
+
+// Turns the engine's own element list into the packet mapping. Accepts a
+// candidate only when its element count matches the object's source-array count
+// and every entry is a valid source index, so unverified memory never becomes a
+// published mapping.
+bool buildMappingFromOwner(std::uintptr_t proxy, std::uint32_t arrayCount, ArrayMappingDraft& draft) noexcept
+{
+    if (arrayCount == 0 || arrayCount > 0x4000)
+        return false;
+    OwnerCandidate candidates[8] {};
+    const auto found = findOwnerCandidates(proxy, candidates, 8);
+    const auto wanted = (std::min)(arrayCount, 64u);
+    for (unsigned index = 0; index < found; ++index)
+    {
+        const auto& candidate = candidates[index];
+        if (candidate.count != arrayCount || candidate.list < 0x10000ull ||
+            candidate.list > 0x7FFFFFFFFFFFull || !readableRange(candidate.list, wanted * 2u))
+            continue;
+        ArrayMappingDraft candidateDraft;
+        bool valid = true;
+        for (unsigned i = 0; i < wanted; ++i)
+        {
+            const auto entry = *reinterpret_cast<unsigned short*>(candidate.list + i * 2);
+            if (entry >= arrayCount)
+            {
+                valid = false;
+                break;
+            }
+            candidateDraft.indices[i] = entry;
+        }
+        if (!valid)
+            continue;
+        candidateDraft.count = wanted;
+        draft = candidateDraft;
+        return true;
+    }
+    return false;
 }
 
 void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
@@ -696,7 +754,12 @@ int main()
     if (found != 0)
         ++failures;
     dumpOwner("selftest_bogus", 1, reinterpret_cast<std::uintptr_t>(object));
-    alignas(8) unsigned short list[16] = {7, 9, 42, 1, 2, 3};
+    alignas(8) unsigned short list[64] {};
+    for (unsigned i = 0; i < 40; ++i)
+        list[i] = static_cast<unsigned short>(i);
+    list[0] = 7;
+    list[1] = 9;
+    list[2] = 39;
     alignas(8) unsigned char group[0x60] {};
     *reinterpret_cast<std::uintptr_t*>(group + 0x18) = reinterpret_cast<std::uintptr_t>(list);
     *reinterpret_cast<std::uint32_t*>(group + 0x3c) = 40;
@@ -713,7 +776,22 @@ int main()
         failures += candidates[0].list != reinterpret_cast<std::uintptr_t>(list);
     }
     dumpOwner("selftest_group", 2, reinterpret_cast<std::uintptr_t>(object));
-    std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u\n", failures, found);
+    ArrayMappingDraft draft;
+    const bool mapped = buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 40, draft);
+    if (!mapped || draft.count != 40 || draft.indices[0] != 7 || draft.indices[1] != 9 || draft.indices[2] != 39)
+        ++failures;
+    // An owner whose count does not match the object's array count must be
+    // rejected instead of published.
+    ArrayMappingDraft rejected;
+    if (buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 41, rejected))
+        ++failures;
+    // Out-of-range entries must also be rejected.
+    list[0] = 40; // arrayCount is 40, so index 40 is invalid
+    ArrayMappingDraft outOfRange;
+    if (buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 40, outOfRange))
+        ++failures;
+    std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u mapping_built=%d\n",
+                failures, found, mapped ? 1 : 0);
     return failures ? 1 : 0;
 }
 #endif
