@@ -55,6 +55,39 @@ std::atomic<unsigned> hitsBase { 0 }, hitsFlag { 0 };
 HMODULE selfModule = nullptr;
 std::wstring ownLogPath;
 PVOID vehHandle = nullptr;
+FILE* logFile = nullptr;
+std::atomic_flag logBusy = ATOMIC_FLAG_INIT;
+
+// Buffered, non-blocking writer. Lines are flushed by the monitor thread every
+// 250 ms instead of opening the file once per line on the render thread.
+void flushLog() noexcept
+{
+    if (logFile)
+        std::fflush(logFile);
+}
+
+bool readableRange(std::uintptr_t address, std::size_t bytes) noexcept
+{
+    if (!address || bytes == 0)
+        return false;
+    const std::uintptr_t end = address + bytes;
+    if (end < address)
+        return false;
+    std::uintptr_t current = address & ~static_cast<std::uintptr_t>(0xFFF);
+    while (current < end)
+    {
+        MEMORY_BASIC_INFORMATION info {};
+        if (VirtualQuery(reinterpret_cast<const void*>(current), &info, sizeof(info)) != sizeof(info))
+            return false;
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            return false;
+        const auto next = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+        if (next <= current)
+            return false;
+        current = next;
+    }
+    return true;
+}
 // 0x1e8778 is the mesh vtable slot +0xf0: (mesh, previousTransformValid).
 // The second argument is a boolean, not a pointer (see NativeOpaqueMvRoutes.md).
 using GroupedPathFn = void (*)(std::uintptr_t mesh, std::uintptr_t previousValid);
@@ -86,21 +119,19 @@ void trace(const char* text)
 // even when the module's own trace path is the suspect.
 void directLog(const char* format, ...) noexcept
 {
-    if (ownLogPath.empty())
+    if (!logFile)
         return;
-    char line[480] {};
+    if (logBusy.test_and_set(std::memory_order_acquire))
+        return; // Never block a render thread on the logger.
+    char line[2048] {};
     std::va_list args;
     va_start(args, format);
     std::vsnprintf(line, sizeof(line), format, args);
     va_end(args);
-    if (FILE* file = _wfopen(ownLogPath.c_str(), L"a"))
-    {
-        SYSTEMTIME now {};
-        GetLocalTime(&now);
-        std::fprintf(file, "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
-                     line);
-        std::fclose(file);
-    }
+    SYSTEMTIME now {};
+    GetLocalTime(&now);
+    std::fprintf(logFile, "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, line);
+    logBusy.clear(std::memory_order_release);
 }
 
 LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) noexcept
@@ -188,7 +219,7 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
         }
         // Raw field probe so a wrong base object or a wrong layout shows up as
         // zeros instead of looking like "the path never has elements".
-        if (call <= 4 || (call % 4096) == 0)
+        if (call <= 4 || (call % 16384) == 0)
             probeFields("grouped", call, proxy);
         // Arrays (flag 0x2000) are rare; dump the full object so the element
         // list can be located from live bytes instead of another guess.
@@ -263,8 +294,8 @@ void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcep
     std::uint32_t p20 = 0, p24 = 0, p2c = 0, p30 = 0, p34 = 0, p48 = 0, p4c = 0, p50 = 0, p54 = 0, p110 = 0,
                   p114 = 0;
     std::uint16_t flags = 0;
-    bool read = false;
-    __try
+    const bool read = readableRange(pointer + 0x18, 0x100);
+    if (read)
     {
         p18 = *reinterpret_cast<std::uintptr_t*>(pointer + 0x18);
         p20 = *reinterpret_cast<std::uint32_t*>(pointer + 0x20);
@@ -282,11 +313,6 @@ void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcep
         p110 = *reinterpret_cast<std::uint32_t*>(pointer + 0x110);
         p114 = *reinterpret_cast<std::uint32_t*>(pointer + 0x114);
         flags = *reinterpret_cast<std::uint16_t*>(pointer + 0xea);
-        read = true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        read = false;
     }
     if (p108)
         hitsBase.fetch_add(1, std::memory_order_relaxed);
@@ -303,16 +329,11 @@ void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcep
 void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
 {
     unsigned long long words[64] {};
-    bool read = false;
-    __try
+    const bool read = readableRange(pointer, sizeof(words));
+    if (read)
     {
         for (unsigned i = 0; i < 64; ++i)
             words[i] = *reinterpret_cast<unsigned long long*>(pointer + i * 8);
-        read = true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        read = false;
     }
     if (!read)
     {
@@ -336,18 +357,43 @@ void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
 // entries or a pointer to them) so the next run needs no extra guess.
 void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
 {
+    // The documented +0x70 lookup is not a plain pointer in practice
+    // (0x13d300000337e on 2026-09-14). Scan every pointer-sized field for an
+    // object that has the documented group shape instead of guessing.
+    if (!readableRange(proxy, 0x200))
+    {
+        directLog("%s=%u proxy=%llx object_unreadable=1", tag, call, static_cast<unsigned long long>(proxy));
+        return;
+    }
+    for (unsigned offset = 0; offset < 0x200; offset += 8)
+    {
+        const auto candidate = *reinterpret_cast<std::uintptr_t*>(proxy + offset);
+        if (candidate < 0x10000ull || candidate > 0x7FFFFFFFFFFFull || !readableRange(candidate, 0x60))
+            continue;
+        const auto list = *reinterpret_cast<std::uintptr_t*>(candidate + 0x18);
+        const auto count = *reinterpret_cast<std::uint32_t*>(candidate + 0x3c);
+        const auto outputStart = *reinterpret_cast<std::uint32_t*>(candidate + 0x50);
+        if (count == 0 || count > 0x4000)
+            continue;
+        directLog("%s=%u candidate_off=%03x candidate=%llx count=%u out_start=%u p18=%llx", tag, call, offset,
+                  static_cast<unsigned long long>(candidate), count, outputStart,
+                  static_cast<unsigned long long>(list));
+        if (list < 0x10000ull || list > 0x7FFFFFFFFFFFull || !readableRange(list, 32))
+            continue;
+        unsigned short entries[16] {};
+        for (unsigned i = 0; i < 16; ++i)
+            entries[i] = *reinterpret_cast<unsigned short*>(list + i * 2);
+        char text[220] {};
+        int used = 0;
+        for (unsigned i = 0; i < 16; ++i)
+            used += std::snprintf(text + used, sizeof(text) - used, "%u,", entries[i]);
+        directLog("%s=%u entries=%s", tag, call, text);
+    }
     std::uintptr_t owner = 0;
-    bool readOwner = false;
-    __try
-    {
+    const bool readOwner = readableRange(proxy + 0x70, 8);
+    if (readOwner)
         owner = *reinterpret_cast<std::uintptr_t*>(proxy + 0x70);
-        readOwner = true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        readOwner = false;
-    }
-    if (!readOwner || !owner)
+    if (!readOwner || !owner || owner < 0x10000ull || owner > 0x7FFFFFFFFFFFull || !readableRange(owner, 0x60))
     {
         directLog("%s=%u proxy=%llx owner=%llx read=%u", tag, call, static_cast<unsigned long long>(proxy),
                   static_cast<unsigned long long>(owner), readOwner ? 1u : 0u);
@@ -358,19 +404,14 @@ void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
     unsigned short inlineEntries[8] {};
     unsigned count = 0, outputStart = 0;
     std::uintptr_t list = 0;
-    bool read = false;
-    __try
+    const bool read = true; // owner range already validated above
+    if (read)
     {
         for (unsigned i = 0; i < 8; ++i)
             inlineEntries[i] = *reinterpret_cast<unsigned short*>(owner + 0x18 + i * 2);
         list = *reinterpret_cast<std::uintptr_t*>(owner + 0x18);
         count = *reinterpret_cast<std::uint32_t*>(owner + 0x3c);
         outputStart = *reinterpret_cast<std::uint32_t*>(owner + 0x50);
-        read = true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        read = false;
     }
     if (!read)
     {
@@ -385,16 +426,11 @@ void dumpOwner(const char* tag, unsigned call, std::uintptr_t proxy) noexcept
     if (list < 0x10000ull || list > 0x7FFFFFFFFFFFull)
         return;
     unsigned short entries[16] {};
-    bool readList = false;
-    __try
+    const bool readList = readableRange(list, sizeof(entries));
+    if (readList)
     {
         for (unsigned i = 0; i < 16; ++i)
             entries[i] = *reinterpret_cast<unsigned short*>(list + i * 2);
-        readList = true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        readList = false;
     }
     if (!readList)
     {
@@ -436,6 +472,7 @@ DWORD WINAPI monitorLoop(LPVOID) noexcept
         Sleep(250);
         if (monitorStop.load(std::memory_order_relaxed))
             break;
+        flushLog();
         directLog("beat=%u grouped=%u append=%u basehits=%u flaghits=%u", ++beat,
                   groupedCalls.load(std::memory_order_relaxed), appendCalls.load(std::memory_order_relaxed),
                   hitsBase.load(std::memory_order_relaxed), hitsFlag.load(std::memory_order_relaxed));
@@ -456,12 +493,23 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
             text.resize(cut);
         ownLogPath = text + L"\\glass-plugin.log";
     }
+    if (!ownLogPath.empty() && !logFile)
+    {
+        logFile = _wfopen(ownLogPath.c_str(), L"a");
+        if (logFile)
+            std::setvbuf(logFile, nullptr, _IOFBF, 64 * 1024);
+    }
     directLog("attach_begin exe=%p grouped=%p append=%p", GetModuleHandleW(nullptr),
               reinterpret_cast<void*>(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)) + 0x1e8778),
               reinterpret_cast<void*>(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)) + 0x9c19e8));
-    vehHandle = AddVectoredExceptionHandler(1, &faultHandler);
-    if (!vehHandle)
-        directLog("veh_failed=1");
+    // The vectored handler is diagnostic only: it writes from inside exception
+    // dispatch, which is not safe to keep on by default.
+    if (markerPresent(L"plugin-veh.on"))
+    {
+        vehHandle = AddVectoredExceptionHandler(1, &faultHandler);
+        if (!vehHandle)
+            directLog("veh_failed=1");
+    }
     hostStorage = *api;
     host.store(&hostStorage, std::memory_order_release);
     auto* base = reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr));
@@ -592,6 +640,12 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
     trace("ARRAY_MAP detached=1");
     host.store(nullptr, std::memory_order_release);
     draining.store(false, std::memory_order_relaxed);
+    flushLog();
+    if (logFile)
+    {
+        std::fclose(logFile);
+        logFile = nullptr;
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD, LPVOID)
