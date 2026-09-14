@@ -203,6 +203,10 @@ void GeometryPipelineCache::stop() { implementation->stop(); }
 bool GeometryPipelineCache::rootCreated(ID3D12RootSignature* identity, UINT node, const void* bytes,
                                         SIZE_T size) noexcept
 {
+    // Same bisect switch as pipelineCreated: with compilation disabled the
+    // module creates no extended root and no rewritten pipeline at all.
+    if (!GeometryPipelineCompilationEnabled())
+        return false;
     if (compilingGeometry || !identity || !bytes || !size || size > 1024 * 1024)
         return false;
     try
