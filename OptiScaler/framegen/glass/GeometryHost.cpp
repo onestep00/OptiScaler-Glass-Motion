@@ -204,6 +204,9 @@ void ReportGeometryHost(FILE* log) noexcept
         std::fprintf(log, " topology=");
         for (const auto& entry : packed.topologyChunks)
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
+        std::fprintf(log, " missing=");
+        for (const auto& entry : packed.missingChunks)
+            if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
         std::fprintf(log, "\n");
     }
     catch (...)

@@ -44,7 +44,7 @@ struct PackedMotionCaptureStatus
     std::uint64_t rasterRejected = 0, shapeRejected = 0, viewportRejected = 0;
     // Heaviest rejection chunks (engine draw chunk ids) for attribution.
     struct ChunkCount { std::uint32_t chunk = 0; std::uint64_t count = 0; };
-    std::array<ChunkCount, 16> unknownChunks {}, topologyChunks {};
+    std::array<ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
 };
 
 struct PackedMotionProvider

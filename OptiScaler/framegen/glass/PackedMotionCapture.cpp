@@ -119,7 +119,7 @@ class Capture final : public GeometryDrawCaptureOwner
     std::uint64_t submitBatchSequence = 0;
     mutable std::mutex mutex;
     PackedMotionCaptureStatus counters;
-    std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {};
+    std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
     std::uint32_t configuredWidth = 0, configuredHeight = 0;
     std::uint64_t nextProducer = 0, nextConsumer = 0;
     MotionFramePair framePair;
@@ -338,7 +338,11 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         if (failed || !command || !draw.frame || !args.instances || args.instances > MappingCapacity ||
             !pipeline || !pipeline->packed || !pipeline->root || !pipeline->root->extended)
         {
-            if (pipeline && !pipeline->packed) ++counters.missingPipeline;
+            if (pipeline && !pipeline->packed)
+            {
+                ++counters.missingPipeline;
+                noteChunk(missingChunks, draw.chunk);
+            }
             return false;
         }
         const auto* raster = ReadGeometryRasterState(command);
@@ -645,7 +649,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         auto value = counters;
         value.unknownChunks = unknownChunks;
         value.topologyChunks = topologyChunks;
-        value.registered = true;
+        value.missingChunks = missingChunks;
         value.healthy = counters.initialized && !failed;
         return value;
     }
@@ -662,6 +666,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         counters.height = height;
         unknownChunks = {};
         topologyChunks = {};
+        missingChunks = {};
     }
 };
 
