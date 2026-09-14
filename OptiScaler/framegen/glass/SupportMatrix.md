@@ -43,6 +43,10 @@
 4. The 2026-09-14 driver reset is not attributed yet. `probe` (dispatch only) and `apply` (input replacement) plus `trace=on` separate the two causes in one session.
 5. `GlassMotion.dll` still reports `stage_seen=0`; families that need native declaration supply are not covered.
 6. Live DLSS-G 2x/4x comparison, camera motion, object motion, static-object-with-moving-background, overlap, and spawn/despawn verification are pending.
+7. The array element mapping has never been consumed in a live session. The plugin publishes it and the module counts `published/hits/misses/out_of_range/evictions`, but no run with the game attached has been recorded since the publication path was finished.
+8. Plugin and module replacement require the game to be closed; the plugin auto-loads from the armed `plugin=load` request in the deploy folder. Unloading a loaded plugin in a live session is no longer used (it crashed twice before the vectored-handler removal and the in-flight drain were added, and the workflow is dropped).
+9. Identity `no_view` rejects are split into `no_view_state`, `no_view_unknown` (render pass, bundle, more than 8 targets) and `no_view_descriptor`, but no fix for any branch is implemented yet.
+10. The 18:36 session crashed inside the plugin probe when `proxy+0x70` was dereferenced as the group owner. Probes now validate readability first and the vectored handler is off by default; any future probe must keep that rule.
 
 ## How to collect the pending evidence in one session
 
@@ -59,5 +63,5 @@ Read `dump-N.txt` for `dispatched/packed/edge/interior` pixels and the paired `m
 
 | Artifact | Hash | Note |
 | --- | --- | --- |
-| `dxgi.dll` (resident module) | `620BD6BF` | replaced only while the game is closed; compose copies are limited to the dispatched rows |
+| `dxgi.dll` (resident module) | `7653DF77` | replaced only while the game is closed; compose copies are limited to the dispatched rows; window and `status` expose the N-1, identity and mapping counters |
 | `Glass\glass-plugin.dll` | `5F84A6DA` | loaded on demand through the file channel (auto-load request armed); replacement requires the game to be closed (hot reload dropped) |
