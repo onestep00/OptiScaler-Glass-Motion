@@ -491,9 +491,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         prepared.material = frameSlot->constantBuffer->GetGPUVirtualAddress() + UINT64(constantIndex) * 256;
         prepared.capture = frameSlot->capture->GetGPUVirtualAddress();
         prepared.mapping = frameSlot->mapping->GetGPUVirtualAddress();
-        // Crash attribution for the replay path: one bounded line per captured
-        // frame, so a reset leaves evidence that the packed raster was drawn.
-        if (log && draw.frame != lastReplayFrame)
+        // Crash attribution for the replay path. Sparse on purpose: one line per
+        // few hundred frames keeps the log bounded while still proving that the
+        // packed raster was drawn after the last load.
+        if (log && draw.frame != lastReplayFrame && draw.frame % 300 == 0)
         {
             lastReplayFrame = draw.frame;
             std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", draw.frame, draw.chunk);
@@ -693,8 +694,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         { ++counters.orderingRejected; ++counters.acquireStalePair; return {}; }
         selected->consumerCommand = command;
         ++counters.fgFrames;
-        return { selected->capture.Get(),         configuredWidth,      configuredHeight, selected->number,
-                 fgFrame,                         producerFence.Get(), selected->producerValue };
+        return { selected->capture.Get(),
+                 configuredWidth,
+                 configuredHeight,
+                 selected->number,
+                 fgFrame,
+                 producerFence.Get(),
+                 selected->producerValue,
+                 static_cast<void*>(selected->producerQueue.Get()) };
     }
 
     PackedMotionCaptureStatus status()

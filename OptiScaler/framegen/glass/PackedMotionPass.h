@@ -44,10 +44,11 @@ class PackedMotionPass
     }
     PreparedInputs prepare(ID3D12GraphicsCommandList* value, const Inputs& inputs,
                            const PackedMotionFrame& objectFrame, const D3D12_RESOURCE_STATES (&states)[3],
-                           Controls controls, GpuTimer* timer)
+                           Controls controls, GpuTimer* timer, bool allowAnyState = false)
     {
         if (!initialized || !value || !inputs.valid() || !controls.active() ||
-            states[0] != D3D12_RESOURCE_STATE_COPY_DEST || states[2] != D3D12_RESOURCE_STATE_COPY_DEST)
+            (!allowAnyState &&
+             (states[0] != D3D12_RESOURCE_STATE_COPY_DEST || states[2] != D3D12_RESOURCE_STATE_COPY_DEST)))
         {
             invalidateHistory();
             return {};

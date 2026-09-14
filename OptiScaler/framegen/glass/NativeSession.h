@@ -51,6 +51,9 @@ class NativeSession
     // pre-submit hook on the queue that executes the FG command list.
     ID3D12Fence* pendingProducerFence = nullptr;
     std::uint64_t pendingProducerValue = 0;
+    // Producer queue of the acquired frame; a wait for it on the same queue is a
+    // self wait and has to be skipped.
+    void* pendingProducerQueue = nullptr;
 
     bool retainProducer(ID3D12GraphicsCommandList* command)
     {
@@ -282,7 +285,8 @@ class NativeSession
     }
 
     PreparedInputs prepare(ID3D12GraphicsCommandList* command, const Inputs& inputs,
-                           const D3D12_RESOURCE_STATES (&states)[3], Controls controls)
+                           const D3D12_RESOURCE_STATES (&states)[3], Controls controls,
+                           bool allowAnyState = false)
     {
         collectDestroyed();
         if (!initialized || stopped || failed || command != fgCommand)
@@ -304,9 +308,10 @@ class NativeSession
                                                      description.Height, inputs.frame, inputs.reset != 0);
                 pendingProducerFence = objectFrame.producerFence;
                 pendingProducerValue = objectFrame.producerValue;
+                pendingProducerQueue = objectFrame.producerQueue;
             }
             auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
-                                               timing ? &timer : nullptr);
+                                               timing ? &timer : nullptr, allowAnyState);
             outputRecording |= prepared.motion != nullptr;
             if (controls.trace && log)
             {
@@ -404,12 +409,14 @@ class NativeSession
     std::uint64_t packedComposeForced() const { return objectMode ? objectPass.composeForced() : 0; }
     // Cross-queue dependency of the packed raster read. The caller performs the
     // wait on the queue that submits the FG command list.
-    bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value)
+    bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value, void*& producerQueue)
     {
         fence = pendingProducerFence;
         value = pendingProducerValue;
+        producerQueue = pendingProducerQueue;
         pendingProducerFence = nullptr;
         pendingProducerValue = 0;
+        pendingProducerQueue = nullptr;
         return fence != nullptr && value != 0;
     }
     void dumpSubmitted(ID3D12CommandQueue* queue)

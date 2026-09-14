@@ -5,7 +5,6 @@
 #include <DllNames.h>
 
 #include <framegen/dlssg/MfgUnlock.h>
-#include <framegen/glass/NvngxDlssgBridge.h>
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/Kernel32_Proxy.h>
@@ -120,16 +119,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
         auto dlssgSnippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
 
         if (dlssgSnippet != nullptr)
-        {
-            // The correction hook is installed on the load of nvngx_dlssg.dll,
-            // independently of the MFG unlock: it has to work with the unlocker
-            // enabled, disabled or absent.
-            if (GlassFg::InstallNvngxDlssgHook(dlssgSnippet))
-                LOG_INFO("Glass FG: nvngx_dlssg evaluate hook installed=1");
-            else
-                LOG_WARN("Glass FG: nvngx_dlssg evaluate hook installed=0");
             MfgUnlock::TryApply();
-        }
         else
             LOG_ERROR("Trying to load dll as nvngx_dlssg: {}", libNameA);
 

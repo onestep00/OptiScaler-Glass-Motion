@@ -3,7 +3,6 @@
 #include "GlassArrayMapping.h"
 #include "GeometryHealth.h"
 #include "PackedMotionCapture.h"
-#include "NvngxDlssgBridge.h"
 #include <Util.h>
 #include <SimpleIni.h>
 #include <imgui/imgui.h>
@@ -307,14 +306,16 @@ void RenderSettings()
                 static_cast<unsigned long long>(liveSubstitutions),
                 static_cast<unsigned long long>(liveEvaluations),
                 liveUnavailable ? " (unavailable)" : liveRetiring ? " (draining previous session)" : "");
-    ImGui::Text("Streamline FG hook (nvngx_dlssg): %s; calls %llu",
-                NvngxDlssgHookInstalled() ? "installed" : "not installed",
-                static_cast<unsigned long long>(NvngxDlssgHookCalls().load(std::memory_order_relaxed)));
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Streamline evaluates DLSS-G inside nvngx_dlssg.dll without the host's NGX\n"
-                          "proxy. Zero calls with a running FG means this build is not on that path.");
     if (!liveEvaluations)
-        ImGui::SameLine(), ImGui::TextDisabled("- no FG evaluation yet");
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled(value.packedSubstitute ? "- FG path has not reached the host hook yet"
+                                                   : "- FG input swap is off");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The correction runs on the host's native DLSS-G call. With OptiScaler\n"
+                              "frame generation switched off, the game drives DLSS-G through Streamline\n"
+                              "directly and that call never happens.");
+    }
     else if (!liveSubstitutions && value.packedSubstitute)
         ImGui::SameLine(), ImGui::TextDisabled("- swap requested but not applied");
     ImGui::Text("Compose fence: %s; submitted %llu; completed %llu%s", liveInFlight ? "in flight" : "idle",

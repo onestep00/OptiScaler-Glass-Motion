@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "GeometryDrawCapture.h"
 #include "GeometryCreation.h"
 #include "GeometryHealth.h"
@@ -167,6 +167,11 @@ Runtime& runtime()
 std::atomic<bool> softReloadRequested = false;
 std::atomic<bool> dumpRequested = false;
 
+// Frame already delivered by the Streamline tag path. The NGX path must not
+// correct the same rendered frame a second time: the engine texture it would
+// read already holds the corrected motion.
+std::atomic<std::uint64_t> streamCorrectedFrame { UINT64_MAX };
+
 std::filesystem::path packedShaderPath()
 {
     return Util::DllPath().parent_path() / L"Glass" / L"GlassObjectMotion.hlsl";
@@ -259,8 +264,12 @@ D3D12Callbacks makeCallbacks()
                 {
                     ID3D12Fence* fence = nullptr;
                     std::uint64_t value = 0;
-                    const bool waited = e.session.takeProducerWait(fence, value);
-                    if (waited)
+                    void* producerQueue = nullptr;
+                    const bool waited = e.session.takeProducerWait(fence, value, producerQueue);
+                    // A wait for a value this same queue will signal later never
+                    // completes: the GPU stops there and the driver resets it.
+                    const bool selfWait = waited && producerQueue != nullptr && producerQueue == q;
+                    if (waited && !selfWait)
                     {
                         q->Wait(fence, value);
                         if (r.log && ReadControls().trace)
@@ -273,6 +282,13 @@ D3D12Callbacks makeCallbacks()
                                          static_cast<unsigned long long>(fence->GetCompletedValue()), q);
                             std::fflush(r.log);
                         }
+                    }
+                    else if (selfWait && r.log && ReadControls().trace)
+                    {
+                        std::fprintf(r.log, "TRACE_WAIT_SKIP producer=%llu completed=%llu queue=%p\n",
+                                     static_cast<unsigned long long>(value),
+                                     static_cast<unsigned long long>(fence->GetCompletedValue()), q);
+                        std::fflush(r.log);
                     }
                     // The marker now describes the queued compose on the GPU, not
                     // the CPU window, so it is written only when one was queued.
@@ -357,6 +373,18 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     {
         r.logAttempted = true;
         const auto path = Util::DllPath().parent_path() / L"OptiScaler.Glass.log";
+        // The step trace is per frame, so the file grows without bound if it is
+        // only ever appended to. Rotate a bounded file once and start fresh.
+        constexpr std::uintmax_t kLogLimit = 32ull * 1024 * 1024;
+        std::error_code sizeError;
+        if (std::filesystem::exists(path, sizeError) && !sizeError &&
+            std::filesystem::file_size(path, sizeError) > kLogLimit && !sizeError)
+        {
+            const auto previous = Util::DllPath().parent_path() / L"OptiScaler.Glass.previous.log";
+            std::error_code rotateError;
+            std::filesystem::remove(previous, rotateError);
+            std::filesystem::rename(path, previous, rotateError);
+        }
         r.log = _wfopen(path.c_str(), L"a");
         if (!r.log)
             r.unavailable = true;
@@ -422,6 +450,82 @@ void RequestPackedDump() noexcept
 {
     dumpRequested.store(true, std::memory_order_release);
 }
+
+bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* featureKey,
+                            const StreamlineFrame& frame) noexcept
+{
+    try
+    {
+        auto& r = runtime();
+        auto controls = ReadControls();
+        if (!controls.active() || !command || !featureKey)
+            return false;
+
+        // Bounded diagnostics: a silent no-op path has to be visible without
+        // letting the log grow without bound.
+        static std::atomic<unsigned> calls { 0 };
+        const auto call = calls.fetch_add(1, std::memory_order_relaxed);
+        const bool report = call < 3 || call % 600 == 0;
+
+        Inputs inputs;
+        inputs.motion = frame.motion;
+        inputs.depth = frame.depth;
+        inputs.color = frame.color;
+        inputs.index = frame.index;
+        inputs.count = frame.count;
+        inputs.reset = frame.reset;
+        inputs.scaleX = frame.scaleX;
+        inputs.scaleY = frame.scaleY;
+        inputs.jitterX = frame.jitterX;
+        inputs.jitterY = frame.jitterY;
+        inputs.clipToPrevious = frame.clipToPrevious;
+        inputs.frame = frame.frame;
+        const bool valid = inputs.valid();
+
+        if (report)
+        {
+            std::lock_guard lock(r.mutex);
+            if (!r.logAttempted)
+            {
+                r.logAttempted = true;
+                r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            }
+            if (r.log)
+            {
+                std::fprintf(r.log,
+                             "SL_FRAME call=%u motion=%p depth=%p color=%p scale=%.4f,%.4f frame=%llu valid=%u\n",
+                             call + 1, static_cast<void*>(frame.motion), static_cast<void*>(frame.depth),
+                             static_cast<void*>(frame.color), frame.scaleX, frame.scaleY,
+                             static_cast<unsigned long long>(frame.frame), valid ? 1u : 0u);
+                std::fflush(r.log);
+            }
+        }
+        if (!valid)
+            return false;
+
+        // Delivery reuses the engine-input write-back path: the composed motion
+        // and depth are copied into the game's own textures, so the frame
+        // generation provider keeps its resources and the unlocker is untouched.
+        controls.packedSubstitute = false;
+        controls.packedWriteBack = true;
+        std::lock_guard lock(r.mutex);
+        auto entry = acquire(r, command, reinterpret_cast<const NVSDK_NGX_Handle*>(featureKey), inputs, controls);
+        if (!entry)
+            return false;
+        const D3D12_RESOURCE_STATES states[3] { frame.motionState, D3D12_RESOURCE_STATE_COMMON, frame.depthState };
+        const auto prepared = entry->session.prepare(command, inputs, states, controls, true);
+        // Record the frame so the NGX path does not correct the same rendered
+        // frame a second time.
+        streamCorrectedFrame.store(frame.frame, std::memory_order_release);
+        (void) prepared;
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 
 void ServiceNativeDiagnostics() noexcept
 {
@@ -527,7 +631,22 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                     std::fprintf(r.log, "NATIVE_TAG ok hits=%llu frame=%llu\n",
                                  static_cast<unsigned long long>(tagHits.load()),
                                  static_cast<unsigned long long>(frame.frame));
-                prepared = entry->session.prepare(command, inputs, states, controls);
+                // The Streamline tag path already wrote the corrected motion into
+                // the engine texture for this frame; substituting again would
+                // blend the object motion over its own result.
+                if (inputs.index == 1 && inputs.frame != UINT64_MAX &&
+                    streamCorrectedFrame.load(std::memory_order_acquire) == inputs.frame)
+                {
+                    if (r.log && controls.trace)
+                    {
+                        std::fprintf(r.log, "NATIVE_HOST skip_duplicate_frame frame=%llu\n",
+                                     static_cast<unsigned long long>(inputs.frame));
+                        std::fflush(r.log);
+                    }
+                    entry->session.bypass(inputs.index);
+                }
+                else
+                    prepared = entry->session.prepare(command, inputs, states, controls);
             }
             else
             {

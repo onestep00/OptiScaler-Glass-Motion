@@ -30,6 +30,10 @@ struct PackedMotionFrame
     // before the packed buffer is read.
     ID3D12Fence* producerFence = nullptr;
     std::uint64_t producerValue = 0;
+    // Queue that carries the producer submission for this frame. Waiting on the
+    // frame generation queue for a value that the same queue will signal later
+    // is a self wait, so the host has to be able to compare the two.
+    void* producerQueue = nullptr;
     explicit operator bool() const { return resource && width && height && frame; }
 };
 

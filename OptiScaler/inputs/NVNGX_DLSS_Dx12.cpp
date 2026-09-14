@@ -15,7 +15,6 @@
 
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/glass/NativeHost.h>
-#include <framegen/glass/NvngxDlssgBridge.h>
 #include "FG/FSR3_Dx12_FG.h"
 #include "FG/Upscaler_Inputs_Dx12.h"
 
@@ -1211,17 +1210,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
 
             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
 
-            NVSDK_NGX_Result result;
-            if (feature == NVSDK_NGX_Feature_FrameGeneration)
-            {
-                // Marks the thread so the nvngx_dlssg detour does not run the
-                // correction a second time on the same evaluation.
-                GlassFg::NativeFgScope nativeScope;
-                result = GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
-                                                  NVNGXProxy::D3D12_EvaluateFeature());
-            }
-            else
-                result = NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
+            NVSDK_NGX_Result result =
+                feature == NVSDK_NGX_Feature_FrameGeneration
+                    ? GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
+                                               NVNGXProxy::D3D12_EvaluateFeature())
+                    : NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
 
             // Neural Rendering runs over what the upscaler just wrote, on the same list, so frame
