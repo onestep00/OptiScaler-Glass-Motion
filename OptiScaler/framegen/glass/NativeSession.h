@@ -1,5 +1,7 @@
 #pragma once
 #include "GlassFgPass.h"
+#include "PackedMotionPass.h"
+#include "PackedMotionCapture.h"
 #include "ComputeRecording.h"
 #include "CommandLifetime.h"
 #include "SurfaceQueueLink.h"
@@ -16,6 +18,8 @@ namespace GlassFg
 class NativeSession
 {
     Pass pass;
+    PackedMotionPass objectPass;
+    PackedMotionProvider objectProvider;
     SurfaceSnapshotPool pool;
     SurfaceQueueLink link;
     ComputeRecording recording;
@@ -31,7 +35,7 @@ class NativeSession
     uint64_t generation = 0, submitted = 0;
     unsigned candidates = 0;
     bool initialized = false, stopped = false, failed = false;
-    bool outputRecording = false, timing = false;
+    bool outputRecording = false, timing = false, objectMode = false;
 
     bool retainProducer(ID3D12GraphicsCommandList* command)
     {
@@ -45,10 +49,15 @@ class NativeSession
         return false;
     }
 
-    void discardRecording(const void* command)
+    void discardRecording(const void* command, bool destroyed = false)
     {
-        pool.discardRecording(command);
-        link.resetCommand(command);
+        if (objectMode)
+            objectProvider.discard(command, destroyed);
+        else
+        {
+            pool.discardRecording(command);
+            link.resetCommand(command);
+        }
         timer.discardRecording(command);
         if (command == fgCommand)
             outputRecording = false;
@@ -59,13 +68,13 @@ class NativeSession
         if (const auto command = fgLifetime.takeDestroyed())
         {
             recording.onMutation(command);
-            discardRecording(command);
+            discardRecording(command, true);
             fgCommand = nullptr;
             stop();
         }
         for (auto& producer : producers)
             if (const auto command = producer.takeDestroyed())
-                discardRecording(command);
+                discardRecording(command, true);
     }
 
   public:
@@ -87,6 +96,25 @@ class NativeSession
             return false;
         }
         timing = timer.initialize(device); // Optional measurement must not disable correction.
+        initialized = true;
+        return true;
+    }
+
+    bool initializePacked(ID3D12Device* device, const D3D12_RESOURCE_DESC (&descs)[3], const wchar_t* shader,
+                          FILE* log, PackedMotionProvider provider)
+    {
+        if (!device || !provider || initialized || completion || stopped || failed)
+            return false;
+        if (!objectPass.initialize(device, descs, shader, log) ||
+            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&completion))))
+        {
+            objectPass.releaseAfterGpuDrain();
+            failed = true;
+            return false;
+        }
+        timing = timer.initialize(device);
+        objectMode = true;
+        objectProvider = provider;
         initialized = true;
         return true;
     }
@@ -127,6 +155,8 @@ class NativeSession
                                   D3D12_RESOURCE_STATES state)
     {
         collectDestroyed();
+        if (objectMode)
+            return false;
         if (!initialized || stopped || failed || !command || !depth ||
             command->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !retainProducer(command))
             return false;
@@ -159,10 +189,11 @@ class NativeSession
                     fgQueue->AddRef();
                 }
             }
-            link.submit(queue, commands[i]);
+            if (!objectMode)
+                link.submit(queue, commands[i]);
             usesOutput |= outputRecording && commands[i] == fgCommand;
         }
-        if (!pool.afterSubmit(queue, count, commands) || !link.healthy())
+        if (!objectMode && (!pool.afterSubmit(queue, count, commands) || !link.healthy()))
             failed = true;
         if (usesOutput)
         {
@@ -183,7 +214,7 @@ class NativeSession
     // this module's own completion signals; they do not establish input order.
     void onSignal(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
     {
-        if (failed || !fence || !link.isProducerQueue(queue))
+        if (objectMode || failed || !fence || !link.isProducerQueue(queue))
             return;
         bool retained = false;
         for (auto entry : nativeFences)
@@ -206,7 +237,7 @@ class NativeSession
     }
     void onWait(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
     {
-        if (!failed && queue == fgQueue)
+        if (!objectMode && !failed && queue == fgQueue)
             link.wait(queue, fence, value);
     }
 
@@ -216,6 +247,29 @@ class NativeSession
         collectDestroyed();
         if (!initialized || stopped || failed || command != fgCommand)
             return {};
+        if (objectMode)
+        {
+            PackedMotionFrame objectFrame;
+            if (inputs.index == 1)
+            {
+                auto ticket = recording.begin(command);
+                const bool fresh = ticket && recording.finish(command, ticket);
+                if (!controls.active() || !inputs.valid() || !fresh)
+                {
+                    objectPass.invalidateHistory();
+                    return {};
+                }
+                const auto description = inputs.motion->GetDesc();
+                objectFrame = objectProvider.acquire(command, static_cast<std::uint32_t>(description.Width),
+                                                     description.Height, inputs.frame, inputs.reset != 0);
+            }
+            auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
+                                               timing ? &timer : nullptr);
+            if (inputs.index == 1 && prepared.motion)
+                command->ClearState(nullptr);
+            outputRecording |= prepared.motion != nullptr;
+            return prepared;
+        }
         if (inputs.index == 1)
         {
             batchSnapshot = {};
@@ -251,7 +305,7 @@ class NativeSession
         return prepared;
     }
 
-    void nativeFailure() { pass.invalidateHistory(); }
+    void nativeFailure() { objectMode ? objectPass.invalidateHistory() : pass.invalidateHistory(); }
     bool accepting()
     {
         collectDestroyed();
@@ -259,6 +313,11 @@ class NativeSession
     }
     void bypass(unsigned index)
     {
+        if (objectMode)
+        {
+            objectPass.invalidateHistory();
+            return;
+        }
         pass.invalidateHistory();
         if (index == 1)
         {
@@ -268,21 +327,34 @@ class NativeSession
         }
     }
     std::optional<GpuTimer::Sample> pollTiming() { return timing ? timer.poll() : std::optional<GpuTimer::Sample> {}; }
-    uint64_t renderedDispatches() const { return pass.renderedDispatches(); }
-    ID3D12Resource* selection() const { return pass.selection(); }
-    ID3D12Resource* failures() { return pass.failures(); }
+    // Live debug channel: recompile the packed compose shader in place.
+    bool reloadPackedShader(const wchar_t* shader, FILE* log)
+    {
+        return objectMode && objectPass.reloadShader(shader, log);
+    }
+    uint64_t renderedDispatches() const
+    {
+        return objectMode ? objectPass.renderedDispatches() : pass.renderedDispatches();
+    }
+    ID3D12Resource* selection() const { return objectMode ? objectPass.selection() : pass.selection(); }
+    ID3D12Resource* failures() { return objectMode ? nullptr : pass.failures(); }
 
     void stop()
     {
         stopped = true;
-        pass.invalidateHistory();
-        pool.retire(newest);
+        if (objectMode)
+            objectPass.invalidateHistory();
+        else
+        {
+            pass.invalidateHistory();
+            pool.retire(newest);
+        }
     }
 
     bool readyToRelease()
     {
         collectDestroyed();
-        if (!stopped || failed || outputRecording || !pool.idle())
+        if (!stopped || failed || outputRecording || (!objectMode && !pool.idle()))
             return false;
         for (const auto& producer : producers)
             if (producer.identity())
@@ -298,8 +370,13 @@ class NativeSession
     // No hidden destructor releases resources still used by a GPU recording.
     void releaseAfterGpuDrain()
     {
-        pass.releaseAfterGpuDrain();
-        pool.releaseAfterGpuDrain();
+        if (objectMode)
+            objectPass.releaseAfterGpuDrain();
+        else
+        {
+            pass.releaseAfterGpuDrain();
+            pool.releaseAfterGpuDrain();
+        }
         timer.releaseAfterGpuDrain();
         for (auto& producer : producers)
             producer.forget();
@@ -318,6 +395,8 @@ class NativeSession
         fgQueue = nullptr;
         completion = nullptr;
         initialized = false;
+        objectMode = false;
+        objectProvider = {};
         stopped = true;
     }
 };

@@ -171,8 +171,10 @@ void* WrapStreamlineCommonFunction(const char* name, void* original)
 }
 
 bool ReadStreamlineStates(const void* feature, unsigned index, unsigned count, ID3D12Resource* const (&resources)[3],
-                          D3D12_RESOURCE_STATES (&states)[3])
+                          D3D12_RESOURCE_STATES (&states)[3], StreamlineInputFrame* frame)
 {
+    if (frame)
+        *frame = {};
     if (!observing.load(std::memory_order_acquire))
         return false;
     TaggedInputs::Tag tags[3];
@@ -193,6 +195,8 @@ bool ReadStreamlineStates(const void* feature, unsigned index, unsigned count, I
     }
     for (unsigned i = 0; i < 3; ++i)
         states[i] = static_cast<D3D12_RESOURCE_STATES>(tags[i].state);
+    if (frame)
+        *frame = { tags[0].frame, tags[0].viewport };
     return true;
 }
 } // namespace GlassFg

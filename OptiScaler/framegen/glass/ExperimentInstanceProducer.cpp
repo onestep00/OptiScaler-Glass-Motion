@@ -152,6 +152,8 @@ void observe(void* owner, void* descriptor, bool linear = false)
         value.frame = row.frame; value.globalStart = row.descriptor.globalStart;
         value.count = row.descriptor.count; value.originalCount = row.originalCount;
         value.ownerSlot = row.ownerSlot; value.linear = row.linear;
+        value.sourceNode = row.sourceOwner.node; value.sourceBuffer = row.sourceOwner.buffer;
+        value.sourceFirst = row.sourceOwner.first; value.sourceGeneration = row.sourceOwner.generation;
         for (unsigned i = 0; i < value.count; ++i) value.indices[i] = static_cast<std::uint16_t>(row.indices[i]);
         try { if (instanceLookup.publish(value)) ++lookupPublished; else ++lookupRejected; }
         catch (...) { ++lookupRejected; }
@@ -259,9 +261,9 @@ bool connectSource()
 }
 // Queried by an explicitly connected replaceable diagnostic, never production FG.
 #ifdef GLASS_INSTANCE_LOOKUP
-extern "C" __declspec(dllexport) std::int32_t GlassInstanceSourceQuery(
+static std::int32_t queryInstanceSource(
     std::uint32_t frame, std::uint64_t mesh, std::uint32_t globalStart, std::uint32_t count,
-    GlassExperimentInstanceSource* result)
+    GlassExperimentInstanceSource* result, GlassExperimentSourceOwner* owner)
 {
     if (!result || result->size != sizeof(*result) || result->version != 1) return -1;
     *result = {};
@@ -275,7 +277,26 @@ extern "C" __declspec(dllexport) std::int32_t GlassInstanceSourceQuery(
     result->originalCount = source.originalCount;
     result->selectedCount = source.count; result->linear = source.linear;
     if (!source.linear) memcpy(result->indices, source.indices.data(), source.count * sizeof(std::uint16_t));
+    if (owner && source.sourceGeneration)
+    {
+        owner->node = source.sourceNode; owner->buffer = source.sourceBuffer;
+        owner->first = source.sourceFirst; owner->count = source.originalCount;
+        owner->generation = source.sourceGeneration;
+    }
     return 1;
+}
+extern "C" __declspec(dllexport) std::int32_t GlassInstanceSourceQuery(
+    std::uint32_t frame, std::uint64_t mesh, std::uint32_t globalStart, std::uint32_t count,
+    GlassExperimentInstanceSource* result)
+{ return queryInstanceSource(frame, mesh, globalStart, count, result, nullptr); }
+
+extern "C" __declspec(dllexport) std::int32_t GlassInstanceSourceQueryV2(
+    std::uint32_t frame, std::uint64_t mesh, std::uint32_t globalStart, std::uint32_t count,
+    GlassExperimentInstanceSourceV2* result)
+{
+    if (!result || result->size != sizeof(*result) || result->version != 2) return -1;
+    *result = {};
+    return queryInstanceSource(frame, mesh, globalStart, count, &result->instance, &result->owner);
 }
 #endif
 extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory)

@@ -59,5 +59,31 @@ int main()
     observe(11);
     store.clear();
     check(!store.read(&feature, 1, 3, native, result));
+    // Resource reuse during MFG must not hide a changed frame/viewport/region.
+    for (unsigned changed = 0; changed < 7; ++changed)
+    {
+        const auto frame = uint64_t(20 + changed);
+        observe(frame);
+        check(store.read(&feature, 1, 3, native, result));
+        Store::Tag tag { &color, frame, 0, 0x400, 0, 0, 64, 32, true };
+        switch (changed)
+        {
+        case 0: ++tag.frame; break;
+        case 1: ++tag.viewport; break;
+        case 2: ++tag.left; break;
+        case 3: ++tag.top; break;
+        case 4: ++tag.width; break;
+        case 5: ++tag.height; break;
+        case 6: tag.valid = false; break;
+        }
+        store.observe(2, tag);
+        check(!store.read(&feature, 2, 3, native, result));
+        check(!store.read(&feature, 3, 3, native, result));
+    }
+    observe(40);
+    check(store.read(&feature, 1, 3, native, result));
+    observe(40); // Re-reading identical tags is allowed; values must stay frozen.
+    check(store.read(&feature, 2, 3, native, result) && result[0].frame == 40);
+    check(store.read(&feature, 3, 3, native, result));
     std::puts("TAGGED_INPUTS fresh_batch=pass phases=pass stale_mixed_invalid=pass lifecycle=pass");
 }

@@ -16,6 +16,7 @@ class TaggedInputs
         uint32_t viewport = 0, state = 0;
         uint32_t left = 0, top = 0, width = 0, height = 0;
         bool valid = false;
+        bool operator==(const Tag&) const = default;
     };
 
   private:
@@ -23,7 +24,7 @@ class TaggedInputs
     std::array<uint64_t, 3> revisions {};
     uint64_t revision = 0, consumed = 0;
     const void* feature = nullptr;
-    std::array<const void*, 3> batch {};
+    std::array<Tag, 3> batch {};
     unsigned next = 0, phases = 0;
 
   public:
@@ -64,7 +65,7 @@ class TaggedInputs
             feature = handle;
             phases = count;
             for (unsigned i = 0; i < 3; ++i)
-                batch[i] = resources[i];
+                batch[i] = tags[order[i]];
         }
         else if (feature != handle || phases != count || next != index)
         {
@@ -74,13 +75,12 @@ class TaggedInputs
         for (unsigned i = 0; i < 3; ++i)
         {
             // Reject changed tags/identities during a generated-frame batch.
-            if (resources[i] != batch[i] || !tags[order[i]].valid || tags[order[i]].resource != batch[i] ||
-                tags[order[i]].state != 0x400)
+            if (resources[i] != batch[i].resource || !(tags[order[i]] == batch[i]))
             {
                 next = 0;
                 return false;
             }
-            result[i] = tags[order[i]];
+            result[i] = batch[i];
         }
         next = index < count ? index + 1 : 0;
         return true;

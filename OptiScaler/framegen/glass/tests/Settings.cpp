@@ -3,6 +3,11 @@
 #include <stdexcept>
 #include <fstream>
 #include "../GlassSettings.cpp"
+namespace GlassFg
+{
+// Headless UI fixture has no game capture owner.
+PackedMotionCaptureStatus ReadPackedMotionCaptureStatus() noexcept { return {}; }
+}
 static std::filesystem::path auditDirectory;
 namespace Util
 {

@@ -408,15 +408,21 @@ extern "C" __declspec(dllexport) std::int32_t GlassSourceOwnerQuery(
     if (!result || result->size != sizeof(*result) || result->version != 1) return -1;
     *result = {};
     if (!sourceReady.load(std::memory_order_acquire) || !sourceHealthy.load(std::memory_order_acquire)) return 0;
+    const auto epoch = lifecycleEpoch.load();
+    if (lifecycleActive.load()) return 0;
     try
     {
         std::lock_guard lock(sourceMutex);
+        if (lifecycleActive.load() || lifecycleEpoch.load() != epoch) return 0;
         const auto owner = sourceOwners.find(proxy, mesh);
         if (!sourceHealthy.load(std::memory_order_acquire) || !owner || !originalCount ||
             owner.source.count != originalCount) return 0;
         result->node = owner.source.node; result->buffer = owner.source.buffer;
         result->first = owner.source.first; result->count = owner.source.count;
         result->generation = owner.generation;
+        // Scalar observation only, not a lease after returning to the caller.
+        if (lifecycleActive.load() || lifecycleEpoch.load() != epoch)
+        { *result = {}; return 0; }
         return 1;
     }
     catch (...)
@@ -469,7 +475,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
 #ifdef GLASS_ARRAY_SOURCE_TRACE
         std::ofstream sources(output / "array-sources.csv");
         sources << "row,caller_rva,kind,flags,steps,node,definition,definition_control,buffer,buffer_control,"
-                   "data,bytes,first,count,packed_count,mask0,mask1,mask2,mask3\n";
+                   "data,bytes,first,count,packed_count,mask0,mask1,mask2,mask3,split_context,split_range,"
+                   "split0,split1,split2,split3,split4,split5,split6,split7\n";
         for (unsigned i = 0; i < count; ++i)
         {
             const auto& row = rows[i]; const auto& s = row.source;
@@ -479,6 +486,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceSave(void*)
                 << s.bytes << ',' << s.first << ',' << s.count << ','
                 << (row.header[13] >= row.header[12] ? (row.header[13] - row.header[12]) / 48 : 0);
             for (const auto mask : s.mask) sources << ',' << mask;
+            sources << ',' << s.splitContext << ',' << s.splitRange;
+            for (const auto span : s.splitSpans) sources << ',' << span;
             sources << '\n';
         }
         sources.close(); if (!sources) return 2;

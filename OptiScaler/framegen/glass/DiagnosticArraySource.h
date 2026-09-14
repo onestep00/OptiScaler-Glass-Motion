@@ -12,6 +12,9 @@ struct DiagnosticArraySource
     std::uint64_t node = 0, definition = 0, definitionControl = 0;
     std::uint64_t buffer = 0, bufferControl = 0, data = 0;
     std::array<std::uint64_t, 4> mask {};
+    // Kind 5 has split input spans, not a shared transform-buffer owner.
+    std::array<std::uint64_t, 8> splitSpans {};
+    std::uint64_t splitContext = 0, splitRange = 0;
     std::uint32_t first = 0, count = 0, bytes = 0, kind = 0, steps = 0, flags = 0;
 };
 
@@ -37,9 +40,45 @@ template<class Read> DiagnosticArraySource ReadDiagnosticArraySource(
     if (!read(result.node + 0x60, definition.data(), 16)) return result;
     result.definition = definition[0]; result.definitionControl = definition[1];
     result.flags |= 1;
-    // The split population route needs a separate layout/lifetime audit. Keep
-    // its node provenance without interpreting resource pointers as mesh ranges.
-    if (result.kind == 5) return result;
+    if (result.kind == 5)
+    {
+        // Audited 3a2038 submission: R15 retains argument 2 and RBX is the
+        // current first/count pair. Read headers only, never transform contents.
+        // This proves invocation-local ordinal layout, not previous-frame data.
+        constexpr std::uint64_t limit = 0x7fffffffffffULL;
+        result.splitContext = caller.R15; result.splitRange = caller.Rbx;
+        auto& spans = result.splitSpans;
+        if (caller.R15 < 0x10000 || caller.R15 > limit - sizeof(spans) ||
+            !read(caller.R15, spans.data(), sizeof(spans))) return result;
+        if (spans[6] < 0x10000 || spans[6] >= spans[7] || spans[7] > limit ||
+            (spans[7] - spans[6]) % 8 || caller.Rbx < spans[6] ||
+            caller.Rbx > spans[7] - 8 || (caller.Rbx - spans[6]) % 8) return result;
+        std::array<std::uint32_t, 2> range {}, rangeAgain {};
+        if (!read(caller.Rbx, range.data(), sizeof(range)) || !range[1]) return result;
+        result.first = range[0]; result.count = range[1];
+        const auto last = std::uint64_t(result.first) + result.count;
+        if (last > UINT32_MAX) return result;
+        constexpr unsigned strides[] {12, 8, 4};
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            const auto lo = spans[i * 2], hi = spans[i * 2 + 1];
+            if (lo < 0x10000 || lo >= hi || hi > limit ||
+                (hi - lo) % strides[i] || last > (hi - lo) / strides[i]) return result;
+        }
+        if (spans[1] - spans[0] > UINT32_MAX) return result;
+        result.data = spans[0]; result.bytes = static_cast<unsigned>(spans[1] - spans[0]);
+        result.flags |= 2;
+        std::array<std::uint64_t, 8> spansAgain {};
+        std::array<std::uint64_t, 2> definitionAgain {};
+        if (!read(caller.R15, spansAgain.data(), sizeof(spansAgain)) || spansAgain != spans ||
+            !read(caller.Rbx, rangeAgain.data(), sizeof(rangeAgain)) || rangeAgain != range ||
+            !read(result.node + 0x60, definitionAgain.data(), 16) || definitionAgain != definition)
+            return result;
+        result.flags |= 8;
+        if (begin >= 0x10000 && begin < end && end <= limit &&
+            end - begin == std::uint64_t(result.count) * 48) result.flags |= 16;
+        return result;
+    }
     if (result.definition < 0x10000 || result.definition > 0x7fffffffffffULL - 0xe8) return result;
     const auto offset = result.kind == 1 ? 0x38u : 0x68u;
     std::array<std::uint64_t, 3> source {}, again {};

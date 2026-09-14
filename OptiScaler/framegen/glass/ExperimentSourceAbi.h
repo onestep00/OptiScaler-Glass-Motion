@@ -27,6 +27,17 @@ struct GlassExperimentInstanceSource
 using GlassExperimentInstanceQuery = std::int32_t (*)(std::uint32_t frame, std::uint64_t mesh,
     std::uint32_t globalStart, std::uint32_t count, GlassExperimentInstanceSource* output);
 
+// Additive diagnostic ABI. owner.generation==0 means source provenance is absent.
+// No old result layout changes; neither version grants temporal validity.
+struct GlassExperimentInstanceSourceV2
+{
+    std::uint32_t size = sizeof(GlassExperimentInstanceSourceV2), version = 2;
+    GlassExperimentInstanceSource instance;
+    GlassExperimentSourceOwner owner;
+};
+using GlassExperimentInstanceQueryV2 = std::int32_t (*)(std::uint32_t frame, std::uint64_t mesh,
+    std::uint32_t globalStart, std::uint32_t count, GlassExperimentInstanceSourceV2* output);
+
 // Borrowed directly from the currently executing native flush. A parent slot
 // and input-array header do not establish child identity or previous motion.
 struct GlassExperimentPacketParent
@@ -40,3 +51,15 @@ using GlassExperimentPacketQuery = std::int32_t (*)(std::uint64_t callsite, std:
     std::uint32_t chunk, std::uint32_t instances, std::uint32_t ordinal,
     std::uint32_t first, std::uint32_t count, std::uint32_t transformIndex,
     std::uint32_t globalRange, GlassExperimentPacketParent* output);
+
+// Same-flush original flags; permits distinguishing grouped selection from
+// linear storage. Does not establish previous transforms or persistent identity.
+struct GlassExperimentPacketParentV2
+{
+    std::uint32_t size = sizeof(GlassExperimentPacketParentV2), version = 2;
+    GlassExperimentPacketParent parent;
+    std::uint32_t instanceFlags = 0, flagsValid = 0;
+};
+using GlassExperimentPacketQueryV2 = std::int32_t (*)(std::uint64_t, std::uint64_t,
+    std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
+    std::uint32_t, std::uint32_t, GlassExperimentPacketParentV2*);

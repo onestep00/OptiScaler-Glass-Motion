@@ -25,6 +25,10 @@ struct Inputs
     unsigned index = 0, count = 0, reset = 0;
     float scaleX = 0, scaleY = 0, jitterX = 0, jitterY = 0;
     std::array<float, 16> clipToPrevious {};
+    // Native Streamline frame domain, independent of the engine render tick.
+    // UINT64_MAX means absent (for example an older replay); never infer it
+    // from a repeated resource address or the multipass interpolation index.
+    std::uint64_t frame = UINT64_MAX;
 
     bool valid() const
     {
@@ -72,7 +76,7 @@ struct Inputs
     {
         return motion == other.motion && color == other.color && depth == other.depth && count == other.count &&
                reset == other.reset && scaleX == other.scaleX && scaleY == other.scaleY && jitterX == other.jitterX &&
-               jitterY == other.jitterY && clipToPrevious == other.clipToPrevious;
+               jitterY == other.jitterY && clipToPrevious == other.clipToPrevious && frame == other.frame;
     }
 };
 

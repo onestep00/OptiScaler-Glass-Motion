@@ -1,13 +1,23 @@
 # Native array source domains
 
 - Created: 2026-09-12
-- Updated: 2026-09-13
+- Updated: 2026-09-14
 - Status: bounded source-range capture and dynamic placeholder layout decoder; temporal correspondence incomplete
 - Deployment: new diagnostic loaded in PID 24404; record/save succeeded with zero array calls; stopped, no MV or FG substitution
 - Deprecated: no
 - Scope: upstream identities of instanced render arrays; not a material whitelist or complete world coverage
 
 ## New resident evidence
+
+Latest source-only change: kind5 now records the audited R15 split input spans
+and RBX first/count pair. It checks range containment, all three input strides,
+output count and repeated headers without reading transform contents. The CSV
+preserves these fields separately from shared-buffer ownership. The scalar and
+actual wrapper/unwind fixtures pass alongside the existing five-test build.
+This diagnostic is not deployed. Cross-frame element lifetime, prior transform
+supply and render N-1 remain unproven; old kind5/flags1 rows remain unadmitted.
+Local build: `work/glass-array-source-live-v1/kind5-build/`. Contract:
+`work/glass-decompile/array-kind5-source-contract.json`.
 
 The compacting producer at RVA `0x579ab8` obtains its definition through
 `0x57a1d4` and checked cast `0x57a1f4`. The cast reads type global `0x342de00`.

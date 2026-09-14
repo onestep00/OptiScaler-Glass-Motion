@@ -8,6 +8,9 @@
 #include "GeometryCommands.h"
 #include "GeometryViews.h"
 #include "GeometryHealth.h"
+#include "PackedMotionCapture.h"
+#include "GlassMotionIdentity.h"
+#include "GlassDebugControl.h"
 #include <Util.h>
 #include <mutex>
 
@@ -19,6 +22,8 @@ void refreshHealth() noexcept
 {
     try
     {
+        // One-second live control poll: no new thread and no per-draw cost.
+        PollGlassDebugControl();
         GeometryCreationStats creation;
         auto health = ReadGeometryHealth();
         if (TryGeometryCreationCounters(creation))
@@ -67,9 +72,15 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 const bool objects = ready && InitializeCyberpunkObjects(GetModuleHandleW(nullptr));
                 const bool draws = objects && InitializeCyberpunkDraws(GetModuleHandleW(nullptr));
                 const bool commands = ready && StartGeometryCommands(device);
-                const bool views = commands && std::filesystem::is_regular_file(directory / L"Glass" / L"experiment-host.enable") &&
-                                   StartGeometryViews(device);
-                if (draws && commands && !StartExperimentHost(device, directory / L"Glass"))
+                // The target-view registry supplies the product view identity and
+                // must not depend on the diagnostic experiment switch.
+                const bool views = commands && StartGeometryViews(device);
+                // The experiment host and the packed object-motion capture share
+                // one capture-owner slot, so the diagnostic host requires its own
+                // explicit opt-in file.
+                const bool experimentCapture =
+                    draws && commands && std::filesystem::is_regular_file(directory / L"Glass" / L"experiment-capture.enable");
+                if (draws && commands && !(experimentCapture && StartExperimentHost(device, directory / L"Glass")))
                     StartGeometryCoverageRecorder(device, compiler, directory / L"Glass" / L"capture-objects.request");
                 GeometryHealth health;
                 health.capabilities = GeometryStarted | (files ? GeometryCompiler : 0u) |
@@ -152,6 +163,44 @@ void ReportGeometryHost(FILE* log) noexcept
                 commands.indirectUnknown);
         if (!creation.cache.lastError.empty())
             fprintf(log, "GEOMETRY_COMPILER last_error=%s\n", creation.cache.lastError.c_str());
+        const auto packed = ReadPackedMotionCaptureStatus();
+        fprintf(log,
+                "GEOMETRY_PACKED initialized=%u healthy=%u registered=%u extent=%ux%u admitted=%llu captured_frames=%llu "
+                "fg_frames=%llu missing_pipeline=%llu unknown_identity=%llu topology_rejected=%llu mapping_overflow=%llu "
+                "history_overflow=%llu slot_busy=%llu ordering_rejected=%llu no_fg_frame=%llu no_fg_queue=%llu "
+                "packed_ready=%llu packed_rejected=%llu\n",
+                packed.initialized, packed.healthy, packed.registered, packed.width, packed.height,
+                packed.admittedDraws, packed.capturedFrames, packed.fgFrames, packed.missingPipeline,
+                packed.unknownIdentity, packed.topologyRejected, packed.mappingOverflow, packed.historyOverflow,
+                packed.slotBusy, packed.orderingRejected, packed.noFgFrame, packed.noFgQueue,
+                creation.cache.packedReady, creation.cache.packedRejected);
+        fprintf(log,
+                "GEOMETRY_PACKED_SPLIT unknown_owner_span=%llu unknown_resolve=%llu unknown_owner_mismatch=%llu "
+                "unknown_field_mismatch=%llu unknown_no_array_generation=%llu raster_rejected=%llu shape_rejected=%llu "
+                "viewport_rejected=%llu\n",
+                packed.unknownOwnerSpan, packed.unknownResolve, packed.unknownOwnerMismatch,
+                packed.unknownFieldMismatch, packed.unknownNoArrayGeneration, packed.rasterRejected,
+                packed.shapeRejected, packed.viewportRejected);
+        if (!creation.cache.lastPackedError.empty())
+            fprintf(log, "GEOMETRY_PACKED_ERROR last_error=%s\n", creation.cache.lastPackedError.c_str());
+        const auto identity = ReadGlassMotionIdentityStats();
+        fprintf(log,
+                "GEOMETRY_IDENTITY resolved=%llu rejected=%llu no_owner=%llu no_view=%llu no_lifetime=%llu "
+                "no_element_index=%llu\n",
+                identity.resolved, identity.rejected, identity.noOwner, identity.noView, identity.noLifetime,
+                identity.noElementIndex);
+        fprintf(log,
+                "GEOMETRY_PARENT no_flag=%llu no_entry=%llu no_ticket=%llu no_slot=%llu no_mesh=%llu "
+                "no_header=%llu no_selection=%llu seeded=%llu\n",
+                packets.parentNoFlag, packets.parentNoEntry, packets.parentNoTicket, packets.parentNoSlot,
+                packets.parentNoMesh, packets.parentNoHeader, packets.parentNoSelection, packets.parentSeeded);
+        fprintf(log, "GEOMETRY_CHUNKS unknown=");
+        for (const auto& entry : packed.unknownChunks)
+            if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
+        std::fprintf(log, " topology=");
+        for (const auto& entry : packed.topologyChunks)
+            if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
+        std::fprintf(log, "\n");
     }
     catch (...)
     {

@@ -1,0 +1,259 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#include <d3d12.h>
+#include <wrl/client.h>
+#include <DirectXPackedVector.h>
+#include "../PackedMotionGpu.h"
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+using DirectX::PackedVector::HALF;
+
+static void require(bool value, const char* message)
+{
+    if (!value) throw std::runtime_error(message);
+}
+static void checked(HRESULT value, const char* message) { require(SUCCEEDED(value), message); }
+
+static ComPtr<ID3D12Resource> buffer(ID3D12Device* device, UINT64 bytes, D3D12_HEAP_TYPE type,
+                                    D3D12_RESOURCE_STATES state,
+                                    D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE)
+{
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = type;
+    D3D12_RESOURCE_DESC description {};
+    description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    description.Width = bytes;
+    description.Height = 1;
+    description.DepthOrArraySize = 1;
+    description.MipLevels = 1;
+    description.SampleDesc.Count = 1;
+    description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    description.Flags = flags;
+    ComPtr<ID3D12Resource> result;
+    checked(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description, state, nullptr,
+                                            IID_PPV_ARGS(&result)), "buffer");
+    return result;
+}
+
+static ComPtr<ID3D12Resource> texture(ID3D12Device* device, DXGI_FORMAT format)
+{
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC description {};
+    description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    description.Width = 32;
+    description.Height = 20;
+    description.DepthOrArraySize = 1;
+    description.MipLevels = 1;
+    description.SampleDesc.Count = 1;
+    description.Format = format;
+    ComPtr<ID3D12Resource> result;
+    checked(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                            IID_PPV_ARGS(&result)), "texture");
+    return result;
+}
+
+static void transition(ID3D12GraphicsCommandList* command, ID3D12Resource* resource,
+                       D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+{
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = { resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after };
+    command->ResourceBarrier(1, &barrier);
+}
+
+static void drain(ID3D12Device* device, ID3D12CommandQueue* queue)
+{
+    ComPtr<ID3D12Fence> fence;
+    checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "fence");
+    checked(queue->Signal(fence.Get(), 1), "signal");
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    require(event != nullptr, "event");
+    checked(fence->SetEventOnCompletion(1, event), "event completion");
+    require(WaitForSingleObject(event, 15000) == WAIT_OBJECT_0, "timeout");
+    CloseHandle(event);
+    checked(device->GetDeviceRemovedReason(), "device removed");
+}
+
+static UINT64 pack(float depth, bool reverse, int mx, int my, unsigned alpha, unsigned id)
+{
+    const auto depthBits = static_cast<unsigned>(std::clamp(depth, 0.f, 1.f) * 262143.f);
+    const auto depthKey = reverse ? depthBits : 262143u - depthBits;
+    return (UINT64(depthKey) << 46) | (UINT64(unsigned(mx) & 0x7ffu) << 35) |
+           (UINT64(unsigned(my) & 0x7ffu) << 24) | (UINT64(alpha & 0xffu) << 16) |
+           (reverse ? 0x8000u : 0u) | (id & 0x7fffu);
+}
+
+int wmain(int argc, wchar_t** argv)
+{
+    try
+    {
+        require(argc == 2, "shader path required");
+        constexpr unsigned Width = 32, Height = 20;
+        ComPtr<ID3D12Device> device;
+        checked(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "device");
+        D3D12_COMMAND_QUEUE_DESC queueDescription {};
+        ComPtr<ID3D12CommandQueue> queue;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> command;
+        checked(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)), "queue");
+        checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "allocator");
+        checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                          IID_PPV_ARGS(&command)), "command");
+
+        auto motion = texture(device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        auto depth = texture(device.Get(), DXGI_FORMAT_R32_TYPELESS);
+        // Known nonzero background, including auxiliary MV channels. Fresh GPU
+        // allocations are not valid evidence that fallback preserves its input.
+        const std::array<float, 4> background { -.03125f, .025f, .375f, .75f };
+        constexpr float backgroundDepth = .6f;
+        std::array<ComPtr<ID3D12Resource>, 2> inputUploads;
+        for (unsigned i = 0; i < inputUploads.size(); ++i)
+        {
+            auto* target = i ? depth.Get() : motion.Get();
+            auto description = target->GetDesc();
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};
+            UINT64 bytes = 0;
+            device->GetCopyableFootprints(&description, 0, 1, 0, &fp, nullptr, nullptr, &bytes);
+            inputUploads[i] = buffer(device.Get(), bytes, D3D12_HEAP_TYPE_UPLOAD,
+                                     D3D12_RESOURCE_STATE_GENERIC_READ);
+            void* destination = nullptr;
+            checked(inputUploads[i]->Map(0, nullptr, &destination), "input map");
+            std::memset(destination, 0, size_t(bytes));
+            for (unsigned y = 0; y < Height; ++y)
+                for (unsigned x = 0; x < Width; ++x)
+                {
+                    auto* row = static_cast<std::byte*>(destination) + fp.Offset + y * fp.Footprint.RowPitch;
+                    if (i) reinterpret_cast<float*>(row)[x] = backgroundDepth;
+                    else for (unsigned c = 0; c < 4; ++c)
+                        reinterpret_cast<HALF*>(row)[x * 4 + c] =
+                            DirectX::PackedVector::XMConvertFloatToHalf(background[c]);
+                }
+            inputUploads[i]->Unmap(0, nullptr);
+            D3D12_TEXTURE_COPY_LOCATION source {}, destinationLocation {};
+            source.pResource = inputUploads[i].Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            source.PlacedFootprint = fp;
+            destinationLocation.pResource = target;
+            destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            command->CopyTextureRegion(&destinationLocation, 0, 0, 0, &source, nullptr);
+        }
+        std::vector<UINT64> packedData(Width * Height);
+        for (unsigned y = 4; y < 16; ++y)
+            for (unsigned x = 4; x < 16; ++x)
+                packedData[y * Width + x] = pack(.8f, true, 16, -8, 128, 1);
+        for (unsigned y = 5; y < 15; ++y)
+            for (unsigned x = 20; x < 29; ++x)
+                packedData[y * Width + x] = pack(.3f, false, -24, 8, 64, 2);
+        auto packedUpload = buffer(device.Get(), packedData.size() * sizeof(UINT64), D3D12_HEAP_TYPE_UPLOAD,
+                                   D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto packed = buffer(device.Get(), packedData.size() * sizeof(UINT64), D3D12_HEAP_TYPE_DEFAULT,
+                             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        void* mapped = nullptr;
+        checked(packedUpload->Map(0, nullptr, &mapped), "packed map");
+        std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
+        packedUpload->Unmap(0, nullptr);
+        command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
+        transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+
+        GlassFg::PackedMotionGpu gpu;
+        require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), argv[1], stdout), "initialize");
+        GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
+        require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
+                             { true, 50, false, 2 }), "dispatch");
+
+        std::array<ID3D12Resource*, 3> outputs { gpu.motionOutput(), gpu.depthOutput(), gpu.selectionOutput() };
+        std::array<D3D12_RESOURCE_STATES, 3> states { D3D12_RESOURCE_STATE_COPY_DEST,
+                                                     D3D12_RESOURCE_STATE_COPY_DEST,
+                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE };
+        std::array<ComPtr<ID3D12Resource>, 3> reads;
+        std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 3> footprints {};
+        for (unsigned i = 0; i < outputs.size(); ++i)
+        {
+            UINT64 bytes = 0;
+            auto description = outputs[i]->GetDesc();
+            device->GetCopyableFootprints(&description, 0, 1, 0, &footprints[i], nullptr, nullptr, &bytes);
+            reads[i] = buffer(device.Get(), bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+            transition(command.Get(), outputs[i], states[i], D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION source {}, destination {};
+            source.pResource = outputs[i];
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.pResource = reads[i].Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = footprints[i];
+            command->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        checked(command->Close(), "close");
+        ID3D12CommandList* lists[] { command.Get() };
+        queue->ExecuteCommandLists(1, lists);
+        drain(device.Get(), queue.Get());
+
+        std::array<void*, 3> data {};
+        for (unsigned i = 0; i < reads.size(); ++i)
+            checked(reads[i]->Map(0, nullptr, &data[i]), "read map");
+        const auto motionAt = [&](unsigned x, unsigned y, unsigned component)
+        {
+            auto* row = reinterpret_cast<const HALF*>(static_cast<const std::byte*>(data[0]) +
+                                                      y * footprints[0].Footprint.RowPitch);
+            return DirectX::PackedVector::XMConvertHalfToFloat(row[x * 4 + component]);
+        };
+        const auto depthAt = [&](unsigned x, unsigned y)
+        {
+            auto* row = reinterpret_cast<const float*>(static_cast<const std::byte*>(data[1]) +
+                                                       y * footprints[1].Footprint.RowPitch);
+            return row[x];
+        };
+        const auto selectionAt = [&](unsigned x, unsigned y)
+        {
+            auto* row = reinterpret_cast<const HALF*>(static_cast<const std::byte*>(data[2]) +
+                                                      y * footprints[2].Footprint.RowPitch);
+            return DirectX::PackedVector::XMConvertHalfToFloat(row[x]);
+        };
+        require(motionAt(1, 1, 0) == background[0] && depthAt(1, 1) == backgroundDepth &&
+                selectionAt(1, 1) == 0, "background changed");
+        require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f &&
+                std::abs(motionAt(4, 8, 1) + .05f) < .001f && std::abs(depthAt(4, 8) - .8f) < .001f &&
+                selectionAt(4, 8) > .99f, "reverse-depth edge mismatch");
+        const float weight = (128.f / 255.f) * .5f;
+        require(std::abs(motionAt(10, 10, 0) - (background[0] * (1 - weight) + .0625f * weight)) < .001f &&
+                std::abs(motionAt(10, 10, 1) - (background[1] * (1 - weight) - .05f * weight)) < .001f &&
+                depthAt(10, 10) == backgroundDepth,
+                "weighted interior mismatch");
+        require(std::abs(motionAt(20, 9, 0) + .09375f) < .001f &&
+                std::abs(depthAt(20, 9) - .3f) < .001f, "forward-depth edge mismatch");
+        for (unsigned y = 0; y < Height; ++y)
+            for (unsigned x = 0; x < Width; ++x)
+            {
+                require(motionAt(x, y, 2) == background[2] && motionAt(x, y, 3) == background[3],
+                        "auxiliary motion channels changed");
+                if (packedData[y * Width + x]) continue;
+                require(motionAt(x, y, 0) == background[0] &&
+                        motionAt(x, y, 1) == DirectX::PackedVector::XMConvertHalfToFloat(
+                            DirectX::PackedVector::XMConvertFloatToHalf(background[1])) &&
+                        depthAt(x, y) == backgroundDepth && selectionAt(x, y) == 0,
+                        "outside coverage changed");
+            }
+        for (auto& read : reads) read->Unmap(0, nullptr);
+        gpu.releaseAfterGpuDrain();
+        std::puts("PACKED_MOTION_GPU_OK background_preserved=1 exact_inner_edge=1 weighted_interior=1 "
+                  "forward_depth=1 reverse_depth=1 passes=1");
+        return 0;
+    }
+    catch (const std::exception& error)
+    {
+        std::fprintf(stderr, "FAILED %s\n", error.what());
+        return 1;
+    }
+}

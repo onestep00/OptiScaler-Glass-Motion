@@ -33,7 +33,9 @@ bool candidate(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool vertexOnly)
            (vertexOnly || ((!d.DepthStencilState.DepthEnable || d.DepthStencilState.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ZERO) &&
            (!d.DepthStencilState.StencilEnable || !d.DepthStencilState.StencilWriteMask ||
             (keep(d.DepthStencilState.FrontFace) && keep(d.DepthStencilState.BackFace))) &&
-           tryMaterialCaptureBlend(d.BlendState, MaterialCapture::SourceColor, ignored)));
+           (tryMaterialCaptureBlend(d.BlendState, MaterialCapture::SourceColor, ignored, true) ||
+            (d.BlendState.RenderTarget[0].BlendEnable && !d.BlendState.RenderTarget[0].LogicOpEnable &&
+             d.BlendState.RenderTarget[0].RenderTargetWriteMask))));
 }
 } // namespace
 
@@ -109,11 +111,31 @@ struct GeometryPipelineCache::Impl
                     if (work.root->result)
                     {
                         auto& entry = *work.entry;
-                        status = entry.vertexOnlyCapture
-                            ? compiler.createVertexCapture(device.Get(), *work.root->result, entry.description,
-                                                           entry.instrumented, error)
-                            : compiler.create(device.Get(), *work.root->result, entry.description,
-                                              entry.instrumented, error);
+                        if (entry.vertexOnlyCapture)
+                            status = compiler.createVertexCapture(device.Get(), *work.root->result, entry.description,
+                                                                  entry.instrumented, error);
+                        else
+                        {
+                            std::string packedError;
+                            const auto materialStatus = compiler.create(device.Get(), *work.root->result,
+                                                                         entry.description, entry.instrumented, error);
+                            const auto packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,
+                                                                                   entry.description, entry.packed,
+                                                                                   packedError);
+                            {
+                                std::lock_guard lock(mutex);
+                                if (SUCCEEDED(packedStatus))
+                                    ++counters.packedReady;
+                                else
+                                {
+                                    ++counters.packedRejected;
+                                    counters.lastPackedError = packedError;
+                                }
+                            }
+                            status = SUCCEEDED(materialStatus) || SUCCEEDED(packedStatus) ? S_OK : packedStatus;
+                            if (FAILED(status) && !packedError.empty())
+                                error = packedError;
+                        }
                         if (SUCCEEDED(status))
                         {
                             entry.root = work.root->result;

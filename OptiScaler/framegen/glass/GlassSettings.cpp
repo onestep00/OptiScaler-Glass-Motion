@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GlassControls.h"
 #include "GeometryHealth.h"
+#include "PackedMotionCapture.h"
 #include <Util.h>
 #include <SimpleIni.h>
 #include <imgui/imgui.h>
@@ -35,7 +36,10 @@ bool load()
     const auto strength = ini.GetLongValue("GlassFG", "Strength", 100);
     controls.store(Controls { ini.GetBoolValue("GlassFG", "Enabled", false),
                               static_cast<unsigned>(std::clamp(strength, 0L, 100L)),
-                              ini.GetBoolValue("GlassFG", "MeasureGpuTime", true) }
+                              ini.GetBoolValue("GlassFG", "MeasureGpuTime", true),
+                              static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "EdgeWidth", 2), 1L, 4L)),
+                              ini.GetBoolValue("GlassFG", "PackedDispatch", true),
+                              static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "PackedRows", 240), 1L, 32768L)) }
                        .packed(),
                    std::memory_order_relaxed);
     return true;
@@ -52,6 +56,9 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "Enabled", value.enabled);
     ini.SetLongValue("GlassFG", "Strength", std::min(value.strength, 100u));
     ini.SetBoolValue("GlassFG", "MeasureGpuTime", value.measureGpuTime);
+    ini.SetLongValue("GlassFG", "EdgeWidth", std::clamp(value.edgeWidth, 1u, 4u));
+    ini.SetBoolValue("GlassFG", "PackedDispatch", value.packedDispatch);
+    ini.SetLongValue("GlassFG", "PackedRows", std::clamp(value.packedRows, 1u, 32768u));
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -71,7 +78,7 @@ void WriteControls(Controls value)
 {
     auto previous = ReadControls();
     if (previous.measureGpuTime != value.measureGpuTime || previous.enabled != value.enabled ||
-        previous.strength != value.strength)
+        previous.strength != value.strength || previous.edgeWidth != value.edgeWidth)
         latestMilliseconds.store(-1.0, std::memory_order_relaxed);
     controls.store(value.packed(), std::memory_order_relaxed);
 }
@@ -102,9 +109,25 @@ void RenderSettings()
     changed |= ImGui::SliderInt("Correction strength", &strength, 0, 100, "%d%%");
     value.strength = static_cast<unsigned>(strength);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Lower values require stronger surface evidence and correct fewer regions.\n"
-                          "0%% bypasses correction. 100%% uses the validated candidate thresholds.\n"
-                          "Surface and background motion vectors are not averaged.");
+        ImGui::SetTooltip("Scales the exact material opacity used for object motion inside the edge.\n"
+                          "The selected edge always uses exact object motion while correction is enabled.");
+    int edgeWidth = static_cast<int>(value.edgeWidth);
+    changed |= ImGui::SliderInt("Object edge width", &edgeWidth, 1, 4, "%d px");
+    value.edgeWidth = static_cast<unsigned>(edgeWidth);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Applies exact object motion and surface depth to this many pixels inside each visible object edge.");
+    bool packedDispatch = value.packedDispatch;
+    changed |= ImGui::Checkbox("Packed object-motion dispatch", &packedDispatch);
+    value.packedDispatch = packedDispatch;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Runs the packed object-motion compose pass that feeds object motion into the FG inputs.\n"
+                          "Disable it to isolate driver or stability issues.");
+    int packedRows = static_cast<int>(value.packedRows);
+    changed |= ImGui::SliderInt("Packed dispatch rows", &packedRows, 1, 1440, "%d rows");
+    value.packedRows = static_cast<unsigned>(packedRows);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Safety limit: only the top rows receive the packed correction.\n"
+                          "Raise it after a clean run; the rest keeps the original motion.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);
@@ -140,7 +163,7 @@ void RenderSettings()
         switch (runtimeStatus.load(std::memory_order_relaxed))
         {
         case RuntimeStatus::Correcting:
-            ImGui::TextWrapped("Static-surface correction active (experimental).");
+            ImGui::TextWrapped("Engine-object motion correction active (experimental).");
             break;
         case RuntimeStatus::Unavailable:
             ImGui::TextWrapped("Correction unavailable for this session. See OptiScaler.Glass.log.");
@@ -187,11 +210,22 @@ void RenderSettings()
     ImGui::Text("Object MV captures: %llu; FG input replacements: %llu",
                 static_cast<unsigned long long>(health.counts[GeometryCaptureDraws]),
                 static_cast<unsigned long long>(health.counts[GeometryFgReplacements]));
+    const auto packed = ReadPackedMotionCaptureStatus();
+    ImGui::Text("Packed object path: %s; draws %llu; frames %llu; FG frames %llu",
+                !packed.initialized ? "not initialized" : packed.healthy ? "healthy" : "failed",
+                static_cast<unsigned long long>(packed.admittedDraws),
+                static_cast<unsigned long long>(packed.capturedFrames),
+                static_cast<unsigned long long>(packed.fgFrames));
+    ImGui::Text("Skipped: pipeline %llu; identity %llu; topology %llu; capacity %llu; ordering %llu",
+                static_cast<unsigned long long>(packed.missingPipeline),
+                static_cast<unsigned long long>(packed.unknownIdentity),
+                static_cast<unsigned long long>(packed.topologyRejected),
+                static_cast<unsigned long long>(packed.mappingOverflow + packed.historyOverflow + packed.slotBusy),
+                static_cast<unsigned long long>(packed.orderingRejected));
     if (health.sampledMs && now >= health.sampledMs)
         ImGui::TextDisabled("Report %.1f s ago; engine frame %u", (now - health.sampledMs) / 1000.0, health.frame);
     ImGui::TextDisabled("UI samples once per second without waiting. Paused/menu scenes can stop progress.");
-    ImGui::TextWrapped(
-        "A working hook does not prove object MV is applied. This build still lacks the object capture/FG producer.");
+    ImGui::TextWrapped("Healthy capture and a rising FG frame count confirm the object buffer reached the FG correction pass.");
     ImGui::TextDisabled("Details: OptiScaler.Glass.log / OptiScaler.Glass.Geometry.log");
     ImGui::BeginDisabled();
     bool preview = false;

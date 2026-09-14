@@ -72,6 +72,9 @@ int main()
             lookup.proxy == reinterpret_cast<std::uint64_t>(proxyData.data()) && lookup.indices[0] == 39 && lookup.indices[39] == 0 &&
             lookup.renderer == header[0] && lookup.scene == header[2] && lookup.originalCount == 40);
     require(GlassInstanceSourceQuery(testTick + 1, mesh, start, count, &lookup) == 0);
+    GlassExperimentInstanceSourceV2 extended;
+    require(GlassInstanceSourceQueryV2(testTick, mesh, start, count, &extended) == 1 &&
+            !extended.owner.generation && extended.instance.indices[0] == 39);
     require(GlassInstanceSourceQuery(testTick, mesh, start, count - 1, &lookup) == 0);
     GlassFg::DiagnosticInstanceSource duplicate;
     require(instanceLookup.query(testTick, mesh, start, count, duplicate));
@@ -109,10 +112,33 @@ int main()
     scope.sourceChecked = false; scope.sourceOwner = {}; sourceMode = 2;
     observe(proxyData.data(), &linearDescriptor, true);
     require(used == 7 && sourceQueries == 3 && !rows[6].sourceOwner.generation);
-    current = nullptr; enabled = false;
+    current = nullptr; sourceMode = 0; ++testTick;
+    require(outer(proxyData.data(), groupData.data(), header.data(), 1) == 19);
+    require(GlassInstanceSourceQueryV2(testTick, mesh, start, count, &extended) == 1 &&
+            extended.owner.node == 0x40000 && extended.owner.buffer == 0x50000 &&
+            extended.owner.first == 107 && extended.owner.count == 40 && extended.owner.generation == 17 &&
+            extended.owner.first + extended.instance.indices[0] == 146 &&
+            extended.owner.first + extended.instance.indices[39] == 107);
+    require(GlassInstanceSourceQuery(testTick, mesh, start, count, &lookup) == 1 &&
+            lookup.indices[0] == extended.instance.indices[0]);
+    require(GlassInstanceSourceQueryV2(testTick+1, mesh, start, count, &extended) == 0 && !extended.owner.generation);
+    extended.version = 1;
+    require(GlassInstanceSourceQueryV2(testTick, mesh, start, count, &extended) == -1);
+    extended = {};
+    require(instanceLookup.query(testTick, mesh, start, count, duplicate));
+    auto partial = duplicate; partial.sourceBuffer = 0;
+    require(!instanceLookup.publish(partial));
+    auto overflowed = duplicate; overflowed.sourceFirst = UINT32_MAX;
+    require(!instanceLookup.publish(overflowed));
+    ++duplicate.sourceGeneration;
+    require(!instanceLookup.publish(duplicate));
+    require(GlassInstanceSourceQueryV2(testTick, mesh, start, count, &extended) == 0 && !extended.owner.generation);
+    enabled = false;
     std::cout << "PASS current_group_direct=1 wrong_caller_rejected=1 nested_scope=1 consumed_once=1 "
                  "frame_mismatch_rejected=1 original_return_preserved=1 linear_source=1 "
                  "no_missing_group_fallback=1 malformed_linear_rejected=1 source_query_once=1 "
                  "source_mismatch_rejected=1 source_exception_contained=1 direct_lookup=1 "
-                 "lookup_frame_count_bounds=1 ambiguous_scene_rejected=1 game_hooks_installed=0\n";
+                 "lookup_frame_count_bounds=1 ambiguous_scene_rejected=1 source_v2_roundtrip=1 "
+                 "legacy_v1_preserved=1 absent_source_explicit=1 source_generation_conflict_rejected=1 "
+                 "source_bounds_rejected=1 game_hooks_installed=0\n";
 }

@@ -40,6 +40,14 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCoverageRecorder.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryHealth.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionCapture.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GlassMotionIdentity.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GlassDebugControl.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionGpu.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionPass.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)PackedMotionCapture.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GlassMotionIdentity.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GlassDebugControl.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCommands.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryObjectRegistry.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkObjects.h" />
@@ -80,16 +88,17 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)SurfaceSnapshotPool.h" />
     <None Include="$(MSBuildThisFileDirectory)GlassSurface.hlsl" />
     <None Include="$(MSBuildThisFileDirectory)GlassRegion.hlsl" />
+    <None Include="$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl" />
   </ItemGroup>
   <Target Name="CopyGlassShaders" AfterTargets="Build">
     <MakeDir Directories="$(TargetDir)Glass" />
-    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl"
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl;$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <!-- Upstream moves the Release DLL into a/ before packaging. -->
     <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
-    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl"
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl;$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
           DestinationFolder="$(SolutionDir)x64\Release\a\Glass" SkipUnchangedFiles="true"
           Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"

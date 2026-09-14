@@ -33,6 +33,11 @@ void checkFlush()
         require(value.proxy == reinterpret_cast<uint64_t>(proxy.data()) && value.slot == 4 && value.arrayCount == 40 &&
                 value.sourceArray == 0x50000 && value.arrayGlobalStart == 20 && value.first == 0 && value.count == 2);
         ++accepted;
+        GlassExperimentPacketParentV2 extended;
+        require(GlassPacketParentQueryV2(drawReturn, geometry.mesh, 7, 2, 0, 0, 2, 30, 1, &extended)==1);
+        require(extended.flagsValid==1 && extended.instanceFlags==0x2000 && extended.parent.proxy==value.proxy);
+        extended.version=1;
+        require(GlassPacketParentQueryV2(drawReturn, geometry.mesh, 7, 2, 0, 0, 2, 30, 1, &extended)==-1);
     }
     require(GlassPacketParentQuery(drawReturn, geometry.mesh, 7, 2, 1, 0, 2, 30, 1, &value) == 0);
     require(GlassPacketParentQuery(drawReturn, geometry.mesh, 7, 2, 0, 0, 2, 31, 1, &value) == 0);
@@ -58,6 +63,7 @@ int main(int argc, char** argv)
         put(proxy.data(), 0x98, uint32_t(4)); put(proxy.data(), 0xd8, uint64_t(0x90000));
         put(proxy.data(), 0x108, uint64_t(0x50000)); put(proxy.data(), 0x110, uint32_t(40));
         put(proxy.data(), 0x114, uint32_t(20));
+        put(proxy.data(), 0xea, uint16_t(0x2000));
         rendererGlobal = reinterpret_cast<uint64_t>(&root); drawReturn = 0x123456;
         geometry.mesh = 0x90000; geometry.chunk = 7;
         context.geometry = reinterpret_cast<uint64_t>(&geometry);

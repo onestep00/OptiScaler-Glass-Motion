@@ -739,3 +739,13 @@ Do not replace the source index with `globalNodeID`: all members of one node
 would then share a history. Node lifecycle plus original element index remains
 the candidate for these arrays. Compacted dynamic source paths and particles
 still require their own original identity/lifetime supply. No game DLL changed.
+
+`GeometryInstances --source-history` subsequently uses the actual bounded source
+table and history cache to populate GPU instance mappings, instead of the fixture's
+fixed history addresses. Three deforming/perspective objects rotate draw slots
+each frame; array replacement, missing input and recovery remain explicit cases.
+Eight independent-device frames preserved 143,360 original color pixels and
+validated 3,241 motion pixels against original-VS stream output, with maximum
+error 0.001687952 pixels. This is fixture-owned identity, not live engine source
+generation, production queue lifetime or FG output validation. The source mode
+is in the working tree and the standard geometry build script.

@@ -54,6 +54,8 @@ struct GeometryDrawCaptureOwner
     virtual void finish(ID3D12GraphicsCommandList*, bool recorded) noexcept = 0;
     virtual void submitted(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept {}
     virtual void discarded(ID3D12GraphicsCommandList*) noexcept {}
+    virtual void signal(ID3D12CommandQueue*, ID3D12Fence*, UINT64) noexcept {}
+    virtual void wait(ID3D12CommandQueue*, ID3D12Fence*, UINT64) noexcept {}
     // Runs before the real queue submission under the host's submission lock.
     // An owner must independently validate recording identity and buffer lifetime.
     // This callback does not establish barriers or cross-queue dependencies.
@@ -63,4 +65,6 @@ struct GeometryDrawCaptureOwner
 };
 void NotifyGeometryCaptureSubmit(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
 void NotifyGeometryCaptureBeforeSubmit(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
+void NotifyGeometryCaptureSignal(ID3D12CommandQueue*, ID3D12Fence*, UINT64) noexcept;
+void NotifyGeometryCaptureWait(ID3D12CommandQueue*, ID3D12Fence*, UINT64) noexcept;
 } // namespace GlassFg

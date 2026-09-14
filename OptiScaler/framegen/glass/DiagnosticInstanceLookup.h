@@ -11,6 +11,8 @@ struct DiagnosticInstanceSource
     std::uint64_t proxy = 0, mesh = 0, renderer = 0, scene = 0;
     std::uint32_t frame = 0, globalStart = 0, count = 0, originalCount = 0, ownerSlot = 0;
     bool linear = false;
+    std::uint64_t sourceNode = 0, sourceBuffer = 0;
+    std::uint32_t sourceFirst = 0, sourceGeneration = 0;
     std::array<std::uint16_t, 64> indices {};
     bool operator==(const DiagnosticInstanceSource&) const = default;
 };
@@ -31,6 +33,9 @@ template<unsigned Sets = 1024, unsigned Ways = 4> class DiagnosticInstanceLookup
   public:
     bool publish(const DiagnosticInstanceSource& source)
     {
+        const bool hasSource = source.sourceNode || source.sourceBuffer || source.sourceFirst || source.sourceGeneration;
+        if (hasSource && (!source.sourceNode || !source.sourceBuffer || !source.sourceGeneration ||
+            std::uint64_t(source.sourceFirst) + source.originalCount > (std::uint64_t {1} << 32))) return false;
         if (!source.frame || !source.proxy || !source.mesh || !source.renderer || !source.scene ||
             !source.count || !source.originalCount || source.originalCount > 65536 ||
             source.count > source.originalCount || (!source.linear && source.count > source.indices.size()) ||

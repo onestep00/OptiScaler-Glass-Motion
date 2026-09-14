@@ -32,6 +32,10 @@ struct CyberpunkDrawStatus
 {
     bool active = false;
     std::uint64_t batches = 0, appends = 0, identities = 0, draws = 0, rejected = 0;
+    // Why an array span could not receive a verified owner (proxy) identity.
+    std::uint64_t parentNoFlag = 0, parentNoEntry = 0, parentNoTicket = 0, parentNoSlot = 0;
+    std::uint64_t parentNoMesh = 0, parentNoHeader = 0, parentNoSelection = 0;
+    std::uint64_t parentSeeded = 0;
 };
 CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept;
 } // namespace GlassFg

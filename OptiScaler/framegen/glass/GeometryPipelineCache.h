@@ -10,7 +10,7 @@ namespace GlassFg
 struct GeometryPipelineEntry
 {
     std::shared_ptr<const GeometryRoot> root;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> original, instrumented;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> original, instrumented, packed;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
     std::uint64_t identity = 0;
     bool vertexOnlyCapture = false;
@@ -26,7 +26,8 @@ struct GeometryCacheLimits
 struct GeometryCacheStats
 {
     std::uint64_t roots = 0, pipelines = 0, ready = 0, rejected = 0, pending = 0, retainedBytes = 0;
-    std::string lastError;
+    std::uint64_t packedReady = 0, packedRejected = 0;
+    std::string lastError, lastPackedError;
 };
 
 // Captures successful public creation calls, then builds the paired shaders on

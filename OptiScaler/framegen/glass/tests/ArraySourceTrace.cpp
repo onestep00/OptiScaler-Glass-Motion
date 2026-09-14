@@ -7,6 +7,8 @@ extern "C" unsigned char ArraySourceTraceFixture(void*, void*, void*, void*);
 extern "C" void DiagnosticArrayReturn();
 extern "C" unsigned char DynamicArraySourceTraceFixture(void*, void*, void*, void*, std::uint64_t);
 extern "C" void DiagnosticDynamicArrayReturn();
+extern "C" unsigned char SplitArraySourceTraceFixture(void*, void*, void*, void*, void*, void*);
+extern "C" void DiagnosticSplitArrayReturn();
 unsigned forwards = 0;
 unsigned char forward(void*, void*, void*) { ++forwards; return 39; }
 int main()
@@ -45,6 +47,21 @@ int main()
             source.node != reinterpret_cast<std::uint64_t>(node.data()) ||
             source.flags != (count == 8 ? 31u : 15u) || source.mask[0] != 0x4a) return 5;
     }
+    std::array<std::uint32_t, 2> range {100, 8};
+    const auto rangeAddress = reinterpret_cast<std::uint64_t>(range.data());
+    std::array<std::uint64_t, 8> split {0x100000, 0x100000 + 300 * 12,
+        0x200000, 0x200000 + 300 * 8, 0x300000, 0x300000 + 300 * 4,
+        rangeAddress, rangeAddress + 8};
+    sourceImage = reinterpret_cast<std::uint64_t>(&DiagnosticSplitArrayReturn) - 0x3a2559;
+    const auto index = used.load();
+    if (SplitArraySourceTraceFixture(node.data(), handle.data(), span.data(), bounds.data(),
+        split.data(), range.data()) != 39) return 6;
+    const auto& splitSource = rows[index].source;
+    if (used != index + 1 || splitSource.kind != 5 || splitSource.flags != 27 ||
+        splitSource.steps != 2 || splitSource.first != 100 || splitSource.count != 8 ||
+        splitSource.splitSpans != split || splitSource.splitRange != rangeAddress ||
+        splitSource.node != reinterpret_cast<std::uint64_t>(node.data()) ||
+        splitSource.splitContext != reinterpret_cast<std::uint64_t>(split.data())) return 7;
     const auto recorded = used.load();
     const auto forwarded = forwards;
     recording = false;
@@ -52,5 +69,6 @@ int main()
         used != recorded || forwards != forwarded + 1 || active || profileMagic != 0x49555036) return 3;
     std::puts("PASS wrapper_real_caller_context=1 source_mask_changes=1 forwarded_result=39 "
               "dynamic_rbx_rsi_context=1 wrong_dynamic_count_rejected=1 "
+              "split_r14_r15_rbx_context=1 "
               "unwind_steps=2 disabled_recording=1 game_hooks=0");
 }

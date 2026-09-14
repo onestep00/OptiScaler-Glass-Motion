@@ -19,6 +19,8 @@
 
 ## Document index
 
+- [ArraySourceDomains.md](ArraySourceDomains.md): Split population R15/RBX span decoder and actual unwind fixture pass; source-only, no game deployment or N-1 admission. Historical capture evidence remains separately labeled.
+
 - [../EngineMotionSupply.md](../EngineMotionSupply.md): MotionDeclarations, MotionShaderScope and DeclarationCompatibility exercise bounded immutable metadata, nested/thread-local shader-pair scope, actual owned adapter callbacks and relocated native profiles. No live hook or new FG admission follows from these tests.
 
 - [Timeline.md](Timeline.md): Live diagnostic parent lookup and 8,000 concurrent-event checks pass. Neighbor-frame mismatches remain; no GPU replay or MV/FG proof.
@@ -129,3 +131,5 @@
 - [replay/README.md](replay/README.md): Standalone manifest-based FG replay, identity/input/output validation and recorded-input comparisons. Requires user-supplied local recordings and binaries; not part of the synthetic-only default suite.
 - [ObjectMotion.md](ObjectMotion.md): Isolated geometry-motion and boundary-weight reference, verification and missing runtime inputs.
 - [replay/BoundaryFG.md](replay/BoundaryFG.md): Subsequent actual FG tests on exact synthetic geometry and recorded Cyberpunk inputs. The latter has no per-object history/alpha; width changes are not a finished fix.
+
+- PacketParents.cpp: V2 original flags0x2000 and ABI rejection checked through owned rigid/skinned flush callbacks; not live game validation.

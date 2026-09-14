@@ -11,7 +11,7 @@ bool StartExperimentHost(ID3D12Device* device, const std::filesystem::path& dire
     bool requested = false;
     try
     {
-        requested = std::filesystem::is_regular_file(directory / "experiment-host.enable");
+        requested = std::filesystem::is_regular_file(directory / "experiment-capture.enable");
         if (!requested) return false;
         Microsoft::WRL::ComPtr<ID3D12Device> retained = device;
         std::thread([retained, directory]

@@ -1,12 +1,17 @@
 #include "pch.h"
 #include "GeometryDrawCapture.h"
 #include "GeometryCreation.h"
+#include "GeometryHealth.h"
 #include "NativeHost.h"
 #include "NativeSession.h"
 #include "D3D12Observer.h"
-#include "CyberpunkSurfacePass.h"
 #include "StreamlineTagBridge.h"
+#include "PackedMotionCapture.h"
+#include "GlassMotionIdentity.h"
+#include "GlassDebugControl.h"
 #include <Util.h>
+#include <atomic>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <wrl/client.h>
@@ -47,9 +52,8 @@ struct Runtime
     std::atomic<ID3D12GraphicsCommandList*> activeCommand = nullptr;
     std::atomic<bool> submissionObserved = false;
     std::array<std::shared_ptr<Entry>, 2> retiring;
-    CyberpunkSurfacePass selector;
     FILE* log = nullptr;
-    bool selectorAttempted = false, unavailable = false, stopped = false;
+    bool logAttempted = false, unavailable = false, stopped = false;
     uint64_t evaluations = 0, substitutions = 0, captures = 0;
 
     void reap()
@@ -94,6 +98,16 @@ Runtime& runtime()
     return *value;
 }
 
+// Live control requests are queued from the file poll (health thread) and
+// consumed on the FG evaluation thread, which is the only place the native
+// recordings may be retired while the game keeps running.
+std::atomic<bool> softReloadRequested = false;
+
+std::filesystem::path packedShaderPath()
+{
+    return Util::DllPath().parent_path() / L"Glass" / L"GlassObjectMotion.hlsl";
+}
+
 D3D12Callbacks makeCallbacks()
 {
     D3D12Callbacks value;
@@ -111,23 +125,7 @@ D3D12Callbacks makeCallbacks()
     };
     value.mutation = [](void* p, ID3D12GraphicsCommandList* c)
     { static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onStateMutation(c); }); };
-    value.barrier = [](void* p, ID3D12GraphicsCommandList* c, UINT count, const D3D12_RESOURCE_BARRIER* barriers)
-    {
-        auto& r = *static_cast<Runtime*>(p);
-        if (!r.active || r.stopped || !barriers || count > 4096 || !ReadControls().active() ||
-            c->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
-            return;
-        auto& e = *r.active;
-        for (UINT i = 0; i < count; ++i)
-            if (r.selector.matches(barriers[i], static_cast<unsigned>(e.descriptions[0].Width),
-                                   e.descriptions[0].Height))
-            {
-                InternalD3D12Scope ownCalls;
-                if (e.session.captureIdentifiedSurface(c, barriers[i].Transition.pResource,
-                                                       barriers[i].Transition.StateAfter))
-                    ++r.captures;
-            }
-    };
+    value.barrier = [](void*, ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*) {};
     value.beforeSubmit = [](void*, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {
         InternalD3D12Scope ownCalls;
@@ -142,9 +140,15 @@ D3D12Callbacks makeCallbacks()
         r.reap();
     };
     value.signal = [](void* p, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
-    { static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onSignal(q, fence, number); }); };
+    {
+        NotifyGeometryCaptureSignal(q, fence, number);
+        static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onSignal(q, fence, number); });
+    };
     value.wait = [](void* p, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
-    { static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onWait(q, fence, number); }); };
+    {
+        NotifyGeometryCaptureWait(q, fence, number);
+        static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onWait(q, fence, number); });
+    };
     return value;
 }
 
@@ -166,12 +170,12 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         if (entry)
             return {}; // Drain old-size recordings before reuse.
     InternalD3D12Scope ownCalls;
-    if (!r.selectorAttempted)
+    if (!r.logAttempted)
     {
-        r.selectorAttempted = true;
+        r.logAttempted = true;
         const auto path = Util::DllPath().parent_path() / L"OptiScaler.Glass.log";
         r.log = _wfopen(path.c_str(), L"a");
-        if (!r.log || !r.selector.initialize(GetModuleHandleW(nullptr), r.log))
+        if (!r.log)
             r.unavailable = true;
     }
     if (r.unavailable)
@@ -193,9 +197,14 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     Microsoft::WRL::ComPtr<ID3D12Device> device;
     if (FAILED(command->GetDevice(IID_PPV_ARGS(&device))))
         return {};
+    if (!InitializePackedMotionCapture(device.Get(), static_cast<unsigned>(entry->descriptions[0].Width),
+                                       entry->descriptions[0].Height, r.log,
+                                       MakeGlassMotionIdentityProvider()))
+        return {};
     const auto shaders = Util::DllPath().parent_path() / L"Glass";
-    if (!entry->session.initialize(device.Get(), entry->descriptions, (shaders / L"GlassSurface.hlsl").c_str(),
-                                   (shaders / L"GlassRegion.hlsl").c_str(), r.log))
+    if (!entry->session.initializePacked(device.Get(), entry->descriptions,
+                                         (shaders / L"GlassObjectMotion.hlsl").c_str(), r.log,
+                                         { AcquirePackedMotionFrame, DiscardPackedMotionRecording }))
     {
         r.unavailable = true;
         return {};
@@ -221,6 +230,11 @@ bool NativeCaptureSubmissionReady() noexcept
     return runtime().submissionObserved.load(std::memory_order_acquire);
 }
 
+void RequestNativeSoftReload() noexcept
+{
+    softReloadRequested.store(true, std::memory_order_release);
+}
+
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                   NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
                                   NativeEvaluate original)
@@ -228,6 +242,38 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     if (!original)
         return NVSDK_NGX_Result_FAIL_FeatureNotFound;
     auto& r = runtime();
+    // File-driven live controls. Both run on this thread because it owns the
+    // native recordings; the request file itself is polled elsewhere.
+    if (softReloadRequested.exchange(false, std::memory_order_acq_rel))
+    {
+        std::lock_guard lock(r.mutex);
+        if (r.retire())
+        {
+            r.reap();
+            ResetPackedMotionCounters();
+            if (r.log)
+            {
+                std::fprintf(r.log, "NATIVE_HOST soft_reload=1 retired=1\n");
+                std::fflush(r.log);
+            }
+        }
+        else
+            softReloadRequested.store(true, std::memory_order_release); // Retry after a drain.
+    }
+    if (TakeShaderReloadRequest())
+    {
+        std::lock_guard lock(r.mutex);
+        const auto shader = packedShaderPath();
+        bool reloaded = false;
+        if (r.active && r.log)
+            reloaded = r.active->session.reloadPackedShader(shader.c_str(), r.log);
+        if (r.log)
+        {
+            std::fprintf(r.log, "NATIVE_HOST shader_reload=%u path=%ls\n", reloaded ? 1u : 0u, shader.c_str());
+            std::fflush(r.log);
+        }
+    }
+    static std::atomic<std::uint64_t> tagHits = 0, tagMisses = 0;
     Inputs inputs;
     std::shared_ptr<Entry> entry;
     PreparedInputs prepared;
@@ -247,10 +293,23 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             D3D12_RESOURCE_STATES states[3] {};
             ID3D12Resource* resources[] = { inputs.motion, inputs.color, inputs.depth };
             InternalD3D12Scope ownCalls;
-            if (ReadStreamlineStates(handle, inputs.index, inputs.count, resources, states))
+            StreamlineInputFrame frame;
+            if (ReadStreamlineStates(handle, inputs.index, inputs.count, resources, states, &frame))
+            {
+                inputs.frame = frame.frame;
+                if (r.log && inputs.index == 1 && !(++tagHits % 300))
+                    std::fprintf(r.log, "NATIVE_TAG ok hits=%llu frame=%llu\n",
+                                 static_cast<unsigned long long>(tagHits.load()),
+                                 static_cast<unsigned long long>(frame.frame));
                 prepared = entry->session.prepare(command, inputs, states, controls);
+            }
             else
+            {
+                if (r.log && inputs.index == 1 && !(++tagMisses % 300))
+                    std::fprintf(r.log, "NATIVE_TAG miss count=%llu\n",
+                                 static_cast<unsigned long long>(tagMisses.load()));
                 entry->session.bypass(inputs.index);
+            }
         }
     }
     else
@@ -286,6 +345,13 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         --entry->evaluations;
         ++r.evaluations;
         r.substitutions += applied;
+        if (applied && result == NVSDK_NGX_Result_Success)
+        {
+            const auto now = GetTickCount64();
+            GeometryTelemetry::counts[GeometryFgReplacements].fetch_add(1, std::memory_order_relaxed);
+            GeometryTelemetry::changedMs[GeometryFgReplacements].store(now, std::memory_order_relaxed);
+            GeometryTelemetry::fgMs.store(now, std::memory_order_relaxed);
+        }
         PublishRuntimeStatus(applied && result == NVSDK_NGX_Result_Success ? RuntimeStatus::Correcting
                                                                            : RuntimeStatus::Waiting);
         if (result != NVSDK_NGX_Result_Success || (prepared.motion && !applied))

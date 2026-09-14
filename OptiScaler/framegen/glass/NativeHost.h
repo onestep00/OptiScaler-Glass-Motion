@@ -15,4 +15,7 @@ void CreatedNativeFG();
 void StopNativeFG();
 // True only after the process-resident native queue observer is installed.
 bool NativeCaptureSubmissionReady() noexcept;
+// Live control: retire every native recording and re-admit on the next
+// evaluation. Equivalent to a module restart without touching the process.
+void RequestNativeSoftReload() noexcept;
 } // namespace GlassFg

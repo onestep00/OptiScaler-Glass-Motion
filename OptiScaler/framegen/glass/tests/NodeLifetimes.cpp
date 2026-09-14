@@ -48,6 +48,11 @@ int main()
     require(query(address(fixtureProxy), 0x123456, 13, &result) == 1 &&
             result.generation == first.generation && result.first == 107 && result.count == 13 &&
             result.node == address(instance) && result.buffer == address(shared));
+    {
+        LifecycleScope inFlight;
+        if(query(address(fixtureProxy), 0x123456, 13, &result)!=0 || result.generation)
+        {std::cerr << "FAIL query_during_lifecycle_returned_cached_owner\n";return 2;}
+    }
     require(query(address(fixtureProxy), 0x123456, 12, &result) == 0 && !result.node);
     result.version = 2;
     require(query(address(fixtureProxy), 0x123456, 13, &result) == -1);
@@ -88,7 +93,7 @@ int main()
     require(profileMagic == 0x49555035);
     std::cout << "PASS source_publication=1 cancellation_before_release=1 same_address_reuse=1 "
                  "stopped_csv_tracking=1 typed_mesh_rejection=1 transform_copies=0 "
-                 "query_abi=1 query_after_destruction_rejected=1 missed_lifecycle_disables_query=1 "
+                 "query_abi=1 query_during_lifecycle_rejected=1 query_after_destruction_rejected=1 missed_lifecycle_disables_query=1 "
                  "bootstrap_current_chain=1 bootstrap_inflight_rejected=1 bootstrap_epoch_rejected=1 null_transient_pointer=1 "
                  "live_engine=0 object_motion_produced=0\n";
 }

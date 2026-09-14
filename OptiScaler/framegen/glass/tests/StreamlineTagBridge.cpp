@@ -115,12 +115,17 @@ int main()
     std::thread producer([&] { feed(1); });
     producer.join();
     D3D12_RESOURCE_STATES states[3] {};
+    StreamlineInputFrame inputFrame;
     int feature;
-    check(ReadStreamlineStates(&feature, 1, 3, resources, states));
-    check(ReadStreamlineStates(&feature, 2, 3, resources, states));
-    check(ReadStreamlineStates(&feature, 3, 3, resources, states));
+    check(ReadStreamlineStates(&feature, 1, 3, resources, states, &inputFrame));
+    check(inputFrame.frame == 1 && inputFrame.viewport == 0);
+    check(ReadStreamlineStates(&feature, 2, 3, resources, states, &inputFrame));
+    check(inputFrame.frame == 1);
+    check(ReadStreamlineStates(&feature, 3, 3, resources, states, &inputFrame));
+    check(inputFrame.frame == 1);
     check(states[0] == 0x400 && states[1] == 0x400 && states[2] == 0x400);
-    check(!ReadStreamlineStates(&feature, 1, 3, resources, states));
+    check(!ReadStreamlineStates(&feature, 1, 3, resources, states, &inputFrame));
+    check(inputFrame.frame == UINT64_MAX);
     fixture[2].resource.structVersion = 99;
     feed(2);
     check(!ReadStreamlineStates(&feature, 1, 3, resources, states));
@@ -131,6 +136,11 @@ int main()
     fixture[2].extent.width = 64;
     feed(4);
     check(ReadStreamlineStates(&feature, 1, 1, resources, states));
+    feed(5);
+    check(ReadStreamlineStates(&feature, 1, 3, resources, states, &inputFrame));
+    feed(6); // Same textures, new frame during phase 2.
+    check(!ReadStreamlineStates(&feature, 2, 3, resources, states, &inputFrame));
+    check(inputFrame.frame == UINT64_MAX);
     stopBridge();
     check(stops == 1 && !ReadStreamlineStates(&feature, 1, 1, resources, states));
     // A plugin that cached the wrapper retains forwarding semantics after stop.

@@ -5,6 +5,7 @@
 #include "CyberpunkInstanceSelection.h"
 #include "DetourThreads.h"
 #include <bit>
+#include <cmath>
 #include <mutex>
 #include <type_traits>
 
@@ -38,6 +39,9 @@ struct EngineDrawState
     std::array<Batch, 16> pool;
     std::atomic<std::uint32_t> occupied = 0;
     std::atomic<std::uint64_t> batches = 0, appends = 0, identities = 0, draws = 0, rejected = 0;
+    std::atomic<std::uint64_t> parentNoFlag = 0, parentNoEntry = 0, parentNoTicket = 0, parentNoSlot = 0,
+                             parentNoMesh = 0, parentNoHeader = 0, parentNoSelection = 0;
+    std::atomic<std::uint64_t> parentSeeded = 0;
 };
 std::atomic<EngineDrawState*> activeDrawState = nullptr;
 thread_local Batch* currentBatch = nullptr;
@@ -53,6 +57,52 @@ template <typename T> bool copyAt(std::uint64_t address, T& value) noexcept
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+// Recover an object the registry never observed (created before the hooks were
+// installed or registered through an unaudited path). This is the same verified
+// two-read snapshot contract the registration hook uses; it never guesses.
+bool seedObject(EngineDrawState& state, std::uint64_t proxy) noexcept
+{
+    struct Pose
+    {
+        std::array<std::uint32_t, 12> packed {};
+        std::array<float, 6> bounds {};
+        bool operator==(const Pose&) const = default;
+    };
+    try
+    {
+        Pose first, second;
+        std::uint64_t meshFirst = 0, meshSecond = 0;
+        std::uint32_t indexFirst = 0, indexSecond = 0;
+        if (!copyAt(proxy + 0xd8, meshFirst) || !copyAt(proxy + 0x98, indexFirst) ||
+            !copyAt(proxy + 0x18, first.packed) || !copyAt(proxy + 0x50, first.bounds))
+            return false;
+        MemoryBarrier();
+        if (!copyAt(proxy + 0xd8, meshSecond) || !copyAt(proxy + 0x98, indexSecond) ||
+            !copyAt(proxy + 0x18, second.packed) || !copyAt(proxy + 0x50, second.bounds))
+            return false;
+        if (meshFirst != meshSecond || indexFirst != indexSecond || first != second || !meshFirst ||
+            indexFirst >= 131072)
+            return false;
+        for (unsigned i = 0; i < first.packed.size(); ++i)
+            if (i % 4 != 3 && !std::isfinite(std::bit_cast<float>(first.packed[i])))
+                return false;
+        for (unsigned i = 0; i < 3; ++i)
+            if (!std::isfinite(first.bounds[i]) || !std::isfinite(first.bounds[i + 3]) ||
+                first.bounds[i] > first.bounds[i + 3])
+                return false;
+        GeometryObjectPose pose;
+        pose.packed = first.packed;
+        pose.bounds = first.bounds;
+        pose.frame = state.tick ? *state.tick : 0;
+        if (!pose.valid())
+            return false;
+        return state.registry->registered(proxy, indexFirst, meshFirst, pose) != 0;
+    }
+    catch (...)
     {
         return false;
     }
@@ -173,9 +223,15 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
             std::uint64_t encoded = 0, mesh = 0;
             std::uint32_t actualSlot = UINT32_MAX;
             const auto source = batch->renderer + 0x574280 + std::uint64_t(record.transformIndex) * 48;
-            if ((words[1] & (1ull << 51)) && index < 131072 &&
-                before.entry == batch->renderer + 0x274248 + std::uint64_t(index) * 24 &&
-                copyAt(before.entry, encoded) && copyAt(before.geometry, geometry) && geometry.kind == 0)
+            const bool flagged = (words[1] & (1ull << 51)) != 0;
+            if (!flagged)
+                ++state->parentNoFlag;
+            else if (index >= 131072 ||
+                     before.entry != batch->renderer + 0x274248 + std::uint64_t(index) * 24 ||
+                     !copyAt(before.entry, encoded) || !copyAt(before.geometry, geometry) ||
+                     geometry.kind != 0)
+                ++state->parentNoEntry;
+            else
             {
                 const auto proxy = encoded & 0x00ffffffffffffffull;
                 struct Instances
@@ -188,12 +244,23 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                     // Bracket header reads with the lifetime/array mutation
                     // ticket. A setter active or completed between these reads
                     // cannot publish a mixed old header with a new generation.
-                    const auto generation = state->registry->ticket(proxy, index);
+                    auto generation = state->registry->ticket(proxy, index);
                     std::uint16_t flags = 0;
-                    if (generation && copyAt(proxy + 0x98, actualSlot) && actualSlot == index &&
-                        copyAt(proxy + 0xd8, mesh) && mesh && mesh == geometry.mesh &&
-                        copyAt(proxy + 0x108, instances) && copyAt(proxy + 0xea, flags) &&
-                        state->registry->ticket(proxy, index) == generation)
+                    if (!generation && seedObject(*state, proxy))
+                    {
+                        generation = state->registry->ticket(proxy, index);
+                        if (generation) ++state->parentSeeded;
+                    }
+                    if (!generation)
+                        ++state->parentNoTicket;
+                    else if (!copyAt(proxy + 0x98, actualSlot) || actualSlot != index)
+                        ++state->parentNoSlot;
+                    else if (!copyAt(proxy + 0xd8, mesh) || !mesh || mesh != geometry.mesh)
+                        ++state->parentNoMesh;
+                    else if (!copyAt(proxy + 0x108, instances) || !copyAt(proxy + 0xea, flags) ||
+                             state->registry->ticket(proxy, index) != generation)
+                        ++state->parentNoHeader;
+                    else
                     {
                         record.parent = { proxy, mesh, index, generation };
                         if (record.count == 1 && source == reinterpret_cast<std::uint64_t>(transforms) &&
@@ -206,6 +273,8 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                             record.originalOrder = true;
                             record.originalFirst = static_cast<std::uint16_t>(selection.linearFirst);
                         }
+                        else
+                            ++state->parentNoSelection;
                     }
                 }
                 catch (...) {}
@@ -442,13 +511,24 @@ bool InitializeCyberpunkDraws(HMODULE executable) noexcept
 CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept
 {
     auto* state = activeDrawState.load(std::memory_order_acquire);
-    return state ? CyberpunkDrawStatus { true,
-                                         state->batches.load(),
-                                         state->appends.load(),
-                                         state->identities.load(),
-                                         state->draws.load(),
-                                         state->rejected.load() }
-                 : CyberpunkDrawStatus {};
+    if (!state)
+        return {};
+    CyberpunkDrawStatus value;
+    value.active = true;
+    value.batches = state->batches.load();
+    value.appends = state->appends.load();
+    value.identities = state->identities.load();
+    value.draws = state->draws.load();
+    value.rejected = state->rejected.load();
+    value.parentNoFlag = state->parentNoFlag.load();
+    value.parentNoEntry = state->parentNoEntry.load();
+    value.parentNoTicket = state->parentNoTicket.load();
+    value.parentNoSlot = state->parentNoSlot.load();
+    value.parentNoMesh = state->parentNoMesh.load();
+    value.parentNoHeader = state->parentNoHeader.load();
+    value.parentNoSelection = state->parentNoSelection.load();
+    value.parentSeeded = state->parentSeeded.load();
+    return value;
 }
 std::uint32_t ReadCyberpunkDrawFrame() noexcept
 {

@@ -10,6 +10,7 @@ $tool = Join-Path $build 'GeometryShaderTool.exe'
 $gpu = Join-Path $build 'GeometryShaderGpu.exe'
 $instances = Join-Path $build 'GeometryInstances.exe'
 $packed = Join-Path $build 'PackedMotion.exe'
+$objectMotion = Join-Path $build 'PackedMotionGpu.exe'
 $common = @('/nologo','/std:c++20','/EHsc','/O2','/MD','/W4','/WX','/DNOMINMAX',"/Fo$($build.TrimEnd('\'))\")
 & cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryShaderTool.cpp') `
     (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') "/Fe$tool"
@@ -29,6 +30,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry GPU test build failed' }
 & cl.exe @common "/I$PSScriptRoot" (Join-Path $PSScriptRoot 'PackedMotion.cpp') "/Fe$packed" /link d3d12.lib dxgi.lib
 if ($LASTEXITCODE -ne 0) { throw 'Packed motion GPU test build failed' }
+& cl.exe @common "/I$PSScriptRoot" (Join-Path $PSScriptRoot 'PackedMotionGpu.cpp') "/Fe$objectMotion" `
+    /link d3d12.lib d3dcompiler.lib dxgi.lib
+if ($LASTEXITCODE -ne 0) { throw 'Packed object composition GPU test build failed' }
+& $objectMotion (Join-Path $PSScriptRoot '../GlassObjectMotion.hlsl')
+if ($LASTEXITCODE -ne 0) { throw 'Packed object composition GPU test failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryTargetViews.cpp') `
     "$build/GeometryViews.obj" "$build/GeometryCommands.obj" "$build/GeometryCommandFixture.obj" `
     "$build/GeometryPipelineCache.obj" "$build/GeometryCreation.obj" "$build/GeometryPipeline.obj" "$build/DxilVertexHistory.obj" `
@@ -78,6 +84,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Instance vertex rewriting failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Instance material rewriting failed' }
 & $instances $build $dxc
 if ($LASTEXITCODE -ne 0) { throw 'Instance geometry capture test failed' }
+& $instances $build $dxc --source-history
+if ($LASTEXITCODE -ne 0) { throw 'Original source-index GPU history lookup failed' }
 & $instances $build $dxc --observe
 if ($LASTEXITCODE -ne 0) { throw 'Actual creation observer GPU test failed' }
 & $instances $build $dxc --commands
@@ -98,6 +106,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Actual observer/in-flight capture replacement 
 if ($LASTEXITCODE -ne 0) { throw 'Object material bit coverage failed' }
 & $instances $build $dxc --packed
 if ($LASTEXITCODE -ne 0) { throw 'Packed material graphics execution failed' }
+& $instances $build $dxc --packed-fallback
+if ($LASTEXITCODE -ne 0) { throw 'Packed destination-dependent blend fallback failed' }
 & $instances $build $dxc --recorder
 if ($LASTEXITCODE -ne 0) { throw 'Asynchronous object recorder failed' }
 & $tool $dxc compile (Join-Path $PSScriptRoot 'GeometryMaterialMrt.hlsl') (Join-Path $build 'fixture-mrt.dxil') ps_6_0

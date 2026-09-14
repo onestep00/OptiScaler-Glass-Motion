@@ -63,6 +63,10 @@ class GeometryObjectRegistry
         std::uint64_t proxy = 0, mesh = 0;
         std::uint32_t generation = 0, cursor = 0;
         std::uint32_t arrayWriters = 0, arrayScope = 0;
+        // Registration/recreation serial. Unlike generation it is not advanced
+        // by array-setter updates, so temporal history can survive per-frame
+        // array submissions while still resetting when the owner is recreated.
+        std::uint32_t lifetime = 0;
     };
     mutable std::shared_mutex mutex;
     std::vector<Slot> slots;
@@ -108,9 +112,10 @@ class GeometryObjectRegistry
     {
         auto& slot = slots[index];
         erase(index);
-        if (slot.generation == UINT32_MAX)
+        if (slot.generation == UINT32_MAX || slot.lifetime == UINT32_MAX)
             return false; // Never wrap into an old identity.
         ++slot.generation;
+        ++slot.lifetime;
         slot.proxy = proxy;
         slot.mesh = mesh;
         ++counters.registered;
@@ -169,6 +174,15 @@ class GeometryObjectRegistry
             return 0;
         std::shared_lock lock(mutex);
         return slots[index].proxy == proxy && !slots[index].arrayWriters ? slots[index].generation : 0;
+    }
+    // Registration lifetime only. Safe to use as a temporal identity across
+    // array-setter updates; 0 means the slot is not this proxy or is mid-update.
+    std::uint32_t lifetime(std::uint64_t proxy, std::uint32_t index) const
+    {
+        if (!proxy || index >= slots.size())
+            return 0;
+        std::shared_lock lock(mutex);
+        return slots[index].proxy == proxy && !slots[index].arrayWriters ? slots[index].lifetime : 0;
     }
     // Invalidate BEFORE the actual setter writes or reallocates the source.
     // The shared object generation now also covers observed array replacement.

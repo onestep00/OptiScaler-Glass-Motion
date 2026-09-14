@@ -216,7 +216,8 @@ struct GeometryCompiler::Impl
                                     disassembly->GetBufferSize());
         auto rewritten =
             vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair)
-                   : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs);
+                   : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs,
+                                           target == MaterialMotionTarget::OriginalColorAndPackedMotion);
         if (!rewritten)
         {
             error = rewritten.error;
@@ -328,8 +329,17 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
         return reject(error, "Non-triangle pipeline unsupported");
     if (nativeOpaque && !nativeBlend)
         return reject(error, "Native opaque capture requires unblended targets");
-    if (material && !tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend,
-                                             coverageAudit || packedMotion))
+    const bool knownMaterialBlend = material &&
+        tryMaterialCaptureBlend(original.BlendState, MaterialCapture::SourceColor, validatedBlend,
+                                coverageAudit || packedMotion);
+    // Packed capture never changes the application's attachments or blend state.
+    // For destination-dependent equations, retain exact shader coverage/object
+    // motion but use zero interior weight; the compositor may still apply full
+    // object motion to the visible boundary without dragging the background.
+    const auto& primaryBlend = original.BlendState.RenderTarget[0];
+    const bool packedCoverageOnly = packedMotion && !knownMaterialBlend && primaryBlend.BlendEnable &&
+                                    !primaryBlend.LogicOpEnable && primaryBlend.RenderTargetWriteMask;
+    if (material && !knownMaterialBlend && !packedCoverageOnly)
         return reject(error, "Unsupported material blend equation");
     // Vertex capture replaces the original draw once. Its unmodified PS and
     // depth/stencil/blend state retain native writes. Unblended coverage audit
@@ -355,10 +365,10 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
             return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
     }
     const auto& blend = original.BlendState.RenderTarget[0];
-    const auto source = depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
+    const auto source = packedCoverageOnly ? MaterialSource::Zero : depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
                         : blend.SrcBlend == D3D12_BLEND_ONE ? MaterialSource::One
                                                             : MaterialSource::Alpha;
-    const auto destination = (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
+    const auto destination = packedCoverageOnly ? MaterialDestination::CoverageOnly : (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
                              : blend.DestBlend == D3D12_BLEND_ONE           ? MaterialDestination::One
                              : blend.DestBlend == D3D12_BLEND_SRC_ALPHA     ? MaterialDestination::Alpha
                              : blend.DestBlend == D3D12_BLEND_INV_SRC_ALPHA ? MaterialDestination::OneMinusAlpha

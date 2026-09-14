@@ -6,6 +6,8 @@
 #include "../GeometryDrawCapture.h"
 #include "../GeometryCoverageRecorder.h"
 #include "../GeometryCoverageLayout.h"
+#include "../GeometrySourceSlots.h"
+#include "../VertexHistoryCache.h"
 #include "ExperimentDrawCheck.h"
 #include "ModuleRecorderCheck.h"
 #include "InFlightCaptureCheck.h"
@@ -227,8 +229,10 @@ int wmain(int argc, wchar_t** argv)
         require(argc == 3 || (argc == 4 && (wcscmp(argv[3], L"--observe") == 0 || wcscmp(argv[3], L"--commands") == 0 ||
                                              wcscmp(argv[3], L"--mrt") == 0 || wcscmp(argv[3], L"--dual-mrt") == 0 ||
                                              wcscmp(argv[3], L"--coverage") == 0 ||
+                                             wcscmp(argv[3], L"--source-history") == 0 ||
                                              wcscmp(argv[3], L"--packed") == 0 ||
                                              wcscmp(argv[3], L"--packed-mrt") == 0 ||
+                                             wcscmp(argv[3], L"--packed-fallback") == 0 ||
                                              wcscmp(argv[3], L"--capture-command") == 0 ||
                                             wcscmp(argv[3], L"--recorder") == 0 ||
                                             wcscmp(argv[3], L"--experiment") == 0 ||
@@ -238,8 +242,11 @@ int wmain(int argc, wchar_t** argv)
                                             wcscmp(argv[3], L"--controlled-recorder") == 0)),
                 "GeometryInstances artifact-directory dxcompiler.dll [--observe|--commands|--mrt|--dual-mrt]");
         const bool coverageOnly = argc == 4 && wcscmp(argv[3], L"--coverage") == 0;
+        const bool sourceHistory = argc == 4 && wcscmp(argv[3], L"--source-history") == 0;
         const bool packedMrt = argc == 4 && wcscmp(argv[3], L"--packed-mrt") == 0;
-        const bool packedMotion = packedMrt || (argc == 4 && wcscmp(argv[3], L"--packed") == 0);
+        const bool packedFallback = argc == 4 && wcscmp(argv[3], L"--packed-fallback") == 0;
+        const bool packedMotion = packedMrt || packedFallback ||
+                                  (argc == 4 && wcscmp(argv[3], L"--packed") == 0);
         const bool inflightRecorder = argc == 4 && wcscmp(argv[3], L"--inflight-recorder") == 0;
         const bool controlledRecorder = inflightRecorder || (argc == 4 && wcscmp(argv[3], L"--controlled-recorder") == 0);
         const bool moduleRecorder = controlledRecorder || (argc == 4 && wcscmp(argv[3], L"--module-recorder") == 0);
@@ -248,7 +255,7 @@ int wmain(int argc, wchar_t** argv)
         const bool experiment = captureModule || (argc == 4 && wcscmp(argv[3], L"--experiment") == 0);
         const bool captureCommand = experiment || recorder || (argc == 4 && wcscmp(argv[3], L"--capture-command") == 0);
         static CaptureOwner captureOwner;
-        const bool observed = argc == 4 && !coverageOnly && !packedMotion;
+        const bool observed = argc == 4 && !coverageOnly && !packedMotion && !sourceHistory;
         const bool dual = observed && wcscmp(argv[3], L"--dual-mrt") == 0;
         const bool mrt = packedMrt || dual || (observed && wcscmp(argv[3], L"--mrt") == 0);
         const bool commands = captureCommand || mrt || (observed && wcscmp(argv[3], L"--commands") == 0);
@@ -303,7 +310,10 @@ int wmain(int argc, wchar_t** argv)
         constexpr UINT RoiLeft = 12, RoiTop = 10, RoiWidth = W - 24, RoiHeight = H - 20, RoiStride = RoiWidth + 4;
         constexpr UINT Segment = RoiStride * RoiHeight + 32, CapturePixels = 3 * Segment + 32,
                        CaptureBytes = CapturePixels * 32;
-        constexpr UINT historyBase[] = { 9, 31, 49 };
+        UINT historyBase[] = { 9, 31, 49 };
+        GlassFg::GeometrySourceSlots<10> sourceSlots;
+        GlassFg::VertexHistoryCache<8, 4, 16, 4> sourceCache;
+        const GlassFg::VertexHistoryKey sourceOwner { { 0x10000, 0x20000, 1, 1 }, 7, 8, 9, 0, 4 };
         D3D12_DESCRIPTOR_HEAP_DESC hd { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 8, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
         ComPtr<ID3D12DescriptorHeap> heap, depthHeap;
         check(g.d->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)));
@@ -366,8 +376,9 @@ int wmain(int argc, wchar_t** argv)
         pd.PS = { ps.data(), ps.size() };
         auto& blend = pd.BlendState.RenderTarget[0];
         blend.BlendEnable = TRUE;
-        blend.SrcBlend = D3D12_BLEND_ONE;
-        blend.DestBlend = dual ? D3D12_BLEND_SRC1_COLOR : D3D12_BLEND_INV_SRC_ALPHA;
+        blend.SrcBlend = packedFallback ? D3D12_BLEND_DEST_COLOR : D3D12_BLEND_ONE;
+        blend.DestBlend = packedFallback ? D3D12_BLEND_INV_DEST_COLOR :
+                          dual ? D3D12_BLEND_SRC1_COLOR : D3D12_BLEND_INV_SRC_ALPHA;
         blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlendAlpha = D3D12_BLEND_ZERO;
@@ -546,15 +557,34 @@ int wmain(int argc, wchar_t** argv)
             }
             UINT order[10] {};
             std::array<GlassFg::GeometryInstance, 10> mapping {};
+            auto sourceTicket = sourceSlots.begin(sourceOwner.view, frame);
+            if (sourceHistory)
+            {
+                require(sourceCache.beginFrame(frame, frame > 2 ? frame - 2 : 0), "Source history frame rejected");
+                for (UINT i = 0; i < 3; ++i)
+                    require(sourceSlots.publish(sourceTicket, 5 + i,
+                        {sourceOwner.object.proxy, sourceOwner.object.mesh, sourceOwner.object.generation,
+                         frame >= 3 ? 2u : 1u, (i + frame) % 3}), "Source publication rejected");
+                require(sourceSlots.seal(sourceTicket), "Source ticket rejected");
+            }
             for (UINT i = 0; i < 3; ++i)
             {
                 const UINT object = (i + frame) % 3;
                 order[7 + i] = object;
                 const UINT status = 8 + object * Segment;
+                UINT generation = 42 + object + (object == 2 && frame >= 3 ? 9u : 0u);
+                if (sourceHistory)
+                {
+                    const auto allocation = sourceCache.acquire(
+                        sourceSlots.resolveHistoryKey(sourceTicket, 5 + i, sourceOwner, frame), 4, frame);
+                    require(bool(allocation), "Source history allocation rejected");
+                    historyBase[object] = allocation.base;
+                    generation = allocation.generation;
+                }
                 mapping[5 + i] = { historyBase[object],
                                    4,
                                    0,
-                                   42 + object + (object == 2 && frame >= 3 ? 9u : 0u),
+                                   generation,
                                    RoiLeft,
                                    RoiTop,
                                    frame == 4 && object == 1 ? 1u : RoiWidth,
@@ -835,7 +865,7 @@ int wmain(int argc, wchar_t** argv)
                                 };
                                 const auto mx = quantizeMotion(mv[0] * W);
                                 const auto my = quantizeMotion(mv[1] * H);
-                                const auto weight = static_cast<UINT>(
+                                const auto weight = packedFallback ? 0u : static_cast<UINT>(
                                     std::clamp(double(originalPixel[3]), 0.0, 1.0) * 255.0);
                                 const auto encodedDepth = static_cast<UINT>((.4 + object * .03) * 262143.0);
                                 const auto depthKey = 262143u - encodedDepth;
@@ -855,7 +885,7 @@ int wmain(int argc, wchar_t** argv)
                                     return (result & 0x400) ? result - 0x800 : result;
                                 };
                                 require((actual >> 46) == (expected >> 46) &&
-                                            (actual & 0xffff) == (expected & 0xffff),
+                                            (actual & 0x7fff) == (expected & 0x7fff) && !(actual & 0x8000),
                                         "Packed material chose the wrong depth or object");
                                 require(std::abs(signed11(actual >> 35) - signed11(expected >> 35)) <= 1 &&
                                             std::abs(signed11(actual >> 24) - signed11(expected >> 24)) <= 1,
@@ -866,7 +896,7 @@ int wmain(int argc, wchar_t** argv)
                             ++packedChecked;
                             packedWrites += actual != 0;
                         }
-                        require(!(actual & 0xffff) || (actual & 0xffff) <= 3,
+                        require(!(actual & 0x7fff) || (actual & 0x7fff) <= 3,
                                 "Packed material emitted a foreign object ID");
                     }
                 last = now;
@@ -935,7 +965,8 @@ int wmain(int argc, wchar_t** argv)
                                 !memcmp(vertex.clip, now[object * 6 + v].xyzw, 16),
                             "Rebatched object history mismatch");
                 }
-                UINT expectedFlags = frame == 1 || (frame == 3 && object != 1) ? GlassFg::GeometryMissingHistory : 0;
+                UINT expectedFlags = frame == 1 || (frame == 3 && (object != 1 || sourceHistory))
+                                         ? GlassFg::GeometryMissingHistory : 0;
                 if (frame == 4 && object == 1)
                     expectedFlags = GlassFg::GeometryEscapedBounds;
                 if (frame == 7 && object == 1)
@@ -997,8 +1028,8 @@ int wmain(int argc, wchar_t** argv)
         {
             require(packedChecked == UINT64(W) * H && packedWrites, "Packed material coverage was not verified");
             printf("PASS packed_material_gpu=1 original_material_preserved=1 nearest_layer_exact=1 "
-                   "motion_quantization_step_px=0.125 pixels=%llu writes=%llu bytes_per_pixel=8\n",
-                   packedChecked, packedWrites);
+                   "coverage_only_fallback=%u motion_quantization_step_px=0.125 pixels=%llu writes=%llu "
+                   "bytes_per_pixel=8\n", packedFallback, packedChecked, packedWrites);
             return 0;
         }
         if (recorder)
@@ -1150,12 +1181,12 @@ int wmain(int argc, wchar_t** argv)
             g.finish();
             experimentCheck.verify();
         }
-        printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u instance_rebatch=1 "
+        printf("PASS compiler_worker=1 retained_pipeline_lease=1 observed_creation=%u source_history=%u instance_rebatch=1 "
                "isolated_contours=1 inactive_instances=1 inactive_recovery=1 opaque_depth_rejection=1 "
                "partial_history_flag=1 "
                "generation_flag=1 escaped_bounds_flag=1 original_pixels=%llu motion_pixels=%llu "
                "overlapping_samples=%llu max_motion_error_px=%.9f\n",
-               observed, exact, checked, overlaps, maximum);
+               observed, sourceHistory, exact, checked, overlaps, maximum);
         return 0;
     }
     catch (const std::exception& e)

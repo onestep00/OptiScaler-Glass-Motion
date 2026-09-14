@@ -40,17 +40,19 @@ struct Geometry
 };
 struct Spans
 {
-    std::array<GlassExperimentPacketParent, 2048> data;
+    struct Entry { GlassExperimentPacketParent source; uint32_t flags=0, flagsValid=0; };
+    std::array<Entry, 2048> data;
     uint32_t used = 0, count = 0;
     uint64_t revision = 0;
     bool valid = true;
     void clear() { used = count = 0; valid = ++revision != 0; }
-    void append(uint32_t before, uint32_t after, GlassExperimentPacketParent row)
+    void append(uint32_t before, uint32_t after, GlassExperimentPacketParent row,
+                uint32_t flags, uint32_t flagsValid)
     {
         if (!valid || !row.count || row.count > 32767 || before != count ||
             uint64_t(before) + row.count != after || used == data.size()) { valid = false; return; }
         if (++revision == 0) { valid = false; return; }
-        row.first = before; data[used++] = row; count = after;
+        row.first = before; data[used++] = {row,flags,flagsValid}; count = after;
     }
 };
 struct Batch { uint64_t context = 0; unsigned epoch = 0; Spans rigid, skinned; };
@@ -83,6 +85,8 @@ void append(void* transforms, void* packet, uintptr_t c, uintptr_t d, void* cont
     const auto beforeCount = skin ? before.skinCount : before.rigidCount;
     if (!beforeCount) spans.clear();
     GlassExperimentPacketParent row;
+    uint16_t instanceFlags = 0;
+    bool flagsValid = false;
     row.count = static_cast<uint32_t>((words[1] >> 18) & 0x7fff);
     row.transformIndex = static_cast<uint32_t>((words[1] >> 33) & 0x1ffff);
     row.globalRange = static_cast<uint32_t>((words[0] >> 59) & 1);
@@ -101,6 +105,7 @@ void append(void* transforms, void* packet, uintptr_t c, uintptr_t d, void* cont
         {
             row.proxy = proxy; row.mesh = mesh; row.entry = before.entry; row.slot = slot;
             row.sourceArray = array.source; row.arrayCount = array.count; row.arrayGlobalStart = array.global;
+            flagsValid = read(proxy + 0xea, instanceFlags);
             ++parents;
         }
     }
@@ -109,7 +114,7 @@ void append(void* transforms, void* packet, uintptr_t c, uintptr_t d, void* cont
     valid = valid && batch.context == address && batch.epoch == capturedEpoch && read(address, after) &&
         before.entry == after.entry && before.geometry == after.geometry;
     if (!valid) { batch.rigid.valid = batch.skinned.valid = false; ++rejected; return; }
-    spans.append(beforeCount, skin ? after.skinCount : after.rigidCount, row);
+    spans.append(beforeCount, skin ? after.skinCount : after.rigidCount, row, instanceFlags, flagsValid);
 }
 struct FlushScope
 {
@@ -189,10 +194,23 @@ extern "C" __declspec(dllexport) int32_t GlassPacketParentQuery(uint64_t callsit
         callsite != drawReturn ||
         current->geometry.mesh != mesh || current->geometry.chunk != chunk || current->count != instances ||
         ordinal >= current->spans->used) return 0;
-    const auto& source = current->spans->data[ordinal];
+    const auto& source = current->spans->data[ordinal].source;
     if (!source.proxy || source.mesh != mesh || source.first != first || source.count != count ||
         source.transformIndex != transformIndex || source.globalRange != globalRange) return 0;
     *result = source; ++matched; return 1;
+}
+extern "C" __declspec(dllexport) int32_t GlassPacketParentQueryV2(uint64_t callsite, uint64_t mesh,
+    uint32_t chunk, uint32_t instances, uint32_t ordinal, uint32_t first, uint32_t count,
+    uint32_t transformIndex, uint32_t globalRange, GlassExperimentPacketParentV2* result)
+{
+    if (!result || result->size != sizeof(*result) || result->version != 2) return -1;
+    *result = {};
+    const auto status = GlassPacketParentQuery(callsite,mesh,chunk,instances,ordinal,first,count,
+                                              transformIndex,globalRange,&result->parent);
+    if (status != 1) return status;
+    const auto& entry = current->spans->data[ordinal];
+    result->instanceFlags = entry.flags; result->flagsValid = entry.flagsValid;
+    return 1;
 }
 extern "C" __declspec(dllexport) DWORD WINAPI GlassInstanceStart(void* directory)
 {

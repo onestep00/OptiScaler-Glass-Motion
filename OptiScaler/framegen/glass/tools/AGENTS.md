@@ -21,7 +21,7 @@
 - `audit_native_instance_inputs.py`: all original velocity VS current/prior data and control inputs; dependency presence is not grouped history admission.
 
 - `read_modifier_contracts.py`: cache-wide named modifier rows and shader aliases; no runtime reads.
-- `match_shared_native_motion.py`: native position/control graph matching, both prior-camera layouts and split outputs, unit-amplitude specialization and coverage-preserving terminal-collapse matching.
+- `match_shared_native_motion.py`: offline position/control matching. Its nearest-slot b7 labeling mixes resource namespaces; old matches/grafts require revalidation against native writer spans. See ../NativeOpaqueMvRoutes.md before using these results.
 - `graft_native_motion.py`: transplant native prior-position arithmetic and validate DXIL; engine slot admission remains separate.
 - `verify_native_grafts.py`: check original outputs, current jitter convention and cyclic native-prior equivalence; declaration export requires all checks.
 - `plan_motion_slots.py`: cache-wide shared-declaration VS/PS footprint audit with cached disassembly; free shader rows do not prove native writer or runtime admission.
