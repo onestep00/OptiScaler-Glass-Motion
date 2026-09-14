@@ -175,7 +175,48 @@ static int runDump(const wchar_t* shader)
 
 // Out-of-band compose check: the production path records the copies and the
 // compose on a module-owned compute list submitted on the FG queue.
-static int runCompose(const wchar_t* shader, bool manual)
+static D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackTexture(ID3D12Device* device, ID3D12CommandQueue* queue,
+                                                          ID3D12GraphicsCommandList* command,
+                                                          ID3D12CommandAllocator* allocator, ID3D12Resource* resource,
+                                                          D3D12_RESOURCE_STATES state, std::vector<std::byte>& storage)
+{
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 bytes = 0;
+    const auto description = resource->GetDesc();
+    device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    auto read = buffer(device, bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    allocator->Reset();
+    command->Reset(allocator, nullptr);
+    if (state != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        transition(command, resource, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+    source.pResource = resource;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    target.pResource = read.Get();
+    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target.PlacedFootprint = footprint;
+    command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    if (state != D3D12_RESOURCE_STATE_COPY_SOURCE)
+        transition(command, resource, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+    checked(command->Close(), "readback close");
+    ID3D12CommandList* lists[] = { command };
+    queue->ExecuteCommandLists(1, lists);
+    drain(device, queue);
+    void* data = nullptr;
+    checked(read->Map(0, nullptr, &data), "readback map");
+    storage.assign(static_cast<std::byte*>(data), static_cast<std::byte*>(data) + bytes);
+    read->Unmap(0, nullptr);
+    return footprint;
+}
+
+static float halfAt(const std::vector<std::byte>& data, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint,
+                    unsigned x, unsigned y, unsigned component)
+{
+    const auto* row = reinterpret_cast<const HALF*>(data.data() + y * footprint.Footprint.RowPitch);
+    return DirectX::PackedVector::XMConvertHalfToFloat(row[x * 4 + component]);
+}
+
+static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
 {
     constexpr unsigned Width = 32, Height = 20;
     ComPtr<ID3D12Debug> debug;
@@ -237,6 +278,73 @@ static int runCompose(const wchar_t* shader, bool manual)
         queue->ExecuteCommandLists(1, manualLists);
         drain(device.Get(), queue.Get());
         std::printf("PACKED_MOTION_MANUAL_OK compute_list=1\n");
+        return 0;
+    }
+    if (partial)
+    {
+        // Only the dispatched rows may be copied or written back. Pre-fill the
+        // composed texture with a sentinel so a full-frame write-back would be
+        // caught, then compose the top rows only.
+        constexpr unsigned partialRows = 8;
+        auto composed = gpu.motionOutput();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT sentinelFootprint {};
+        UINT64 sentinelBytes = 0;
+        const auto composedDescription = composed->GetDesc();
+        device->GetCopyableFootprints(&composedDescription, 0, 1, 0, &sentinelFootprint, nullptr, nullptr,
+                                      &sentinelBytes);
+        auto sentinelUpload =
+            buffer(device.Get(), sentinelBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        void* sentinelData = nullptr;
+        checked(sentinelUpload->Map(0, nullptr, &sentinelData), "sentinel map");
+        for (unsigned y = 0; y < Height; ++y)
+        {
+            auto* row = reinterpret_cast<HALF*>(static_cast<std::byte*>(sentinelData) +
+                                                y * sentinelFootprint.Footprint.RowPitch);
+            for (unsigned x = 0; x < Width * 4; ++x)
+                row[x] = DirectX::PackedVector::XMConvertFloatToHalf(9.0f);
+        }
+        sentinelUpload->Unmap(0, nullptr);
+        allocator->Reset();
+        command->Reset(allocator.Get(), nullptr);
+        D3D12_TEXTURE_COPY_LOCATION sentinelSource {}, sentinelTarget {};
+        sentinelSource.pResource = sentinelUpload.Get();
+        sentinelSource.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        sentinelSource.PlacedFootprint = sentinelFootprint;
+        sentinelTarget.pResource = composed;
+        sentinelTarget.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        command->CopyTextureRegion(&sentinelTarget, 0, 0, 0, &sentinelSource, nullptr);
+        checked(command->Close(), "sentinel close");
+        queue->ExecuteCommandLists(1, lists);
+        drain(device.Get(), queue.Get());
+
+        GlassFg::Controls controls { true, 50, false, 2 };
+        controls.packedRows = partialRows;
+        controls.packedWriteBack = true;
+        require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                  D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), controls),
+                "partial submitCompose");
+        for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
+            Sleep(5);
+        require(gpu.composeReady(), "partial compose fence");
+        drain(device.Get(), queue.Get());
+
+        std::vector<std::byte> composedRead, engineRead;
+        allocator->Reset();
+        command->Reset(allocator.Get(), nullptr);
+        const auto composedFootprint = readbackTexture(device.Get(), queue.Get(), command.Get(), allocator.Get(),
+                                                       composed, D3D12_RESOURCE_STATE_COPY_DEST, composedRead);
+        const auto engineFootprint = readbackTexture(device.Get(), queue.Get(), command.Get(), allocator.Get(),
+                                                     motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, engineRead);
+        const auto composedEdge = halfAt(composedRead, composedFootprint, 4, 6, 0);
+        const auto composedOutside = halfAt(composedRead, composedFootprint, 4, 14, 0);
+        const auto engineEdge = halfAt(engineRead, engineFootprint, 4, 6, 0);
+        const auto engineOutside = halfAt(engineRead, engineFootprint, 4, 14, 0);
+        require(std::abs(composedEdge - .0625f) < .001f, "partial compose did not reach the edge pixel");
+        require(std::abs(composedOutside - 9.0f) < .01f, "partial input copy was not limited to the composed rows");
+        require(std::abs(engineEdge - .0625f) < .001f, "partial write-back did not reach the edge pixel");
+        require(std::abs(engineOutside) < .001f, "partial write-back copied rows outside the composed range");
+        std::printf("PACKED_MOTION_PARTIAL_OK rows=%u edge=1 outside_untouched=1 stale_outside=1\n", partialRows);
+        gpu.releaseAfterGpuDrain();
         return 0;
     }
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
@@ -512,6 +620,8 @@ int wmain(int argc, wchar_t** argv)
             return runCompose(argv[1], false);
         if (argc == 3 && std::wcscmp(argv[2], L"--compose-manual") == 0)
             return runCompose(argv[1], true);
+        if (argc == 3 && std::wcscmp(argv[2], L"--compose-partial") == 0)
+            return runCompose(argv[1], false, true);
         require(argc == 2, "unexpected argument");
         constexpr unsigned Width = 32, Height = 20;
         ComPtr<ID3D12Device> device;

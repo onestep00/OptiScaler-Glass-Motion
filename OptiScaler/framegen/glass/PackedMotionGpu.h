@@ -346,10 +346,11 @@ class PackedMotionGpu
             return false;
         if (FAILED(composeAllocator->Reset()) || FAILED(composeList->Reset(composeAllocator, nullptr)))
             return false;
+        const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
         if (!dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
                       controls) ||
             (controls.packedWriteBack && !writeBack(composeList, originalMotion, originalDepth, motionState,
-                                                    depthState)) ||
+                                                    depthState, rows)) ||
             FAILED(composeList->Close()))
             return false;
         ID3D12CommandList* lists[] { composeList };
@@ -632,7 +633,7 @@ class PackedMotionGpu
     // back into the game's own FG inputs. Both targets are already in
     // COPY_DEST, the state the FG boundary hands them over in.
     bool writeBack(ID3D12GraphicsCommandList* command, ID3D12Resource* targetMotion, ID3D12Resource* targetDepth,
-                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState)
+                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState, unsigned rows)
     {
         if (!command || !targetMotion || !targetDepth || !motion || !depth)
             return false;
@@ -642,8 +643,20 @@ class PackedMotionGpu
             transition(command, targetMotion, motionState, D3D12_RESOURCE_STATE_COPY_DEST);
         if (depthState != D3D12_RESOURCE_STATE_COPY_DEST)
             transition(command, targetDepth, depthState, D3D12_RESOURCE_STATE_COPY_DEST);
-        command->CopyResource(targetMotion, motion);
-        command->CopyResource(targetDepth, depth);
+        // Only the rows the shader composed can differ from the engine's own
+        // inputs; copying the rest is pure bandwidth and would also clobber
+        // them with this module's scratch texture.
+        const unsigned copyRows = (std::min)(rows ? rows : height, height);
+        const D3D12_BOX box { 0, 0, 0, width, copyRows, 1 };
+        D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        source.pResource = motion;
+        target.pResource = targetMotion;
+        command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
+        source.pResource = depth;
+        target.pResource = targetDepth;
+        command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
         if (motionState != D3D12_RESOURCE_STATE_COPY_DEST)
             transition(command, targetMotion, D3D12_RESOURCE_STATE_COPY_DEST, motionState);
         if (depthState != D3D12_RESOURCE_STATE_COPY_DEST)
@@ -663,12 +676,29 @@ class PackedMotionGpu
             return false;
         if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        command->CopyResource(motion, originalMotion);
-        if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-            transition(command, originalMotion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionState);
         if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalDepth, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        command->CopyResource(depth, originalDepth);
+        {
+            // Same rule as the write-back: the shader only reads the rows it
+            // dispatches over. A pending dump reads the whole frame, so keep the
+            // full copy for that case only.
+            const unsigned copyRows =
+                dumpRequests.load(std::memory_order_relaxed)
+                    ? height
+                    : (std::min)(height, (std::max)(1u, controls.packedRows));
+            const D3D12_BOX box { 0, 0, 0, width, copyRows, 1 };
+            D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            source.pResource = originalMotion;
+            target.pResource = motion;
+            command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
+            source.pResource = originalDepth;
+            target.pResource = depth;
+            command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
+        }
+        if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+            transition(command, originalMotion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionState);
         if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
 
