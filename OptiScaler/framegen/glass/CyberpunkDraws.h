@@ -35,6 +35,9 @@ struct CyberpunkDrawStatus
     // Why an array span could not receive a verified owner (proxy) identity.
     std::uint64_t parentNoFlag = 0, parentNoEntry = 0, parentNoTicket = 0, parentNoSlot = 0;
     std::uint64_t parentNoMesh = 0, parentNoHeader = 0, parentNoSelection = 0;
+    // Split of parentNoSelection: grouped update (0x2000), packet-local
+    // transforms, or a range outside the owner's array.
+    std::uint64_t parentNoSelectionGrouped = 0, parentNoSelectionNonGlobal = 0, parentNoSelectionRange = 0;
     std::uint64_t parentSeeded = 0;
 };
 CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept;

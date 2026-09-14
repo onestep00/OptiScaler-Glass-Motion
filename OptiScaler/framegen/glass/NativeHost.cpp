@@ -109,6 +109,37 @@ std::filesystem::path packedShaderPath()
     return Util::DllPath().parent_path() / L"Glass" / L"GlassObjectMotion.hlsl";
 }
 
+// Automatic staged ramp for unattended sessions: the same order the manual
+// probe/apply protocol uses, driven by elapsed time after the first FG frame.
+void runAutoStage() noexcept
+{
+    static std::atomic<std::uint64_t> startMs = 0;
+    static std::atomic<unsigned> step = ~0u;
+    const auto now = GetTickCount64();
+    auto started = startMs.load(std::memory_order_relaxed);
+    if (!started)
+    {
+        startMs.compare_exchange_strong(started, now, std::memory_order_relaxed);
+        started = startMs.load(std::memory_order_relaxed);
+    }
+    const auto seconds = (now - started) / 1000;
+    const unsigned target = seconds < 20 ? 0u : seconds < 40 ? 1u : 2u;
+    if (step.load(std::memory_order_relaxed) == target)
+        return;
+    step.store(target, std::memory_order_relaxed);
+    auto value = ReadControls();
+    value.packedDispatch = true;
+    value.packedRows = target == 0 ? 240u : 1440u;
+    value.packedSubstitute = target >= 2;
+    WriteControls(value);
+    if (auto& r = runtime(); r.log)
+    {
+        std::fprintf(r.log, "AUTO_STAGE step=%u rows=%u substitute=%u elapsed_s=%llu\n", target, value.packedRows,
+                     value.packedSubstitute ? 1u : 0u, static_cast<unsigned long long>(seconds));
+        std::fflush(r.log);
+    }
+}
+
 D3D12Callbacks makeCallbacks()
 {
     D3D12Callbacks value;
@@ -154,6 +185,9 @@ D3D12Callbacks makeCallbacks()
                     break;
                 }
         r.reap();
+        // The live channel and the periodic log must not depend on the
+        // OptiScaler overlay being rendered: this hook runs every frame.
+        RefreshGeometryHealthIfNeeded(GetTickCount64());
     };
     value.signal = [](void* p, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
     {
@@ -316,7 +350,12 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     Inputs inputs;
     std::shared_ptr<Entry> entry;
     PreparedInputs prepared;
-    const auto controls = ReadControls();
+    auto controls = ReadControls();
+    if (controls.autoStage)
+    {
+        runAutoStage();
+        controls = ReadControls();
+    }
     if (Inputs::read(parameters, inputs))
     {
         std::lock_guard lock(r.mutex);

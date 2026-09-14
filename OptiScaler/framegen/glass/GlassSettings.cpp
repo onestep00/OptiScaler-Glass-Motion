@@ -41,7 +41,8 @@ bool load()
                               ini.GetBoolValue("GlassFG", "PackedDispatch", true),
                               static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "PackedRows", 240), 1L, 32768L)),
                               ini.GetBoolValue("GlassFG", "PackedSubstitute", false),
-                              ini.GetBoolValue("GlassFG", "Trace", false) }
+                              ini.GetBoolValue("GlassFG", "Trace", false),
+                              ini.GetBoolValue("GlassFG", "AutoStage", false) }
                        .packed(),
                    std::memory_order_relaxed);
     return true;
@@ -63,6 +64,7 @@ bool save(Controls value)
     ini.SetLongValue("GlassFG", "PackedRows", std::clamp(value.packedRows, 1u, 32768u));
     ini.SetBoolValue("GlassFG", "PackedSubstitute", value.packedSubstitute);
     ini.SetBoolValue("GlassFG", "Trace", value.trace);
+    ini.SetBoolValue("GlassFG", "AutoStage", value.autoStage);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -144,6 +146,12 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Writes one flushed line per dispatch, substitution and submit step.\n"
                           "A driver reset then leaves the last executed step in the log.");
+    bool autoStage = value.autoStage;
+    changed |= ImGui::Checkbox("Automatic staged ramp", &autoStage);
+    value.autoStage = autoStage;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Unattended order: 240 rows, then full rows, then the FG input swap.\n"
+                          "Each step is logged as AUTO_STAGE so a reset is attributable.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);

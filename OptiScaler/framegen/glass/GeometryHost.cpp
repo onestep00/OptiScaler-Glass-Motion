@@ -198,6 +198,11 @@ void ReportGeometryHost(FILE* log) noexcept
                 "no_header=%llu no_selection=%llu seeded=%llu\n",
                 packets.parentNoFlag, packets.parentNoEntry, packets.parentNoTicket, packets.parentNoSlot,
                 packets.parentNoMesh, packets.parentNoHeader, packets.parentNoSelection, packets.parentSeeded);
+        std::fprintf(log,
+                     "GEOMETRY_SELECTION grouped=%llu non_global=%llu range=%llu\n",
+                     static_cast<unsigned long long>(packets.parentNoSelectionGrouped),
+                     static_cast<unsigned long long>(packets.parentNoSelectionNonGlobal),
+                     static_cast<unsigned long long>(packets.parentNoSelectionRange));
         fprintf(log, "GEOMETRY_CHUNKS unknown=");
         for (const auto& entry : packed.unknownChunks)
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));

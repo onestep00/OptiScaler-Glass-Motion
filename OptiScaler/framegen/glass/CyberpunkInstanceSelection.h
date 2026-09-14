@@ -21,6 +21,21 @@ struct CyberpunkInstanceSelection
 
     // Storage offsets alone are not original indices: the grouped update path
     // repacks source elements into this same allocation in group order.
+    // Reason codes let the live counters attribute the missing element order
+    // without changing the admission decision.
+    static int rejectCode(bool global, std::uint32_t packetStart, std::uint32_t packetCount,
+                          std::uint32_t ownerStart, std::uint32_t originalCount, std::uint32_t ownerFlags)
+    {
+        if (ownerFlags & 0x2000)
+            return 1; // grouped update path
+        if (!global)
+            return 2; // packet-local transforms
+        std::uint32_t first = UINT32_MAX;
+        if (!globalStorageRange(global, packetStart, packetCount, ownerStart, originalCount, first))
+            return 3; // range does not lie inside the owner's array
+        return 0;
+    }
+
     static bool globalStorageRange(bool global, std::uint32_t packetStart, std::uint32_t packetCount,
                                    std::uint32_t ownerStart, std::uint32_t originalCount,
                                    std::uint32_t& first)

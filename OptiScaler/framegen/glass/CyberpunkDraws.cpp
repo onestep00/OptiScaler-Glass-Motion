@@ -41,6 +41,8 @@ struct EngineDrawState
     std::atomic<std::uint64_t> batches = 0, appends = 0, identities = 0, draws = 0, rejected = 0;
     std::atomic<std::uint64_t> parentNoFlag = 0, parentNoEntry = 0, parentNoTicket = 0, parentNoSlot = 0,
                              parentNoMesh = 0, parentNoHeader = 0, parentNoSelection = 0;
+    std::atomic<std::uint64_t> parentNoSelectionGrouped = 0, parentNoSelectionNonGlobal = 0,
+                             parentNoSelectionRange = 0;
     std::atomic<std::uint64_t> parentSeeded = 0;
 };
 std::atomic<EngineDrawState*> activeDrawState = nullptr;
@@ -274,7 +276,17 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                             record.originalFirst = static_cast<std::uint16_t>(selection.linearFirst);
                         }
                         else
+                        {
                             ++state->parentNoSelection;
+                            switch (CyberpunkInstanceSelection::rejectCode(record.global, record.transformIndex,
+                                                                            record.count, instances.globalStart,
+                                                                            instances.count, flags))
+                            {
+                            case 1: ++state->parentNoSelectionGrouped; break;
+                            case 2: ++state->parentNoSelectionNonGlobal; break;
+                            default: ++state->parentNoSelectionRange; break;
+                            }
+                        }
                     }
                 }
                 catch (...) {}
@@ -527,6 +539,9 @@ CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept
     value.parentNoMesh = state->parentNoMesh.load();
     value.parentNoHeader = state->parentNoHeader.load();
     value.parentNoSelection = state->parentNoSelection.load();
+    value.parentNoSelectionGrouped = state->parentNoSelectionGrouped.load();
+    value.parentNoSelectionNonGlobal = state->parentNoSelectionNonGlobal.load();
+    value.parentNoSelectionRange = state->parentNoSelectionRange.load();
     value.parentSeeded = state->parentSeeded.load();
     return value;
 }
