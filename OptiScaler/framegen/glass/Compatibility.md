@@ -1,5 +1,9 @@
 # Compatibility and runtime evidence
 
+> **Stale status:** this file records the 2026-09-11 build. It still says the
+> production capture owner and FG substitution are unimplemented. See
+> `SupportMatrix.md` for the current implementation and limitations.
+
 - Created: 2026-09-11
 - Updated: 2026-09-11
 - Status: MRT, indirect binding, relocation and status-display checks pass; fresh-process validation pending
