@@ -5,6 +5,7 @@
 #include "NativeHost.h"
 #include "PackedMotionCapture.h"
 #include "GlassPluginHost.h"
+#include "GlassArrayMapping.h"
 #include <Util.h>
 #include <cstdio>
 #include <fstream>
@@ -67,6 +68,9 @@ void writeStatus(std::ofstream& file)
          << " captures=" << host.captures << " active=" << host.active << " retiring=" << host.retiring
          << " stopped=" << host.stopped << " unavailable=" << host.unavailable << "\n";
     file << "plugin loaded=" << (GlassPluginLoaded() ? 1 : 0) << "\n";
+    const auto mapping = ReadArrayMappingStats();
+    file << "arraymap entries=" << mapping.entries << " published=" << mapping.published
+         << " replaced=" << mapping.replaced << " lookups=" << mapping.lookups << " hits=" << mapping.hits << "\n";
     file << "ok=1\n";
 }
 } // namespace

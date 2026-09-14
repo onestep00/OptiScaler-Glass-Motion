@@ -59,6 +59,11 @@ bool LoadGlassPlugin(char* message, unsigned messageBytes) noexcept
     if (const auto* layout = GetCyberpunkLayout(GetModuleHandleW(nullptr)))
         api.engineUpdate = reinterpret_cast<const void*>(
             reinterpret_cast<const std::byte*>(GetModuleHandleW(nullptr)) + layout->functions[CyberpunkLayout::Update]);
+    api.publishArrayMapping = [](const GlassArrayMappingEntry* entry) noexcept
+    {
+        if (entry)
+            PublishArrayMapping(*entry);
+    };
     api.trace = [](const char* text) noexcept
     {
         const auto path = Util::DllPath().parent_path() / L"OptiScaler.Glass.log";

@@ -44,12 +44,14 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassMotionIdentity.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassDebugControl.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassPluginHost.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)GlassArrayMapping.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionGpu.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionPass.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)PackedMotionCapture.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassMotionIdentity.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassDebugControl.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassPluginHost.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GlassArrayMapping.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryCommands.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryObjectRegistry.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkObjects.h" />

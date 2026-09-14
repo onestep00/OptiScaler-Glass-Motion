@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdio>
+#include "GlassArrayMapping.h"
 
 namespace GlassFg
 {
@@ -18,6 +19,8 @@ struct GlassPluginApi
     // Engine functions the resident module already resolved. NULL when the
     // layout was not validated in this process.
     const void* engineUpdate = nullptr;
+    // Grouped-array element mapping sink (GlassArrayMapping). NULL is allowed.
+    void (*publishArrayMapping)(const GlassArrayMappingEntry*) noexcept = nullptr;
     // Called by the plugin for its own trace lines; never NULL.
     void (*trace)(const char* text) noexcept = nullptr;
 };

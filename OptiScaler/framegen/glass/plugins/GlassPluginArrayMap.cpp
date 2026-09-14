@@ -12,6 +12,7 @@
 // engine data instead of rejecting grouped arrays.
 #include <windows.h>
 #include <detours.h>
+#include "../DetourThreads.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -20,12 +21,21 @@
 
 namespace
 {
+struct GlassArrayMappingEntry
+{
+    std::uintptr_t proxy = 0;
+    std::uint32_t outputStart = 0, count = 0;
+    std::uint64_t frame = 0;
+    std::uint32_t indices[64] {};
+};
+
 struct GlassPluginApi
 {
     unsigned version = 1;
     FILE* log = nullptr;
     const wchar_t* moduleDirectory = nullptr;
     const void* engineUpdate = nullptr;
+    void (*publishArrayMapping)(const GlassArrayMappingEntry*) noexcept = nullptr;
     void (*trace)(const char* text) noexcept = nullptr;
 };
 
@@ -44,8 +54,9 @@ struct Group
 };
 Group current {};
 std::atomic<unsigned> appends { 0 };
-std::uint32_t firstIndices[8] {};
+std::uint32_t firstIndices[64] {};
 unsigned firstCount = 0;
+std::uint64_t publishedFrames = 0;
 
 void trace(const char* text)
 {
@@ -59,9 +70,6 @@ void hookedAppend(void* container, std::uintptr_t sourceMatrix)
         sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30)
     {
         const auto index = std::uint32_t((sourceMatrix - current.arrayBase) / 0x30);
-        for (auto& seen : firstIndices)
-            if (seen == index)
-                break;
         if (firstCount < std::size(firstIndices))
             firstIndices[firstCount++] = index;
         appends.fetch_add(1, std::memory_order_relaxed);
@@ -87,6 +95,17 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
     }
     if (originalGrouped)
         originalGrouped(proxy, context);
+    if (current.valid && firstCount && host && host->publishArrayMapping)
+    {
+        GlassArrayMappingEntry entry;
+        entry.proxy = current.proxy;
+        entry.outputStart = current.outputStart;
+        entry.count = firstCount;
+        entry.frame = ++publishedFrames;
+        for (unsigned i = 0; i < firstCount && i < 64; ++i)
+            entry.indices[i] = firstIndices[i];
+        host->publishArrayMapping(&entry);
+    }
     if (current.valid)
     {
         static unsigned reported = 0;
@@ -127,10 +146,25 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     auto* append = reinterpret_cast<std::byte*>(base + 0x9c19e8);
     originalGrouped = reinterpret_cast<GroupedPathFn>(const_cast<void*>(static_cast<const void*>(grouped)));
     originalAppend = reinterpret_cast<AppendFn>(const_cast<void*>(static_cast<const void*>(append)));
-    if (DetourAttach(reinterpret_cast<PVOID*>(&originalGrouped), reinterpret_cast<PVOID>(&hookedGrouped)) != NO_ERROR ||
-        DetourAttach(reinterpret_cast<PVOID*>(&originalAppend), reinterpret_cast<PVOID>(&hookedAppend)) != NO_ERROR)
+    // Detours requires a transaction and the enlistment of every thread that can
+    // execute the patched code. Attaching outside a transaction crashed the game
+    // on 2026-09-14 16:59.
+    GlassFg::DetourThreads threads;
+    if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
     {
-        trace("ARRAY_MAP rejected=1 reason=detour");
+        trace("ARRAY_MAP rejected=1 reason=transaction_begin");
+        return false;
+    }
+    const bool detached = DetourAttach(reinterpret_cast<PVOID*>(&originalGrouped),
+                                       reinterpret_cast<PVOID>(&hookedGrouped)) == NO_ERROR &&
+                          DetourAttach(reinterpret_cast<PVOID*>(&originalAppend),
+                                       reinterpret_cast<PVOID>(&hookedAppend)) == NO_ERROR;
+    if (!detached || !threads.enlist() || DetourTransactionCommit() != NO_ERROR)
+    {
+        DetourTransactionAbort();
+        originalGrouped = nullptr;
+        originalAppend = nullptr;
+        trace("ARRAY_MAP rejected=1 reason=transaction_commit");
         return false;
     }
     trace("ARRAY_MAP attached=1");
@@ -139,14 +173,22 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
 
 extern "C" __declspec(dllexport) void GlassPluginDetach()
 {
-    if (originalGrouped)
-        DetourDetach(reinterpret_cast<PVOID*>(&originalGrouped), reinterpret_cast<PVOID>(&hookedGrouped));
-    if (originalAppend)
-        DetourDetach(reinterpret_cast<PVOID*>(&originalAppend), reinterpret_cast<PVOID>(&hookedAppend));
+    if (originalGrouped || originalAppend)
+    {
+        GlassFg::DetourThreads threads;
+        threads.gather();
+        DetourTransactionBegin();
+        if (originalGrouped)
+            DetourDetach(reinterpret_cast<PVOID*>(&originalGrouped), reinterpret_cast<PVOID>(&hookedGrouped));
+        if (originalAppend)
+            DetourDetach(reinterpret_cast<PVOID*>(&originalAppend), reinterpret_cast<PVOID>(&hookedAppend));
+        threads.enlist();
+        DetourTransactionCommit();
+    }
     originalGrouped = nullptr;
     originalAppend = nullptr;
-    host = nullptr;
     trace("ARRAY_MAP detached=1");
+    host = nullptr;
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
