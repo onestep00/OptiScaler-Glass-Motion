@@ -2,7 +2,7 @@
 //
 // Cyberpunk's grouped-array path (proxy +0xEA flag 0x2000) rebuilds the draw's
 // instance order from the group's source-index list:
-//   0x1e8778(proxy, context) walks the selected group records and, for every
+//   0x1e8778(mesh, previousValid) walks the selected group records and, for every
 //   16-bit source index, appends proxy+0x108[index*0x30] through 0x9c19e8 into
 //   a container. The packet receives those entries in append order with the
 //   output start stored at proxy+0x114.
@@ -54,7 +54,10 @@ std::atomic<int> inFlight { 0 };
 std::atomic<unsigned> hitsBase { 0 }, hitsFlag { 0 };
 HMODULE selfModule = nullptr;
 std::wstring ownLogPath;
-using GroupedPathFn = void (*)(std::uintptr_t proxy, std::uintptr_t* context);
+PVOID vehHandle = nullptr;
+// 0x1e8778 is the mesh vtable slot +0xf0: (mesh, previousTransformValid).
+// The second argument is a boolean, not a pointer (see NativeOpaqueMvRoutes.md).
+using GroupedPathFn = void (*)(std::uintptr_t mesh, std::uintptr_t previousValid);
 using AppendFn = void (*)(void* container, std::uintptr_t sourceMatrix);
 GroupedPathFn originalGrouped = nullptr;
 AppendFn originalAppend = nullptr;
@@ -120,108 +123,114 @@ LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) noexcept
 }
 
 void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
+void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept;
+std::atomic<unsigned> flaggedDumps { 0 };
 
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 {
     (void)container;
-    if (draining.load(std::memory_order_relaxed))
-        return;
     ++inFlight;
-    const auto call = appendCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (call <= 4)
-        directLog("append_enter=%u source=%llx valid=%u", call,
-                  static_cast<unsigned long long>(sourceMatrix), current.valid ? 1u : 0u);
-    if (current.valid && sourceMatrix >= current.arrayBase &&
-        sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30)
+    if (!draining.load(std::memory_order_relaxed))
     {
-        const auto index = std::uint32_t((sourceMatrix - current.arrayBase) / 0x30);
-        if (firstCount < std::size(firstIndices))
-            firstIndices[firstCount++] = index;
-        appends.fetch_add(1, std::memory_order_relaxed);
+        const auto call = appendCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (call <= 4)
+            directLog("append_enter=%u source=%llx valid=%u", call,
+                      static_cast<unsigned long long>(sourceMatrix), current.valid ? 1u : 0u);
+        if (current.valid && sourceMatrix >= current.arrayBase &&
+            sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30)
+        {
+            const auto index = std::uint32_t((sourceMatrix - current.arrayBase) / 0x30);
+            if (firstCount < std::size(firstIndices))
+                firstIndices[firstCount++] = index;
+            appends.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     --inFlight;
 }
 
-void hookedGrouped(std::uintptr_t proxy, std::uintptr_t* context)
+void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
 {
-    // During detach the hook must still forward the original call, but it must
-    // stop touching plugin state so the DLL can be unmapped safely.
-    if (draining.load(std::memory_order_relaxed))
-    {
-        if (originalGrouped)
-            originalGrouped(proxy, context);
-        return;
-    }
+    // The whole entry, including the forwarded original call, is counted so
+    // Detach can wait until no thread is inside this DLL before it is unloaded.
     ++inFlight;
-    const auto call = groupedCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (call <= 4)
-        directLog("grouped_enter=%u proxy=%llx context=%llx", call,
-                  static_cast<unsigned long long>(proxy),
-                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(context)));
-    // Unreadable proxy fields must never crash the game: this hook runs on the
-    // engine's render path.
-    __try
+    const bool active = !draining.load(std::memory_order_relaxed);
+    unsigned call = 0;
+    if (active)
     {
-        if (proxy)
+        call = groupedCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (call <= 4)
+            directLog("grouped_enter=%u proxy=%llx prev=%llx", call,
+                      static_cast<unsigned long long>(proxy),
+                      static_cast<unsigned long long>(previousValid));
+        // Unreadable proxy fields must never crash the game: this hook runs on
+        // the engine's render path.
+        __try
         {
-            current.proxy = proxy;
-            current.arrayBase = *reinterpret_cast<std::uintptr_t*>(proxy + 0x108);
-            current.count = *reinterpret_cast<std::uint32_t*>(proxy + 0x110);
-            current.outputStart = *reinterpret_cast<std::uint32_t*>(proxy + 0x114);
-            current.flags = *reinterpret_cast<std::uint16_t*>(proxy + 0xea);
-            current.valid = current.arrayBase != 0 && current.count != 0;
-            appends.store(0, std::memory_order_relaxed);
-            for (auto& seen : firstIndices)
-                seen = 0;
-            firstCount = 0;
+            if (proxy)
+            {
+                current.proxy = proxy;
+                current.arrayBase = *reinterpret_cast<std::uintptr_t*>(proxy + 0x108);
+                current.count = *reinterpret_cast<std::uint32_t*>(proxy + 0x110);
+                current.outputStart = *reinterpret_cast<std::uint32_t*>(proxy + 0x114);
+                current.flags = *reinterpret_cast<std::uint16_t*>(proxy + 0xea);
+                current.valid = current.arrayBase != 0 && current.count != 0;
+                appends.store(0, std::memory_order_relaxed);
+                for (auto& seen : firstIndices)
+                    seen = 0;
+                firstCount = 0;
+            }
         }
-    }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
             current.valid = false;
             directLog("read_fault=1");
         }
-    // Raw field probe so a wrong base object or a wrong layout shows up as zeros
-    // instead of looking like "the path never has elements".
-    if (call <= 4 || (call % 256) == 0)
-    {
-        probeFields("grouped_proxy", call, proxy);
-        if (context)
-            probeFields("grouped_context", call, reinterpret_cast<std::uintptr_t>(context));
+        // Raw field probe so a wrong base object or a wrong layout shows up as
+        // zeros instead of looking like "the path never has elements".
+        if (call <= 4 || (call % 4096) == 0)
+            probeFields("grouped", call, proxy);
+        // Arrays (flag 0x2000) are rare; dump the full object so the element
+        // list can be located from live bytes instead of another guess.
+        if ((current.flags & 0x2000) && flaggedDumps.fetch_add(1, std::memory_order_relaxed) < 12)
+            dumpObject("flagged", call, proxy);
     }
     if (originalGrouped)
-        originalGrouped(proxy, context);
-    const auto* api = host.load(std::memory_order_acquire);
-    if (current.valid && firstCount && api && api->publishArrayMapping)
+        originalGrouped(proxy, previousValid);
+    if (active)
     {
-        __try
+        const auto* api = host.load(std::memory_order_acquire);
+        if (current.valid && firstCount && api && api->publishArrayMapping)
         {
-            GlassArrayMappingEntry entry;
-            entry.proxy = current.proxy;
-            entry.outputStart = current.outputStart;
-            entry.count = firstCount;
-            entry.frame = ++publishedFrames;
-            for (unsigned i = 0; i < firstCount && i < 64; ++i)
-                entry.indices[i] = firstIndices[i];
-            api->publishArrayMapping(&entry);
+            __try
+            {
+                GlassArrayMappingEntry entry;
+                entry.proxy = current.proxy;
+                entry.outputStart = current.outputStart;
+                entry.count = firstCount;
+                entry.frame = ++publishedFrames;
+                for (unsigned i = 0; i < firstCount && i < 64; ++i)
+                    entry.indices[i] = firstIndices[i];
+                api->publishArrayMapping(&entry);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                directLog("publish_fault=1");
+            }
         }
-        __except (EXCEPTION_EXECUTE_HANDLER)
+        if (current.valid)
         {
-            directLog("publish_fault=1");
-        }
-    }
-    if (current.valid)
-    {
-        static unsigned reported = 0;
-        if (++reported % 60 == 0)
-        {
-            char text[256] {};
-            std::snprintf(text, sizeof(text),
-                          "ARRAY_MAP proxy=%llx count=%u output_start=%u flags=%04x appends=%u indices=%u,%u,%u,%u,%u,%u",
-                          static_cast<unsigned long long>(current.proxy), current.count, current.outputStart,
-                          current.flags, appends.load(std::memory_order_relaxed), firstIndices[0], firstIndices[1],
-                          firstIndices[2], firstIndices[3], firstIndices[4], firstIndices[5]);
-            directLog("%s", text);
+            static unsigned reported = 0;
+            if (++reported % 60 == 0)
+            {
+                char text[256] {};
+                std::snprintf(text, sizeof(text),
+                              "ARRAY_MAP proxy=%llx count=%u output_start=%u flags=%04x appends=%u "
+                              "indices=%u,%u,%u,%u,%u,%u",
+                              static_cast<unsigned long long>(current.proxy), current.count, current.outputStart,
+                              current.flags, appends.load(std::memory_order_relaxed), firstIndices[0], firstIndices[1],
+                              firstIndices[2], firstIndices[3], firstIndices[4], firstIndices[5]);
+                directLog("%s", text);
+            }
         }
     }
     current.valid = false;
@@ -246,15 +255,28 @@ bool markerPresent(const wchar_t* name) noexcept
 // as zeros instead of silently producing no elements.
 void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
 {
-    std::uintptr_t base = 0;
-    std::uint32_t count = 0, start = 0;
+    std::uintptr_t p18 = 0, p28 = 0, p40 = 0, p108 = 0;
+    std::uint32_t p20 = 0, p24 = 0, p2c = 0, p30 = 0, p34 = 0, p48 = 0, p4c = 0, p50 = 0, p54 = 0, p110 = 0,
+                  p114 = 0;
     std::uint16_t flags = 0;
     bool read = false;
     __try
     {
-        base = *reinterpret_cast<std::uintptr_t*>(pointer + 0x108);
-        count = *reinterpret_cast<std::uint32_t*>(pointer + 0x110);
-        start = *reinterpret_cast<std::uint32_t*>(pointer + 0x114);
+        p18 = *reinterpret_cast<std::uintptr_t*>(pointer + 0x18);
+        p20 = *reinterpret_cast<std::uint32_t*>(pointer + 0x20);
+        p24 = *reinterpret_cast<std::uint32_t*>(pointer + 0x24);
+        p28 = *reinterpret_cast<std::uintptr_t*>(pointer + 0x28);
+        p2c = *reinterpret_cast<std::uint32_t*>(pointer + 0x2c);
+        p30 = *reinterpret_cast<std::uint32_t*>(pointer + 0x30);
+        p34 = *reinterpret_cast<std::uint32_t*>(pointer + 0x34);
+        p40 = *reinterpret_cast<std::uintptr_t*>(pointer + 0x40);
+        p48 = *reinterpret_cast<std::uint32_t*>(pointer + 0x48);
+        p4c = *reinterpret_cast<std::uint32_t*>(pointer + 0x4c);
+        p50 = *reinterpret_cast<std::uint32_t*>(pointer + 0x50);
+        p54 = *reinterpret_cast<std::uint32_t*>(pointer + 0x54);
+        p108 = *reinterpret_cast<std::uintptr_t*>(pointer + 0x108);
+        p110 = *reinterpret_cast<std::uint32_t*>(pointer + 0x110);
+        p114 = *reinterpret_cast<std::uint32_t*>(pointer + 0x114);
         flags = *reinterpret_cast<std::uint16_t*>(pointer + 0xea);
         read = true;
     }
@@ -262,13 +284,46 @@ void probeFields(const char* tag, unsigned call, std::uintptr_t pointer) noexcep
     {
         read = false;
     }
-    if (base)
+    if (p108)
         hitsBase.fetch_add(1, std::memory_order_relaxed);
     if (flags & 0x2000)
         hitsFlag.fetch_add(1, std::memory_order_relaxed);
-    directLog("%s=%u ptr=%llx base=%llx count=%u start=%u flags=%04x read=%u", tag, call,
-              static_cast<unsigned long long>(pointer), static_cast<unsigned long long>(base), count, start, flags,
-              read ? 1u : 0u);
+    directLog("%s=%u ptr=%llx p18=%llx p20=%x p24=%x p28=%llx p2c=%x p30=%x p34=%x p40=%llx p48=%x p4c=%x p50=%x "
+              "p54=%x p108=%llx p110=%x p114=%x pea=%04x read=%u",
+              tag, call, static_cast<unsigned long long>(pointer), static_cast<unsigned long long>(p18), p20, p24,
+              static_cast<unsigned long long>(p28), p2c, p30, p34, static_cast<unsigned long long>(p40), p48, p4c, p50,
+              p54, static_cast<unsigned long long>(p108), p110, p114, flags, read ? 1u : 0u);
+}
+
+// Full-object hex dump (0x00..0x1F8) used once per rare array object.
+void dumpObject(const char* tag, unsigned call, std::uintptr_t pointer) noexcept
+{
+    unsigned long long words[64] {};
+    bool read = false;
+    __try
+    {
+        for (unsigned i = 0; i < 64; ++i)
+            words[i] = *reinterpret_cast<unsigned long long*>(pointer + i * 8);
+        read = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        read = false;
+    }
+    if (!read)
+    {
+        directLog("%s=%u ptr=%llx dump_fault=1", tag, call, static_cast<unsigned long long>(pointer));
+        return;
+    }
+    char buffer[1500] {};
+    int used = 0;
+    for (unsigned i = 0; i < 64; ++i)
+    {
+        if (used >= static_cast<int>(sizeof(buffer)) - 32)
+            break;
+        used += std::snprintf(buffer + used, sizeof(buffer) - used, " %03x=%llx", i * 8, words[i]);
+    }
+    directLog("%s=%u ptr=%llx %s", tag, call, static_cast<unsigned long long>(pointer), buffer);
 }
 } // namespace
 
@@ -322,7 +377,8 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     directLog("attach_begin exe=%p grouped=%p append=%p", GetModuleHandleW(nullptr),
               reinterpret_cast<void*>(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)) + 0x1e8778),
               reinterpret_cast<void*>(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)) + 0x9c19e8));
-    if (!AddVectoredExceptionHandler(1, &faultHandler))
+    vehHandle = AddVectoredExceptionHandler(1, &faultHandler);
+    if (!vehHandle)
         directLog("veh_failed=1");
     hostStorage = *api;
     host.store(&hostStorage, std::memory_order_release);
@@ -393,14 +449,27 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
 
 extern "C" __declspec(dllexport) void GlassPluginDetach()
 {
+    // A stale vectored handler points into this DLL. Once the caller unmaps it
+    // the next process exception would run unmapped code, so remove it first.
+    if (vehHandle)
+    {
+        RemoveVectoredExceptionHandler(vehHandle);
+        vehHandle = nullptr;
+        directLog("veh_removed=1");
+    }
     // A hook body can still be running on a render thread when the module calls
     // FreeLibrary. Unloading straight away crashed the game on 2026-09-14
-    // 17:48:55. Drain the hook bodies first and give the engine one more frame
-    // after the detour transaction before the DLL disappears.
+    // 17:48:55. Drain until the in-flight count stays at zero, then detach.
     draining.store(true, std::memory_order_relaxed);
-    for (unsigned i = 0; i < 200 && inFlight.load(std::memory_order_relaxed) != 0; ++i)
+    for (unsigned stable = 0, spins = 0; stable < 8 && spins < 400; ++spins)
+    {
+        if (inFlight.load(std::memory_order_relaxed) == 0)
+            ++stable;
+        else
+            stable = 0;
         Sleep(5);
-    Sleep(250);
+    }
+    Sleep(200);
     monitorStop.store(true, std::memory_order_relaxed);
     if (monitorThread)
     {
@@ -421,7 +490,18 @@ extern "C" __declspec(dllexport) void GlassPluginDetach()
         threads.enlist();
         DetourTransactionCommit();
     }
-    Sleep(250);
+    // The detour transaction only fixes threads inside the patched region; give
+    // anything still inside our hook body time to leave before the caller
+    // unmaps the DLL.
+    for (unsigned stable = 0, spins = 0; stable < 8 && spins < 400; ++spins)
+    {
+        if (inFlight.load(std::memory_order_relaxed) == 0)
+            ++stable;
+        else
+            stable = 0;
+        Sleep(5);
+    }
+    Sleep(200);
     originalGrouped = nullptr;
     originalAppend = nullptr;
     glassArrayMapAppendTarget = nullptr;
