@@ -16,6 +16,7 @@
 #include <cwchar>
 #include <stdexcept>
 #include <vector>
+#include "GameGuard.h"
 
 using Microsoft::WRL::ComPtr;
 using DirectX::PackedVector::HALF;
@@ -165,6 +166,95 @@ static int runDump(const wchar_t* shader)
     }
     std::printf("PACKED_MOTION_DUMP_OK files=%u bytes=%llu folder=%ls\n",
                 static_cast<unsigned>(std::size(expected)), bytes, folder.c_str());
+    gpu.releaseAfterGpuDrain();
+    return 0;
+}
+
+// Out-of-band compose check: the production path records the copies and the
+// compose on a module-owned compute list submitted on the FG queue.
+static int runCompose(const wchar_t* shader)
+{
+    constexpr unsigned Width = 32, Height = 20;
+    ComPtr<ID3D12Device> device;
+    checked(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "device");
+    D3D12_COMMAND_QUEUE_DESC queueDescription {};
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> command;
+    checked(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)), "queue");
+    checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "allocator");
+    checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                      IID_PPV_ARGS(&command)), "command");
+    auto motion = texture(device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    auto depth = texture(device.Get(), DXGI_FORMAT_R32_TYPELESS);
+    std::vector<UINT64> packedData(Width * Height);
+    for (unsigned y = 4; y < 16; ++y)
+        for (unsigned x = 4; x < 16; ++x)
+            packedData[y * Width + x] = pack(.8f, true, 16, -8, 128, 1);
+    auto packedUpload = buffer(device.Get(), packedData.size() * sizeof(UINT64), D3D12_HEAP_TYPE_UPLOAD,
+                               D3D12_RESOURCE_STATE_GENERIC_READ);
+    auto packed = buffer(device.Get(), packedData.size() * sizeof(UINT64), D3D12_HEAP_TYPE_DEFAULT,
+                         D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    void* mapped = nullptr;
+    checked(packedUpload->Map(0, nullptr, &mapped), "packed map");
+    std::memcpy(mapped, packedData.data(), packedData.size() * sizeof(UINT64));
+    packedUpload->Unmap(0, nullptr);
+    command->CopyBufferRegion(packed.Get(), 0, packedUpload.Get(), 0, packedData.size() * sizeof(UINT64));
+    transition(command.Get(), packed.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    checked(command->Close(), "close");
+    ID3D12CommandList* lists[] = { command.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    drain(device.Get(), queue.Get());
+
+    GlassFg::PackedMotionGpu gpu;
+    require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), shader, stdout), "initialize");
+    GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
+    require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
+                              { true, 50, false, 2 }),
+            "submitCompose");
+    require(gpu.composeReady() || true, "composeReady probe");
+    // The compose list must complete on its own fence before the outputs are read.
+    for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
+        Sleep(5);
+    if (!gpu.composeReady())
+        std::fprintf(stderr, "compose fence done=%llu submitted=%llu\n",
+                     static_cast<unsigned long long>(gpu.composeCompleted()),
+                     static_cast<unsigned long long>(gpu.composeSubmitted()));
+    require(gpu.composeReady(), "compose fence");
+    drain(device.Get(), queue.Get());
+
+    auto outputs = gpu.motionOutput();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 bytes = 0;
+    auto description = outputs->GetDesc();
+    device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+    auto read = buffer(device.Get(), bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    allocator->Reset();
+    command->Reset(allocator.Get(), nullptr);
+    transition(command.Get(), outputs, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+    source.pResource = outputs;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    target.pResource = read.Get();
+    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    target.PlacedFootprint = footprint;
+    command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    checked(command->Close(), "close read");
+    queue->ExecuteCommandLists(1, lists);
+    drain(device.Get(), queue.Get());
+    void* data = nullptr;
+    checked(read->Map(0, nullptr, &data), "read map");
+    const auto motionAt = [&](unsigned x, unsigned y, unsigned component)
+    {
+        auto* row = reinterpret_cast<const HALF*>(static_cast<const std::byte*>(data) +
+                                                  y * footprint.Footprint.RowPitch);
+        return DirectX::PackedVector::XMConvertHalfToFloat(row[x * 4 + component]);
+    };
+    require(std::abs(motionAt(6, 6, 0) - .0625f) < .001f, "out-of-band compose did not reach the edge pixel");
+    require(motionAt(0, 0, 0) == 0.f, "out-of-band compose changed the background");
+    read->Unmap(0, nullptr);
+    std::printf("PACKED_MOTION_COMPOSE_OK submit_compose=1 fence_ready=1 edge_pixel=1 background=1\n");
     gpu.releaseAfterGpuDrain();
     return 0;
 }
@@ -321,11 +411,14 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
+        GlassRequireGameClosed();
         require(argc == 2 || argc == 3, "shader path required");
         if (argc == 3 && std::wcscmp(argv[2], L"--scale") == 0)
             return runScale(argv[1]);
         if (argc == 3 && std::wcscmp(argv[2], L"--dump") == 0)
             return runDump(argv[1]);
+        if (argc == 3 && std::wcscmp(argv[2], L"--compose") == 0)
+            return runCompose(argv[1]);
         require(argc == 2, "unexpected argument");
         constexpr unsigned Width = 32, Height = 20;
         ComPtr<ID3D12Device> device;

@@ -18,6 +18,7 @@
 #include "../GeometryPipeline.h"
 #include "../GraphicsRootBindings.h"
 #include "../CyberpunkCamera.h"
+#include "GameGuard.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT h)
 {
@@ -47,6 +48,7 @@ struct Device
     UINT64 value {};
     Device()
     {
+        GlassRequireGameClosed();
         ComPtr<IDXGIFactory4> factory;
         check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
         for (UINT i = 0; !d; ++i)
