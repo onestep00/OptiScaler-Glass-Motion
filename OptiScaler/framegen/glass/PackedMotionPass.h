@@ -59,19 +59,18 @@ class PackedMotionPass
             if (timer && ticket)
                 timer->end(value, ticket);
             ++dispatches;
+            if (!packedDispatchEnabled || !controls.packedSubstitute)
+            {
+                // Isolation staging: the new GPU work ran, but the FG inputs
+                // stay original. Keeps a reset attributable to one of the two.
+                invalidateHistory();
+                return {};
+            }
             batch = inputs;
             packed = objectFrame;
             command = value;
             nextIndex = 2;
             batchReady = true;
-            if (!packedDispatchEnabled)
-            {
-                // No dispatch means the owned outputs are unwritten, so never
-                // substitute them; this stage only validates the boundary
-                // bookkeeping and frame recycling with zero new GPU work.
-                invalidateHistory();
-                return {};
-            }
         }
         else if (batchReady && value == command && inputs.index == nextIndex && inputs.index <= inputs.count &&
                  inputs.sameRenderedFrame(batch))

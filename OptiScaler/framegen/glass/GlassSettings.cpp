@@ -39,7 +39,8 @@ bool load()
                               ini.GetBoolValue("GlassFG", "MeasureGpuTime", true),
                               static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "EdgeWidth", 2), 1L, 4L)),
                               ini.GetBoolValue("GlassFG", "PackedDispatch", true),
-                              static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "PackedRows", 240), 1L, 32768L)) }
+                              static_cast<unsigned>(std::clamp(ini.GetLongValue("GlassFG", "PackedRows", 240), 1L, 32768L)),
+                              ini.GetBoolValue("GlassFG", "PackedSubstitute", false) }
                        .packed(),
                    std::memory_order_relaxed);
     return true;
@@ -59,6 +60,7 @@ bool save(Controls value)
     ini.SetLongValue("GlassFG", "EdgeWidth", std::clamp(value.edgeWidth, 1u, 4u));
     ini.SetBoolValue("GlassFG", "PackedDispatch", value.packedDispatch);
     ini.SetLongValue("GlassFG", "PackedRows", std::clamp(value.packedRows, 1u, 32768u));
+    ini.SetBoolValue("GlassFG", "PackedSubstitute", value.packedSubstitute);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -128,6 +130,12 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Safety limit: only the top rows receive the packed correction.\n"
                           "Raise it after a clean run; the rest keeps the original motion.");
+    bool packedSubstitute = value.packedSubstitute;
+    changed |= ImGui::Checkbox("Replace FG motion/depth inputs", &packedSubstitute);
+    value.packedSubstitute = packedSubstitute;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Swaps the FG motion/depth inputs for the composed object-motion outputs.\n"
+                          "Off runs the dispatch without touching the FG inputs to isolate driver resets.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);

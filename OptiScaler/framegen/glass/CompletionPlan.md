@@ -108,6 +108,8 @@ OptiScaler 모듈 경계를 유지하고 기존 version.dll/ASI MFG 해제 경�
 
 월드 객체 재등록이 필요한 실험은 게임 안 Load Game으로 처리한다. 설치된 프레임워크 중 RedHotTools의 리로드 계열은 redscript·TweakDB·아카이브 자료용이고, red4ext는 GameState 콜백만 제공하며, CET는 자체 Lua 모드만 리로드한다. 상주 DXGI 모듈이나 엔진 렌더 상태를 재시작하는 기능은 없다.
 
+TDR 원인은 새 GPU 작업과 FG 입력 교체를 분리해서 판정한다. `GlassFG/PackedSubstitute`(기본 false)와 명령 `substitute=on|off`, `probe`, `apply`가 그 경로다. `probe`는 packed 디스패치를 rows=240으로 켜고 입력 교체를 끈 상태로 둔다. TDR이 없으면 `apply`로 입력 교체를 켠다. 같은 실행 안에서 두 단계를 오갈 수 있으므로 재시작 없이 원인을 특정한다.
+
 ## 진행 통제
 
 ### 2026-09-13 공급 경로 조사 체크포인트

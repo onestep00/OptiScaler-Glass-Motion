@@ -26,7 +26,7 @@ void writeStatus(std::ofstream& file)
     const auto controls = ReadControls();
     file << "controls enabled=" << controls.enabled << " strength=" << controls.strength
          << " edge=" << controls.edgeWidth << " packed_dispatch=" << controls.packedDispatch
-         << " packed_rows=" << controls.packedRows << "\n";
+         << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute << "\n";
     file << "packed initialized=" << packed.initialized << " healthy=" << packed.healthy
          << " admitted=" << packed.admittedDraws << " captured_frames=" << packed.capturedFrames
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
@@ -83,6 +83,27 @@ void PollGlassDebugControl() noexcept
                 output << "soft-reload=queued\n";
                 continue;
             }
+            // Staged protocol: probe runs the new GPU work without swapping the
+            // FG inputs; apply then enables the input replacement.
+            if (line == "probe")
+            {
+                auto value = ReadControls();
+                value.packedDispatch = true;
+                value.packedSubstitute = false;
+                value.packedRows = 240;
+                WriteControls(value);
+                output << "probe=dispatch_on_substitute_off_rows_240\n";
+                continue;
+            }
+            if (line == "apply")
+            {
+                auto value = ReadControls();
+                value.packedDispatch = true;
+                value.packedSubstitute = true;
+                WriteControls(value);
+                output << "apply=substitute_on\n";
+                continue;
+            }
             auto value = ReadControls();
             if (line.rfind("packed=", 0) == 0)
                 value.packedDispatch = line.substr(7) == "on";
@@ -92,6 +113,8 @@ void PollGlassDebugControl() noexcept
                 value.edgeWidth = static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 5, nullptr, 10), 1ul, 4ul));
             else if (line.rfind("strength=", 0) == 0)
                 value.strength = static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 9, nullptr, 10), 0ul, 100ul));
+            else if (line.rfind("substitute=", 0) == 0)
+                value.packedSubstitute = line.substr(11) == "on";
             else
             {
                 output << "unknown=" << line << "\n";
