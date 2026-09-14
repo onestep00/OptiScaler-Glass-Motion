@@ -21,6 +21,10 @@
 #include <atomic>
 #include <string>
 
+#ifdef GLASS_PLUGIN_CONTRACT_TEST
+#include "../GlassArrayMapping.h"
+#endif
+
 namespace
 {
 struct GlassArrayMappingEntry
@@ -816,6 +820,50 @@ int main()
         ++failures;
     std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u mapping_built=%d\n",
                 failures, found, mapped ? 1 : 0);
+    return failures ? 1 : 0;
+}
+#endif
+
+#ifdef GLASS_PLUGIN_CONTRACT_TEST
+// End-to-end contract test for the live plugin -> module interface: build a
+// mapping from a synthetic engine object, publish it through the module table,
+// and consume it the way GlassMotionIdentity does (outputStart + ordinal).
+int main()
+{
+    int failures = 0;
+    alignas(8) unsigned char object[0x200] {};
+    alignas(8) unsigned char group[0x60] {};
+    alignas(8) unsigned short list[64] {};
+    constexpr unsigned kCount = 16;
+    for (unsigned i = 0; i < kCount; ++i)
+        list[i] = static_cast<unsigned short>(kCount - 1 - i); // reversed selection
+    *reinterpret_cast<std::uintptr_t*>(group + 0x18) = reinterpret_cast<std::uintptr_t>(list);
+    *reinterpret_cast<std::uint32_t*>(group + 0x3c) = kCount;
+    *reinterpret_cast<std::uint32_t*>(group + 0x50) = 0x100;
+    *reinterpret_cast<std::uintptr_t*>(object + 0xd8) = reinterpret_cast<std::uintptr_t>(group);
+
+    ArrayMappingDraft draft;
+    if (!buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), kCount, draft))
+        ++failures;
+    else
+    {
+        GlassFg::GlassArrayMappingEntry entry;
+        entry.proxy = reinterpret_cast<std::uintptr_t>(object);
+        entry.outputStart = 0x100;
+        entry.count = draft.count;
+        for (unsigned i = 0; i < draft.count && i < 64; ++i)
+            entry.indices[i] = draft.indices[i];
+        GlassFg::PublishArrayMapping(entry);
+        for (unsigned ordinal = 0; ordinal < kCount; ++ordinal)
+        {
+            const auto mapped = GlassFg::LookupArrayMapping(entry.proxy, entry.outputStart + ordinal);
+            if (mapped != list[ordinal])
+                ++failures;
+        }
+        if (GlassFg::LookupArrayMapping(entry.proxy, entry.outputStart + kCount) != UINT32_MAX)
+            ++failures;
+    }
+    std::printf("PLUGIN_CONTRACT_TEST failures=%d reversed_selection_preserved=1\n", failures);
     return failures ? 1 : 0;
 }
 #endif
