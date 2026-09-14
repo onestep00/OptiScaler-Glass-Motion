@@ -1,4 +1,5 @@
 #include "GeometryTestDevice.h"
+#include "../GlassControls.h"
 #include "../GeometryPipelineCache.h"
 #include "../GeometryCreation.h"
 #include "../GeometryPipelineStream.h"
@@ -179,6 +180,17 @@ cachedPipeline(ID3D12Device* device, ID3D12RootSignature* root, ID3DBlob* serial
             "Pipeline bytes not owned");
     cache.stop();
     require(!cache.find(original), "Stopped cache admitted a new draw");
+    // Bisect switch: with compilation disabled the same public calls must
+    // create neither an extended root signature nor a rewritten pipeline.
+    GlassFg::SetGeometryPipelineCompilation(false);
+    {
+        GlassFg::GeometryPipelineCache disabled(device, compiler, { 1, 1, 4 * 1024 * 1024 });
+        require(!disabled.rootCreated(root, 0, serialized->GetBufferPointer(), serialized->GetBufferSize()) &&
+                    !disabled.pipelineCreated(original, supplied) && disabled.stats().roots == 0 &&
+                    disabled.stats().pipelines == 0 && disabled.stats().ready == 0,
+                "Compile bisect switch still created roots or pipelines");
+    }
+    GlassFg::SetGeometryPipelineCompilation(true);
     return lease; // Render after the cache and its worker have been destroyed.
 }
 
