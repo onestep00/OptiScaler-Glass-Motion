@@ -10,6 +10,7 @@
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
 #include <Util.h>
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -116,6 +117,40 @@ struct Runtime
         for (auto& entry : retiring)
             if (entry)
                 function(*entry);
+    }
+    // Compose-fence view across every retained entry. Called with mutex held.
+    std::uint64_t activeComposeSubmitted() const
+    {
+        std::uint64_t value = 0;
+        if (active) value = std::max(value, active->session.packedComposeSubmitted());
+        for (const auto& entry : retiring)
+            if (entry) value = std::max(value, entry->session.packedComposeSubmitted());
+        return value;
+    }
+    std::uint64_t activeComposeCompleted() const
+    {
+        std::uint64_t value = 0;
+        if (active) value = std::max(value, active->session.packedComposeCompleted());
+        for (const auto& entry : retiring)
+            if (entry) value = std::max(value, entry->session.packedComposeCompleted());
+        return value;
+    }
+    std::uint64_t activeComposeForced() const
+    {
+        std::uint64_t value = 0;
+        if (active) value = std::max(value, active->session.packedComposeForced());
+        for (const auto& entry : retiring)
+            if (entry) value = std::max(value, entry->session.packedComposeForced());
+        return value;
+    }
+    bool anyComposeInFlight() const
+    {
+        if (active && active->session.packedComposeInFlight())
+            return true;
+        for (const auto& entry : retiring)
+            if (entry && entry->session.packedComposeInFlight())
+                return true;
+        return false;
     }
 };
 // Hooks and outstanding destruction notifications can outlive NGX shutdown.
@@ -549,6 +584,16 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             entry->session.nativeFailure();
         if (auto timing = entry->session.pollTiming())
             PublishGpuMilliseconds(timing->milliseconds);
+        // Live panel state: the swap counters plus the compose fence pair that
+        // proves our own GPU work is not outliving the session.
+        PublishLiveStatus(LiveStatusEvaluations, r.evaluations);
+        PublishLiveStatus(LiveStatusSubstitutions, r.substitutions);
+        PublishLiveStatus(LiveStatusComposeSubmitted, r.activeComposeSubmitted());
+        PublishLiveStatus(LiveStatusComposeCompleted, r.activeComposeCompleted());
+        PublishLiveStatus(LiveStatusComposeForced, r.activeComposeForced());
+        PublishLiveStatus(LiveStatusComposeInFlight, r.anyComposeInFlight() ? 1u : 0u);
+        PublishLiveStatus(LiveStatusUnavailable, r.unavailable ? 1u : 0u);
+        PublishLiveStatus(LiveStatusRetiring, (r.retiring[0] ? 1u : 0u) + (r.retiring[1] ? 1u : 0u));
         if (r.log && (r.evaluations <= 3 || r.evaluations % 300 == 0))
         {
             std::fprintf(r.log, "NATIVE_HOST evaluations=%llu substitutions=%llu captures=%llu result=%x\n",
