@@ -109,6 +109,26 @@ std::filesystem::path packedShaderPath()
     return Util::DllPath().parent_path() / L"Glass" / L"GlassObjectMotion.hlsl";
 }
 
+// Crash forensics: this marker exists only while the batch that carries our
+// compose is in flight. After a driver reset the file is still there, which
+// proves the reset happened in a batch that contained our work.
+void writeComposeMarker(UINT64 value, bool active)
+{
+    const auto path = Util::DllPath().parent_path() / L"Glass" / L"glass-compose.pending";
+    if (!active)
+    {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        return;
+    }
+    FILE* file = _wfopen(path.c_str(), L"wb");
+    if (!file)
+        return;
+    std::fprintf(file, "tick=%llu producer=%llu\n", static_cast<unsigned long long>(GetTickCount64()),
+                 static_cast<unsigned long long>(value));
+    std::fclose(file);
+}
+
 // Automatic staged ramp for unattended sessions: the same order the manual
 // probe/apply protocol uses, driven by elapsed time after the first FG frame.
 void runAutoStage() noexcept
@@ -178,6 +198,7 @@ D3D12Callbacks makeCallbacks()
                     std::uint64_t value = 0;
                     if (e.session.takeProducerWait(fence, value))
                     {
+                        writeComposeMarker(value, true);
                         q->Wait(fence, value);
                         if (r.log && ReadControls().trace)
                         {
@@ -186,6 +207,9 @@ D3D12Callbacks makeCallbacks()
                             std::fflush(r.log);
                         }
                     }
+                    else
+                        writeComposeMarker(0, true); // Compose without a producer wait.
+                    e.session.executePending(q);
                     break;
                 }
         });
@@ -196,6 +220,14 @@ D3D12Callbacks makeCallbacks()
         InternalD3D12Scope ownSignals;
         NotifyGeometryCaptureSubmit(q, count, lists);
         r.each([&](Entry& e) { e.session.afterSubmit(q, count, lists); });
+        // The FG batch is submitted; the marker only survives a reset.
+        if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
+            for (UINT i = 0; i < count; ++i)
+                if (lists[i] == fg)
+                {
+                    writeComposeMarker(0, false);
+                    break;
+                }
         // Attribute a driver reset to the exact submitted batch that carried
         // our substituted inputs.
         if (auto* fg = r.activeCommand.load(std::memory_order_acquire))

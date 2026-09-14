@@ -274,8 +274,6 @@ class NativeSession
             }
             auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
                                                timing ? &timer : nullptr);
-            if (inputs.index == 1)
-                command->ClearState(nullptr); // Never leak our PSO/root/heap into the FG call.
             outputRecording |= prepared.motion != nullptr;
             if (controls.trace && log)
             {
@@ -354,6 +352,11 @@ class NativeSession
             objectPass.requestDump();
     }
     bool serviceDump() { return objectMode && objectPass.serviceDump(); }
+    // Deferred compose submission (called from the host pre-submit hook).
+    bool executePending(ID3D12CommandQueue* queue)
+    {
+        return objectMode && objectPass.executePending(queue);
+    }
     // Cross-queue dependency of the packed raster read. The caller performs the
     // wait on the queue that submits the FG command list.
     bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value)

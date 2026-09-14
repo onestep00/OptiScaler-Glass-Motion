@@ -622,6 +622,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             for (auto& value : fgCommands) if (!value.command) { value.command = command; fg = &value; break; }
         if (!fg || !fg->queue) { ++counters.noFgQueue; return {}; }
         Frame* selected = nullptr;
+        bool multiple = false;
         for (auto& value : frames)
             // A frame is admitted when its producer submission precedes the FG
             // command submission. If an engine Wait established the dependency,
@@ -631,11 +632,23 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 value.submitBatch && fg->submitBatch && value.submitBatch <= fg->submitBatch &&
                 (!value.orderedQueue || value.orderedQueue.Get() == fg->queue.Get()))
             {
-                if (selected) { ++counters.orderingRejected; ++counters.acquireAmbiguous; return {}; }
-                selected = &value; // One fresh ordered source; never choose the newest of ambiguous frames.
+                // Several frames can satisfy the order rule (older batches stay
+                // eligible until the pair advances). The newest eligible frame
+                // is the one this FG call consumed, so pick it instead of
+                // rejecting the batch.
+                if (selected)
+                {
+                    multiple = true;
+                    if (value.submitBatch < selected->submitBatch ||
+                        (value.submitBatch == selected->submitBatch && value.number <= selected->number))
+                        continue;
+                }
+                selected = &value;
             }
         if (!selected)
         { ++counters.orderingRejected; ++counters.acquireNoCandidate; return {}; }
+        if (multiple)
+            ++counters.acquireAmbiguous; // Informational: older eligible frames were present.
         if (selected->consumerCommand && selected->consumerCommand != command)
         { ++counters.orderingRejected; ++counters.acquireConsumerBusy; return {}; }
         if (!framePair.advance(selected->number, fgFrame, reset))

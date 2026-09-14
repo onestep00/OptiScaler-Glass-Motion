@@ -44,6 +44,15 @@ class PackedMotionGpu
     std::atomic<unsigned> dumpRequests { 0 };
     std::filesystem::path dumpFolder;
     FILE* logFile = nullptr;
+    // Out-of-band compose. Recorded on our own compute list and submitted on
+    // the FG queue before the batch that carries the FG call, so the engine's
+    // command list state (descriptor heaps, root signature, PSO) is never
+    // modified and the NGX recording sequence stays untouched.
+    ID3D12CommandAllocator* composeAllocator = nullptr;
+    ID3D12GraphicsCommandList* composeList = nullptr;
+    ID3D12Fence* composeFence = nullptr;
+    std::uint64_t composeValue = 0;
+    bool composePending = false;
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(unsigned index) const
     {
@@ -304,7 +313,68 @@ class PackedMotionGpu
         return true;
     }
 
+  public:
+    bool composeReady()
+    {
+        if (!composePending)
+            return true;
+        if (!composeFence)
+            return false;
+        const auto completed = composeFence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+            return false;
+        if (completed >= composeValue)
+            composePending = false;
+        return !composePending;
+    }
+
+    // Records the input copies, the compose dispatch and the optional engine
+    // write-back on our own compute list, then submits it on the FG queue. The
+    // caller performs the producer wait on that queue before this call, so the
+    // engine's command list state and the NGX recording sequence stay clean.
+    bool submitCompose(ID3D12CommandQueue* queue, const PackedMotionFrame& packed, ID3D12Resource* originalMotion,
+                       ID3D12Resource* originalDepth, D3D12_RESOURCE_STATES motionState,
+                       D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, Controls controls)
+    {
+        if (!queue || !composeReady() || !ensureCompose())
+            return false;
+        if (FAILED(composeAllocator->Reset()) || FAILED(composeList->Reset(composeAllocator, nullptr)))
+            return false;
+        if (!dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
+                      controls) ||
+            (controls.packedWriteBack && !writeBack(composeList, originalMotion, originalDepth, motionState,
+                                                    depthState)) ||
+            FAILED(composeList->Close()))
+            return false;
+        ID3D12CommandList* lists[] { composeList };
+        queue->ExecuteCommandLists(1, lists);
+        if (FAILED(queue->Signal(composeFence, ++composeValue)))
+            return false;
+        composePending = true;
+        if (controls.trace && logFile)
+        {
+            std::fprintf(logFile, "TRACE_COMPOSE queue=%p frame=%u rows=%u writeback=%u\n", queue, packed.frame,
+                         (std::min)(height, (std::max)(1u, controls.packedRows)), controls.packedWriteBack ? 1u : 0u);
+            std::fflush(logFile);
+        }
+        return true;
+    }
+
   private:
+    bool ensureCompose()
+    {
+        if (composeList)
+            return true;
+        if (!device ||
+            FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&composeAllocator))) ||
+            FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, composeAllocator, nullptr,
+                                             IID_PPV_ARGS(&composeList))) ||
+            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&composeFence))))
+            return false;
+        composeList->Close();
+        return true;
+    }
+
     bool prepareReadback()
     {
         if (readback[0] && readback[1] && readback[2] && readback[3] && readback[4] && readback[5])
@@ -723,6 +793,13 @@ class PackedMotionGpu
         if (dumpFence) dumpFence->Release();
         dumpFence = nullptr;
         dumpPending = false;
+        if (composeAllocator) composeAllocator->Release();
+        if (composeList) composeList->Release();
+        if (composeFence) composeFence->Release();
+        composeAllocator = nullptr;
+        composeList = nullptr;
+        composeFence = nullptr;
+        composePending = false;
         if (pipeline) pipeline->Release();
         if (root) root->Release();
         if (heap) heap->Release();
