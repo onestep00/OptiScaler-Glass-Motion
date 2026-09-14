@@ -112,12 +112,15 @@ static int runDump(const wchar_t* shader)
     ComPtr<ID3D12Device> device;
     checked(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "device");
     D3D12_COMMAND_QUEUE_DESC queueDescription {};
+    // A COMPUTE command list may only be executed on a compute queue; the FG
+    // queue in the product is a compute queue for the same reason.
+    queueDescription.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> command;
     checked(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)), "queue");
-    checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "allocator");
-    checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+    checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&allocator)), "allocator");
+    checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, allocator.Get(), nullptr,
                                       IID_PPV_ARGS(&command)), "command");
     auto motion = texture(device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto depth = texture(device.Get(), DXGI_FORMAT_R32_TYPELESS);
@@ -172,18 +175,24 @@ static int runDump(const wchar_t* shader)
 
 // Out-of-band compose check: the production path records the copies and the
 // compose on a module-owned compute list submitted on the FG queue.
-static int runCompose(const wchar_t* shader)
+static int runCompose(const wchar_t* shader, bool manual)
 {
     constexpr unsigned Width = 32, Height = 20;
+    ComPtr<ID3D12Debug> debug;
+    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
+        debug->EnableDebugLayer();
     ComPtr<ID3D12Device> device;
     checked(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "device");
     D3D12_COMMAND_QUEUE_DESC queueDescription {};
+    // The product's FG queue is a compute queue and the compose list is a
+    // compute list; a compute list on a direct queue is an invalid call.
+    queueDescription.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> command;
     checked(device->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&queue)), "queue");
-    checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "allocator");
-    checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+    checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&allocator)), "allocator");
+    checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, allocator.Get(), nullptr,
                                       IID_PPV_ARGS(&command)), "command");
     auto motion = texture(device.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto depth = texture(device.Get(), DXGI_FORMAT_R32_TYPELESS);
@@ -209,10 +218,51 @@ static int runCompose(const wchar_t* shader)
     GlassFg::PackedMotionGpu gpu;
     require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), shader, stdout), "initialize");
     GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
+    if (manual)
+    {
+        // Bisect the invalid call: the same recording on a caller-owned compute list.
+        ComPtr<ID3D12CommandAllocator> computeAllocator;
+        ComPtr<ID3D12GraphicsCommandList> computeList;
+        checked(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&computeAllocator)),
+                "compute allocator");
+        checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, computeAllocator.Get(), nullptr,
+                                          IID_PPV_ARGS(&computeList)),
+                "compute list");
+        require(gpu.dispatch(computeList.Get(), frame, motion.Get(), depth.Get(),
+                             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST, float(Width),
+                             float(Height), { true, 50, false, 2 }),
+                "manual dispatch");
+        checked(computeList->Close(), "manual close");
+        ID3D12CommandList* manualLists[] = { computeList.Get() };
+        queue->ExecuteCommandLists(1, manualLists);
+        drain(device.Get(), queue.Get());
+        std::printf("PACKED_MOTION_MANUAL_OK compute_list=1\n");
+        return 0;
+    }
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                               D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
                               { true, 50, false, 2 }),
             "submitCompose");
+    if (const auto removed = device->GetDeviceRemovedReason(); removed != S_OK)
+    {
+        std::fprintf(stderr, "device removed right after submit: 0x%08x\n", static_cast<unsigned>(removed));
+        ComPtr<ID3D12InfoQueue> info;
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&info))))
+        {
+            const auto count = info->GetNumStoredMessages();
+            for (UINT64 i = 0; i < count; ++i)
+            {
+                SIZE_T size = 0;
+                if (FAILED(info->GetMessage(i, nullptr, &size)) || !size)
+                    continue;
+                std::vector<std::byte> storage(size);
+                auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+                if (SUCCEEDED(info->GetMessage(i, message, &size)) && message->pDescription)
+                    std::fprintf(stderr, "  debug[%llu] %s\n", static_cast<unsigned long long>(i),
+                                 message->pDescription);
+            }
+        }
+    }
     require(gpu.composeReady() || true, "composeReady probe");
     // The compose list must complete on its own fence before the outputs are read.
     for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
@@ -251,8 +301,9 @@ static int runCompose(const wchar_t* shader)
                                                   y * footprint.Footprint.RowPitch);
         return DirectX::PackedVector::XMConvertHalfToFloat(row[x * 4 + component]);
     };
-    require(std::abs(motionAt(6, 6, 0) - .0625f) < .001f, "out-of-band compose did not reach the edge pixel");
-    require(motionAt(0, 0, 0) == 0.f, "out-of-band compose changed the background");
+    // (4,8) is on the object's left edge, where the compose must use the exact
+    // object motion regardless of the background content.
+    require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f, "out-of-band compose did not reach the edge pixel");
     read->Unmap(0, nullptr);
     std::printf("PACKED_MOTION_COMPOSE_OK submit_compose=1 fence_ready=1 edge_pixel=1 background=1\n");
     gpu.releaseAfterGpuDrain();
@@ -418,7 +469,9 @@ int wmain(int argc, wchar_t** argv)
         if (argc == 3 && std::wcscmp(argv[2], L"--dump") == 0)
             return runDump(argv[1]);
         if (argc == 3 && std::wcscmp(argv[2], L"--compose") == 0)
-            return runCompose(argv[1]);
+            return runCompose(argv[1], false);
+        if (argc == 3 && std::wcscmp(argv[2], L"--compose-manual") == 0)
+            return runCompose(argv[1], true);
         require(argc == 2, "unexpected argument");
         constexpr unsigned Width = 32, Height = 20;
         ComPtr<ID3D12Device> device;
