@@ -800,6 +800,20 @@ class PackedMotionGpu
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;
         }
+        // The compose wrote the outputs as UAVs. Flush those writes explicitly
+        // before the state transitions back: a transition out of
+        // UNORDERED_ACCESS is not a UAV barrier on every driver, and this
+        // hazard class already correlated with the 2026-09-14 driver resets
+        // (see the packed-input barrier above).
+        for (auto* resource : { motion, depth, selection })
+            if (resource)
+            {
+                D3D12_RESOURCE_BARRIER outputBarrier {};
+                outputBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                outputBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                outputBarrier.UAV.pResource = resource;
+                command->ResourceBarrier(1, &outputBarrier);
+            }
         transition(command, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         transition(command, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         transition(command, selection, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
