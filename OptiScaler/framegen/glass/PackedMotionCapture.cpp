@@ -25,9 +25,16 @@ constexpr unsigned FrameCount = 3, RecordingCount = 64, FgCommandCount = 4;
 constexpr unsigned MappingCapacity = 16384, ConstantCapacity = 4096;
 // Vertex-history arena. 4096 pages x 128 vertices was regularly exhausted in
 // live scenes (a single large mesh asks for a contiguous power-of-two block),
-// so the arena is twice that. The GPU cost is 2 x HistoryCapacity x 32 bytes
-// (64 MB total) and the backing store is a power-of-two buddy allocator.
-constexpr unsigned HistoryCapacity = 1u << 20;
+// so the arena was doubled once. The live bar scene still fills it: the module
+// reported arena_full=361,289 failed reservations with arena_used 8,192/8,192
+// pages and ~2,500 live histories at 3.3 pages each, and every failed
+// reservation is a surface whose motion vector stays at the engine's value.
+// The arena is therefore doubled again. The GPU cost is 2 x HistoryCapacity x
+// 32 bytes (128 MB total) and the backing store is a power-of-two buddy
+// allocator, so the page count and the vertex capacity have to move together.
+constexpr unsigned HistoryPages = 16384, HistoryPageVertices = 128;
+constexpr unsigned HistoryCapacity = HistoryPages * HistoryPageVertices;
+static_assert(HistoryCapacity == (1u << 21), "history capacity must stay a power of two");
 // The draw batch's frame field is a render-context tick that stays zero in some
 // configurations; a zero frame number made the capture reject every draw and the
 // frame generation side then had no candidate at all. Fall back to the engine
@@ -130,7 +137,7 @@ class Capture final : public GeometryDrawCaptureOwner
     ComPtr<ID3D12CommandQueue> historyQueue;
     ComPtr<ID3D12Fence> producerFence, consumerFence;
     std::array<Frame, FrameCount> frames;
-    PackedMotionMappings<4096, 4, 8192, 128> objectMappings;
+    PackedMotionMappings<4096, 4, HistoryPages, HistoryPageVertices> objectMappings;
     PackedMotionIdentityProvider identitySource;
     std::array<FgCommand, FgCommandCount> fgCommands;
     std::array<ObservedSignal, 256> observedSignals {};
@@ -388,15 +395,22 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         checked(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, historyClearAllocator.Get(),
                                           clearPipeline.Get(), IID_PPV_ARGS(&historyClearCommand)),
                 "History clear command creation failed");
+        // 16 Mi words needs 65,536 thread groups, which is one past the
+        // 65,535 limit of a single dimension, so the clear is dispatched in
+        // two dimensions exactly like the packed capture clear.
         const UINT words = HistoryCapacity * 8;
-        const UINT groups = (words + 255) / 256;
+        const UINT64 groups = (UINT64(words) + 255) / 256;
+        const UINT groupsX = UINT((std::min)(groups, UINT64(65535)));
+        const UINT groupsY = UINT((groups + groupsX - 1) / groupsX);
+        if (!groupsX || groupsY > 65535)
+            throw std::runtime_error("History clear dispatch exceeds D3D12 limits");
         for (auto& target : history)
         {
-            const UINT values[] { words, groups };
+            const UINT values[] { words, groupsX };
             historyClearCommand->SetComputeRootSignature(clearRoot.Get());
             historyClearCommand->SetComputeRootUnorderedAccessView(0, target->GetGPUVirtualAddress());
             historyClearCommand->SetComputeRoot32BitConstants(1, 2, values, 0);
-            historyClearCommand->Dispatch(groups, 1, 1);
+            historyClearCommand->Dispatch(groupsX, groupsY, 1);
             D3D12_RESOURCE_BARRIER barrier {};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             barrier.UAV.pResource = target.Get();
@@ -481,6 +495,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             ++counters.topologyRejected; ++counters.shapeRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
+        // The engine reports the vertex count as 64 bits; every draw that passes
+        // the capacity check above is known to fit, so the narrowing is exact.
+        const auto vertices = std::uint32_t(shape.vertices);
         if (!std::isfinite(raster->viewport.TopLeftX) || !std::isfinite(raster->viewport.TopLeftY) ||
             !std::isfinite(raster->viewport.Width) || !std::isfinite(raster->viewport.Height) ||
             raster->viewport.Width <= 0 || raster->viewport.Height <= 0 || raster->viewport.TopLeftX < 0 ||
@@ -546,14 +563,17 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     ++counters.unknownIdentity; ++counters.unknownNoArrayGeneration;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
-                const auto allocation = objectMappings.acquire(key, shape.vertices, frameNumber);
+                const auto allocation = objectMappings.acquire(key, vertices, frameNumber);
                 if (!allocation)
                 {
                     ++counters.historyOverflow;
                     noteChunk(overflowChunks, draw.chunk);
                     continue;
                 }
-                noteSpanFamily(draw.chunk, key.object.mesh, shape.vertices);
+                // The family table is a bounded diagnostic key, not an identity
+                // check (the hash still mixes the full mesh address), so the low
+                // 32 bits printed in the status line are enough here.
+                noteSpanFamily(draw.chunk, std::uint32_t(key.object.mesh), vertices);
                 ++frameSpanCount;
                 auto& item = mapping[span.first + ordinal];
                 item.historyBase = allocation.history.base;

@@ -62,6 +62,11 @@ class VertexHistoryCache
     static_assert(std::has_single_bit(Sets) && Ways && std::has_single_bit(Pages));
     static_assert(std::has_single_bit(PageVertices) && std::uint64_t(Pages) * PageVertices <= UINT32_MAX);
     static constexpr unsigned EntryCount = Sets * Ways;
+    // The per-frame sweep is deliberately small. A reservation the buddy arena
+    // could not serve may scan this many entries once before it gives up: a
+    // full pass would be 16,384 entries and the failure already means the live
+    // set is out of room, so the extra work only pays off in short bursts.
+    static constexpr unsigned ReclaimSweepBudget = 1024;
     struct Entry
     {
         VertexHistoryKey key;
@@ -173,12 +178,14 @@ class VertexHistoryCache
     // when a scene turns transparent elements over quickly; a failed allocation
     // is exactly where the extra scan pays for itself. The same reclaim rule as
     // the per-frame sweep applies, so a recording still reading the entry is
-    // never released.
-    void sweepForSpace(unsigned budget)
+    // never released. The pass stops as soon as the arena can serve the request
+    // so a small block never pays for the whole budget.
+    void sweepForSpace(unsigned budget, unsigned pages = 0)
     {
         const unsigned count = (std::min)(budget, EntryCount);
         for (unsigned i = 0; i < count; ++i)
         {
+            if (pages && freeTree[1] >= pages) return;
             auto& entry = entries[sweepCursor];
             sweepCursor = (sweepCursor + 1) % EntryCount;
             if (reclaimable(entry))
@@ -215,7 +222,7 @@ class VertexHistoryCache
         unsigned base = reserve(pages);
         if (base == UINT32_MAX)
         {
-            sweepForSpace(512);
+            sweepForSpace(ReclaimSweepBudget, pages);
             base = reserve(pages);
             if (base == UINT32_MAX)
             {

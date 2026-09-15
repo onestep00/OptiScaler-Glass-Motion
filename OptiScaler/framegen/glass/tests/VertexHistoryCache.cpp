@@ -59,6 +59,22 @@ int main()
     const auto whole = arena.acquire(key(50), 64, 5);
     require(whole && whole.base == 0 && whole.capacity == 64, "buddy coalescing failed");
 
+    // A reservation the buddy arena cannot serve runs one bounded reclaim pass,
+    // and the pass stops as soon as the retry fits. beginFrame is given a zero
+    // sweep budget so only the failure path can free the arena.
+    VertexHistoryCache<1, 32, 8, 4> sweep;
+    require(sweep.beginFrame(1, 0, 0), "sweep start rejected");
+    for (unsigned i = 0; i < 8; ++i) require(bool(sweep.acquire(key(100 + i), 1, 1)), "sweep fill failed");
+    require(sweep.largestFreePages() == 0 && sweep.reservedVertices() == 32, "sweep arena not full");
+    require(!sweep.acquire(key(200), 9, 1) && sweep.stats.arenaFull == 1 && sweep.stats.arenaReclaimed == 0,
+            "in-flight entries were reclaimed for a failed reservation");
+    require(sweep.beginFrame(3, 2, 0), "sweep frame rejected");
+    const auto block = sweep.acquire(key(201), 9, 3);
+    require(block && block.capacity == 16 && sweep.stats.arenaReclaimed == 1,
+            "bounded reclaim pass did not serve the retry");
+    require(sweep.reservedVertices() <= 32 && sweep.stats.arenaFull == 1,
+            "reclaim pass overshot the arena budget");
+
     // Churn includes long GPU lag, cold scene replacements and multiple chunks
     // per object. Track every returned allocation while it may still be read.
     VertexHistoryCache<64, 4, 256, 16> churn;
