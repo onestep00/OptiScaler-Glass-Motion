@@ -87,6 +87,14 @@ void writeStatus(std::ofstream& file)
     file << "host evaluations=" << host.evaluations << " substitutions=" << host.substitutions
          << " captures=" << host.captures << " active=" << host.active << " retiring=" << host.retiring
          << " stopped=" << host.stopped << " unavailable=" << host.unavailable << "\n";
+    // Per-generated-frame index split: an index that is evaluated but never
+    // substituted keeps the engine's original motion vectors for that frame.
+    file << "host_by_index";
+    for (unsigned i = 0; i < 8; ++i)
+        if (host.evaluationsByIndex[i] != 0)
+            file << " " << i << ":" << host.substitutionsByIndex[i] << "/" << host.evaluationsByIndex[i];
+    file << " (substituted/evaluated) skipped_reused=" << host.unsubstitutedReusedMotion
+         << " skipped_uncorrected=" << host.unsubstitutedFreshMotion << "\n";
     file << "plugin loaded=" << (GlassPluginLoaded() ? 1 : 0) << "\n";
     const auto mapping = ReadArrayMappingStats();
     file << "arraymap entries=" << mapping.entries << " published=" << mapping.published

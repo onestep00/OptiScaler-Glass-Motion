@@ -28,6 +28,15 @@ void ServiceNativeDiagnostics() noexcept;
 struct NativeHostStatus
 {
     std::uint64_t evaluations = 0, substitutions = 0, captures = 0;
+    // Which generated-frame indices reach the proxy at all, and which of them
+    // actually received the corrected motion. An index that is evaluated but
+    // never substituted keeps the engine's own motion vectors, which is exactly
+    // the "transparent object attached to the background" behaviour.
+    std::uint64_t evaluationsByIndex[8] {};
+    std::uint64_t substitutionsByIndex[8] {};
+    // Skips that were harmless (the motion texture was already corrected) and
+    // skips that left a frame with the engine's original motion vectors.
+    std::uint64_t unsubstitutedReusedMotion = 0, unsubstitutedFreshMotion = 0;
     unsigned active = 0, retiring = 0, stopped = 0, unavailable = 0;
 };
 NativeHostStatus ReadNativeHostStatus() noexcept;

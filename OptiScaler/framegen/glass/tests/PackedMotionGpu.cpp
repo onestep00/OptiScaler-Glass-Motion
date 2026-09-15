@@ -774,7 +774,9 @@ int wmain(int argc, wchar_t** argv)
         require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f &&
                 std::abs(motionAt(4, 8, 1) + .05f) < .001f && std::abs(depthAt(4, 8) - .8f) < .001f &&
                 selectionAt(4, 8) > .99f, "reverse-depth edge mismatch");
-        const float weight = (128.f / 255.f) * .5f;
+        // Shipped interior weight: opacity plus the strength-scaled remainder.
+        const float interiorOpacity = 128.f / 255.f, interiorStrength = .5f;
+        const float weight = interiorOpacity + (1.f - interiorOpacity) * interiorStrength;
         require(std::abs(motionAt(10, 10, 0) - (background[0] * (1 - weight) + .0625f * weight)) < .001f &&
                 std::abs(motionAt(10, 10, 1) - (background[1] * (1 - weight) - .05f * weight)) < .001f &&
                 depthAt(10, 10) == backgroundDepth,

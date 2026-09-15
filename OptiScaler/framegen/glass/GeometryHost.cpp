@@ -12,7 +12,9 @@
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
 #include "NativeHost.h"
+#include "GlassHostTiming.h"
 #include <Util.h>
+#include <State.h>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -259,6 +261,80 @@ void ReportGeometryHost(FILE* log) noexcept
         for (unsigned i = 0; i < packed.historyArenaFullPageCount; ++i)
             std::fprintf(log, "%s%u", i ? "," : "", packed.historyArenaFullPages[i]);
         std::fprintf(log, "\n");
+        // Presented-frame rate against the engine frame rate. A ratio near 1
+        // means frame generation is not running; 2/3/4 identifies the
+        // multiplier the driver is actually presenting. This is the only
+        // process-local proof that generated frames exist, and the game's own
+        // counter reports the render rate, not the presented one.
+        static std::atomic<std::uint64_t> presentSamples { 0 }, presentCount { 0 }, engineCount { 0 },
+            sampleMs { 0 };
+        const auto sampleNow = GetTickCount64();
+        const auto previousMs = sampleMs.load(std::memory_order_relaxed);
+        if (sampleNow >= previousMs + 2000)
+        {
+            UINT lastPresent = 0;
+            IDXGISwapChain* swapchain = State::Instance().currentSwapchain;
+            if (swapchain && SUCCEEDED(swapchain->GetLastPresentCount(&lastPresent)))
+            {
+                const auto previousPresent = presentCount.load(std::memory_order_relaxed);
+                const auto previousEngine = engineCount.load(std::memory_order_relaxed);
+                const auto seconds = double(sampleNow - previousMs) / 1000.0;
+                if (previousMs && seconds > 0.0 && lastPresent >= previousPresent &&
+                    packed.capturedFrames >= previousEngine)
+                {
+                    const auto presentDelta = std::uint64_t(lastPresent) - previousPresent;
+                    const auto engineDelta = packed.capturedFrames - previousEngine;
+                    const auto samples = presentSamples.load(std::memory_order_relaxed) + 1;
+                    presentSamples.store(samples, std::memory_order_relaxed);
+                    std::fprintf(log,
+                                 "GEOMETRY_PRESENT presents=%llu engine_frames=%llu ratio=%.2f present_fps=%.1f "
+                                 "engine_fps=%.1f sample=%llu\n",
+                                 static_cast<unsigned long long>(presentDelta),
+                                 static_cast<unsigned long long>(engineDelta),
+                                 engineDelta ? double(presentDelta) / double(engineDelta) : 0.0,
+                                 double(presentDelta) / seconds, double(engineDelta) / seconds,
+                                 static_cast<unsigned long long>(samples));
+                    {
+                        // CPU cost of the frame generation callbacks. The render
+                        // thread only adds; the health thread formats and resets,
+                        // so this never allocates inside a submission.
+                        const auto averageMs = [](const HostTiming& value)
+                        {
+                            const auto count = value.count.load(std::memory_order_relaxed);
+                            return count ? double(value.totalUs.load(std::memory_order_relaxed)) / double(count) / 1000.0
+                                         : 0.0;
+                        };
+                        const auto maximumMs = [](const HostTiming& value)
+                        { return double(value.maxUs.load(std::memory_order_relaxed)) / 1000.0; };
+                        const auto countOf = [](const HostTiming& value)
+                        { return static_cast<unsigned long long>(value.count.load(std::memory_order_relaxed)); };
+                        auto& evaluation = EvaluationTiming();
+                        auto& submission = SubmissionTiming();
+                        auto& capture = CaptureTiming();
+                        auto& compose = ComposeTiming();
+                        std::fprintf(log,
+                                     "GLASS_TIMING evaluate_n=%llu evaluate_ms=%.3f evaluate_max_ms=%.3f "
+                                     "capture_n=%llu capture_max_ms=%.3f compose_n=%llu compose_max_ms=%.3f "
+                                     "submit_n=%llu submit_max_ms=%.3f\n",
+                                     countOf(evaluation), averageMs(evaluation), maximumMs(evaluation),
+                                     countOf(capture), maximumMs(capture), countOf(compose), maximumMs(compose),
+                                     countOf(submission), maximumMs(submission));
+                        std::fflush(log);
+                        evaluation.reset();
+                        submission.reset();
+                        capture.reset();
+                        compose.reset();
+                    }
+                }
+                presentCount.store(lastPresent, std::memory_order_relaxed);
+                engineCount.store(packed.capturedFrames, std::memory_order_relaxed);
+                sampleMs.store(sampleNow, std::memory_order_relaxed);
+            }
+            else
+            {
+                sampleMs.store(sampleNow, std::memory_order_relaxed);
+            }
+        }
     }
     catch (...)
     {

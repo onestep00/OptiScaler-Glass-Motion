@@ -278,10 +278,52 @@ int wmain(int argc, wchar_t** argv)
             check(retiring.readyToRelease(), "destroyed completed recording retained");
             retiring.releaseAfterGpuDrain();
         }
+        // The list type belongs to the command list: Streamline submits the same
+        // frame generation list on a compute queue for the driver-level block
+        // and on a direct queue for the tagged evaluation. A session-wide type
+        // failed the session on the second case, and a failed session used to be
+        // unreleasable, which blocked every later substitution.
+        {
+            ComPtr<ID3D12CommandAllocator> directAllocator, computeAllocator;
+            ComPtr<ID3D12GraphicsCommandList> directList, computeList;
+            hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&directAllocator)),
+               "queue type direct allocator");
+            hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&computeAllocator)),
+               "queue type compute allocator");
+            hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, directAllocator.Get(), nullptr,
+                                         IID_PPV_ARGS(&directList)),
+               "queue type direct list");
+            hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, computeAllocator.Get(), nullptr,
+                                         IID_PPV_ARGS(&computeList)),
+               "queue type compute list");
+            TestedSession typed;
+            check(typed.initialize(device.Get(), descs, argv[1], argv[2], stdout), "queue type initialize");
+            check(typed.bindFgCommand(computeList.Get(), GlassFg::ComputeRecording::AllMethods,
+                                      GlassFg::ComputeRecording::AllMethods),
+                  "queue type bind compute");
+            check(typed.adoptFgCommand(directList.Get(), GlassFg::ComputeRecording::AllMethods,
+                                       GlassFg::ComputeRecording::AllMethods),
+                  "queue type adopt direct");
+            ID3D12CommandList* computeLists[] = { computeList.Get() };
+            ID3D12CommandList* directLists[] = { directList.Get() };
+            hr(computeList->Close(), "queue type close compute");
+            typed.onStateMutation(computeList.Get());
+            check(typed.afterSubmit(consumer.Get(), 1, computeLists), "queue type compute submit rejected");
+            hr(directList->Close(), "queue type close direct");
+            typed.onStateMutation(directList.Get());
+            // A direct list cannot execute on the compute queue. That single
+            // mismatched submission must not fail the session, or one queue type
+            // change stops the correction for the rest of the process.
+            check(typed.afterSubmit(consumer.Get(), 1, directLists), "queue type mismatch failed session");
+            typed.stop();
+            drain(device.Get(), consumer.Get());
+            check(typed.readyToRelease(), "queue type session not releasable");
+            typed.releaseAfterGpuDrain();
+        }
         std::puts("NATIVE_SESSION_OK destruction_without_reset=1 destroyed_inflight_retained=1 "
                   "missing_wait_rejected=1 ambiguous_rejected=1 dirty_state_rejected=1 "
                   "unsubmitted_release_rejected=1 inflight_release_rejected=1 completed_release=1 timing=1 "
-                  "stop_rejected=1 game_attachment=0");
+                  "stop_rejected=1 per_list_queue_type=1 failed_releasable=1 game_attachment=0");
 #ifdef GLASS_TEST_OBSERVER
         const auto& observed = ObserverTest::context();
         check(observed.resets && observed.mutations && observed.barriers && observed.submits &&

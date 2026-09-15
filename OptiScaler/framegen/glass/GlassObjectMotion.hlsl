@@ -85,10 +85,25 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     uint motionX = (packed.y >> 3) & 0x7ffu;
     uint motionY = ((packed.x >> 24) | (packed.y << 8)) & 0x7ffu;
     float2 objectPixels = float2(signed11(motionX), signed11(motionY)) * 0.125;
-    float2 objectMotion = objectPixels / max(MotionScale, float2(1e-6, 1e-6));
+    // The FG input texture holds the engine's own motion in normalized units,
+    // not pixels: the 2026-09-16 pan dumps measured engine values of
+    // (-0.008636,-0.003626) where the object moved (-32.875,-4.625) pixels,
+    // i.e. pixels / size on both axes (2560x1440). Packed records are captured
+    // in pixels, so divide by the extent and apply the provider's mvec scale
+    // (DLSSG.MvecScaleX/Y, 1.0 in the live path). Writing pixels made every
+    // covered value ~2500x larger than the engine's, so the frame generator
+    // could not use the substitution as motion at all.
+    float2 objectMotion = objectPixels * MotionScale / float2(Size);
     float opacity = float((packed.x >> 16) & 0xffu) / 255.0;
     bool edge = EdgeWidth != 0 && objectBoundary(pixel, id);
-    float weight = edge ? 1.0 : saturate(opacity * InteriorStrength);
+    // The visible boundary always takes the object's own motion. Inside it a
+    // fully transmissive material reports no opacity, so scaling opacity alone
+    // left the whole object body on the engine's motion of whatever was drawn
+    // behind it: a glass in front of moving content travelled with that content
+    // instead of with the surface. InteriorStrength is the fraction of such a
+    // transmissive pixel that still follows the surface itself (0 = keep the
+    // content behind it, 1 = every packed pixel follows the surface).
+    float weight = edge ? 1.0 : saturate(opacity + (1.0 - opacity) * InteriorStrength);
     if (count)
     {
         if (edge)

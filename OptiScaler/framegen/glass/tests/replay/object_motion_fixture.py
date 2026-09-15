@@ -132,7 +132,11 @@ def select(layers, scene, radius, change_depth, interior_gain=1.):
     original = scene['mv']
     mv, depth = original.copy(), scene['depth'].copy()
     for i in (3, 2):
-        w = np.clip(scene['alphas'][i][..., None]*interior_gain, 0, 1)
+        # Shipped formula (GlassObjectMotion.hlsl): the interior weight is the
+        # material opacity plus the strength-scaled remainder, so a fully
+        # transmissive material still follows the surface when the gain is 1.
+        alpha = scene['alphas'][i][..., None]
+        w = np.clip(alpha+(1-alpha)*interior_gain, 0, 1)
         mv += w*(layers[i]['motion'][..., :2]-mv)
     edges = {i: inner_edge(scene['raw_masks'][i], radius) & scene['masks'][i] for i in (2, 3)} if radius else {}
     count = sum(e.astype('uint8') for e in edges.values()) if edges else np.zeros(depth.shape, 'uint8')

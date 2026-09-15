@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,9 +57,18 @@ class PackedMotionGpu
     UINT64 readbackBytes[6] {};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[6] {};
     unsigned packedCovered = 0;
+    // Dump-only aggregate of the captured object motion, in the record's own
+    // 1/8 px units. The composed texture value has to equal
+    // packedPixels / mvecScale, so the captured pixels and the scale used for
+    // the division are both needed to check one against the other.
+    std::uint64_t packedMotionPixels = 0, packedMotionSumAbsX = 0, packedMotionSumAbsY = 0;
+    unsigned packedMotionMaxAbsX = 0, packedMotionMaxAbsY = 0, packedMotionSaturated = 0;
+    float lastScaleX = 0.f, lastScaleY = 0.f;
     ID3D12Fence* dumpFence = nullptr;
     // Compose fence value that covers the readback copies of a pending dump.
     std::uint64_t dumpComposeValue = 0;
+    // Context the pending dump's readback copies were recorded into.
+    unsigned dumpComposeContext = 0;
     // Diagnostic bisect switch: record the engine's own motion/depth and the
     // packed object records as well. Those copies are the ones under suspicion
     // for stalling the compose, so they can be excluded without touching the
@@ -76,15 +86,26 @@ static constexpr bool kDumpEngineInputs = true;
     // the FG queue before the batch that carries the FG call, so the engine's
     // command list state (descriptor heaps, root signature, PSO) is never
     // modified and the NGX recording sequence stays untouched.
-    ID3D12CommandAllocator* composeAllocator = nullptr;
-    ID3D12GraphicsCommandList* composeList = nullptr;
-    ID3D12Fence* composeFence = nullptr;
-    // The compose list has to match the queue that carries the FG command list:
-    // the NGX passthrough path submits a compute list, Streamline's DLSS-G path
-    // a direct list.
-    D3D12_COMMAND_LIST_TYPE composeType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    std::uint64_t composeValue = 0;
-    bool composePending = false;
+    // One compose submission context per command list type. The frame
+    // generation path alternates between a direct and a compute queue on
+    // consecutive submissions of the same frame (observed as
+    // NATIVE_HOST fg_queue adopt type=2 / type=0 alternating), and releasing the
+    // list, allocator and fence on every switch reallocated GPU objects per
+    // frame and reset the fence value the frame generation queue was already
+    // waiting on. Both contexts stay alive until the packed outputs are freed.
+    struct ComposeContext
+    {
+        ID3D12CommandAllocator* allocator = nullptr;
+        ID3D12GraphicsCommandList* list = nullptr;
+        ID3D12Fence* fence = nullptr;
+        std::uint64_t value = 0;
+        bool pending = false;
+        std::chrono::steady_clock::time_point submittedAt {};
+    };
+    static constexpr unsigned kComposeContexts = 2;
+    ComposeContext composeContexts[kComposeContexts];
+    // Context of the most recent submission: the host waits on its fence.
+    unsigned composeActive = 0;
     // Descriptor views of the packed record buffers, keyed by resource so a
     // descriptor is never rewritten while it can still be read by the GPU.
     static constexpr unsigned kPackedViewCount = 4;
@@ -97,8 +118,8 @@ static constexpr bool kDumpEngineInputs = true;
     // The compose list is submitted without the host completion signal whenever
     // the input swap is inactive, so the session teardown needs its own proof
     // that the list finished before these outputs are freed. Freeing them while
-    // the GPU still executes the compose is the 2026-09-15 reset.
-    std::chrono::steady_clock::time_point composeSubmittedAt {};
+    // the GPU still executes the compose is the 2026-09-15 reset. Each context
+    // carries its own submission time; the escape below is counted per context.
     std::uint64_t composeForcedReleases = 0;
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(unsigned index) const
@@ -106,6 +127,12 @@ static constexpr bool kDumpEngineInputs = true;
         auto value = heap->GetCPUDescriptorHandleForHeapStart();
         value.ptr += SIZE_T(index) * increment;
         return value;
+    }
+    // DIRECT and COMPUTE both carry frame generation submissions, so each gets
+    // its own compose list.
+    static unsigned composeIndex(D3D12_COMMAND_LIST_TYPE type) noexcept
+    {
+        return type == D3D12_COMMAND_LIST_TYPE_DIRECT ? 0u : 1u;
     }
     D3D12_GPU_DESCRIPTOR_HANDLE gpu(unsigned index) const
     {
@@ -148,6 +175,70 @@ static constexpr bool kDumpEngineInputs = true;
         return SUCCEEDED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
                                                          IID_PPV_ARGS(output)));
     }
+    // HLSL compilation is the most expensive CPU step of a session start, and a
+    // session is created again whenever the engine rebuilds its frame generation
+    // lists (focus regain, swap-chain change, frame generation restart). The
+    // compiled code depends only on the shader source, so it is cached
+    // process-wide and the per-session cost is the pipeline state object alone.
+    static ID3DBlob* sharedShaderCode(const std::vector<char>& source, FILE* log)
+    {
+        struct Entry
+        {
+            std::size_t size = 0;
+            std::uint64_t hash = 0;
+            ID3DBlob* code = nullptr;
+        };
+        static constexpr unsigned kSharedShaderCacheSize = 4;
+        static std::mutex mutex;
+        static Entry entries[kSharedShaderCacheSize];
+        static unsigned entryCount = 0;
+        std::uint64_t hash = 1469598103934665603ull;
+        for (const auto value : source)
+        {
+            hash ^= static_cast<unsigned char>(value);
+            hash *= 1099511628211ull;
+        }
+        std::lock_guard lock(mutex);
+        for (unsigned i = 0; i < entryCount; ++i)
+            if (entries[i].size == source.size() && entries[i].hash == hash && entries[i].code != nullptr)
+            {
+                if (log != nullptr)
+                {
+                    std::fprintf(log, "OBJECT_SHADER cached=1 bytes=%zu\n", source.size());
+                    std::fflush(log);
+                }
+                entries[i].code->AddRef();
+                return entries[i].code;
+            }
+        ID3DBlob* code = nullptr;
+        ID3DBlob* errors = nullptr;
+        auto result = D3DCompile(source.data(), source.size(), "glass-object-motion.hlsl", nullptr, nullptr,
+                                 "ApplyObjectMotion", "cs_5_0",
+                                 D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_ENABLE_STRICTNESS, 0, &code, &errors);
+        if (errors)
+        {
+            if (log != nullptr)
+            {
+                std::fprintf(log, "OBJECT_SHADER %s\n", static_cast<const char*>(errors->GetBufferPointer()));
+                std::fflush(log);
+            }
+            errors->Release();
+        }
+        if (FAILED(result) || code == nullptr)
+            return nullptr;
+        if (entryCount == kSharedShaderCacheSize)
+        {
+            // Bounded: only shader revisions reach this cache, so the oldest is
+            // dropped rather than letting it grow.
+            entries[0].code->Release();
+            for (unsigned i = 1; i < entryCount; ++i)
+                entries[i - 1] = entries[i];
+            --entryCount;
+        }
+        entries[entryCount++] = { source.size(), hash, code };
+        code->AddRef();
+        return code;
+    }
     // Compiles the compose shader and swaps the compute PSO. Safe to call again
     // from the live debug channel; the old PSO stays until the new one exists.
     bool compilePipeline(const wchar_t* shader, FILE* log)
@@ -163,23 +254,14 @@ static constexpr bool kDumpEngineInputs = true;
         std::fclose(file);
         if (!read)
             return false;
-        ID3DBlob* code = nullptr;
-        ID3DBlob* errors = nullptr;
-        auto result = D3DCompile(source.data(), source.size(), "glass-object-motion.hlsl", nullptr, nullptr,
-                                 "ApplyObjectMotion", "cs_5_0",
-                                 D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_ENABLE_STRICTNESS, 0, &code, &errors);
-        if (errors)
-        {
-            std::fprintf(log, "OBJECT_SHADER %s\n", static_cast<const char*>(errors->GetBufferPointer()));
-            errors->Release();
-        }
-        if (FAILED(result))
+        ID3DBlob* code = sharedShaderCode(source, log);
+        if (code == nullptr)
             return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineDescription {};
         pipelineDescription.pRootSignature = root;
         pipelineDescription.CS = { code->GetBufferPointer(), code->GetBufferSize() };
         ID3D12PipelineState* created = nullptr;
-        result = device->CreateComputePipelineState(&pipelineDescription, IID_PPV_ARGS(&created));
+        const auto result = device->CreateComputePipelineState(&pipelineDescription, IID_PPV_ARGS(&created));
         code->Release();
         if (FAILED(result))
             return false;
@@ -379,7 +461,8 @@ static constexpr bool kDumpEngineInputs = true;
         // compose list can run on the producer queue, so the completion proof is
         // the compose fence - the frame generation queue's own signal does not
         // cover those copies.
-        ID3D12Fence* completion = composeFence != nullptr ? composeFence : dumpFence;
+        auto& dumpContext = composeContexts[dumpComposeContext < kComposeContexts ? dumpComposeContext : 0];
+        ID3D12Fence* completion = dumpContext.fence != nullptr ? dumpContext.fence : dumpFence;
         if (completion == nullptr)
             return false;
         const auto completed = completion->GetCompletedValue();
@@ -440,28 +523,47 @@ static constexpr bool kDumpEngineInputs = true;
     FILE* logHandle() const { return logFile; }
     bool composeReady()
     {
-        if (!composePending)
-            return true;
-        if (!composeFence)
-            return false;
-        const auto completed = composeFence->GetCompletedValue();
-        if (completed == UINT64_MAX)
-            return false;
-        if (completed >= composeValue)
-            composePending = false;
-        return !composePending;
+        bool ready = true;
+        for (auto& context : composeContexts)
+        {
+            if (!context.pending)
+                continue;
+            if (!context.fence)
+            {
+                ready = false;
+                continue;
+            }
+            const auto completed = context.fence->GetCompletedValue();
+            if (completed == UINT64_MAX)
+            {
+                ready = false;
+                continue;
+            }
+            if (completed >= context.value)
+                context.pending = false;
+            else
+                ready = false;
+        }
+        return ready;
     }
     // Diagnostics: raw fence state for the live channel and the offline fixture.
     std::uint64_t composeCompleted() const
     {
-        return composeFence ? composeFence->GetCompletedValue() : 0;
+        const auto& context = composeContexts[composeActive];
+        return context.fence ? context.fence->GetCompletedValue() : 0;
     }
-    std::uint64_t composeSubmitted() const { return composeValue; }
-    bool composeInFlight() const { return composePending; }
+    std::uint64_t composeSubmitted() const { return composeContexts[composeActive].value; }
+    bool composeInFlight() const
+    {
+        for (const auto& context : composeContexts)
+            if (context.pending)
+                return true;
+        return false;
+    }
     // The host submits the compose on the queue that owns the packed raster and
     // then makes the frame generation queue wait on this fence, so the packed
     // records are never read across queues.
-    ID3D12Fence* composeFenceHandle() const { return composeFence; }
+    ID3D12Fence* composeFenceHandle() const { return composeContexts[composeActive].fence; }
     std::uint64_t composeForced() const { return composeForcedReleases; }
     // Teardown gate: true only when no compose list of this object can still be
     // executing on the GPU. A submission whose completion never arrives would
@@ -469,24 +571,29 @@ static constexpr bool kDumpEngineInputs = true;
     // outputs are released with a counted, logged escape.
     bool drained()
     {
-        if (!composePending)
-            return true;
-        if (composeFence)
+        bool complete = true;
+        for (auto& context : composeContexts)
         {
-            const auto completed = composeFence->GetCompletedValue();
-            if (completed != UINT64_MAX && completed >= composeValue)
+            if (!context.pending)
+                continue;
+            if (context.fence)
             {
-                composePending = false;
-                return true;
+                const auto completed = context.fence->GetCompletedValue();
+                if (completed != UINT64_MAX && completed >= context.value)
+                {
+                    context.pending = false;
+                    continue;
+                }
             }
+            if (std::chrono::steady_clock::now() - context.submittedAt > std::chrono::seconds(5))
+            {
+                context.pending = false;
+                ++composeForcedReleases;
+                continue;
+            }
+            complete = false;
         }
-        if (std::chrono::steady_clock::now() - composeSubmittedAt > std::chrono::seconds(5))
-        {
-            composePending = false;
-            ++composeForcedReleases;
-            return true;
-        }
-        return false;
+        return complete;
     }
 
     // Records the input copies, the compose dispatch and the optional engine
@@ -531,12 +638,14 @@ static constexpr bool kDumpEngineInputs = true;
             noteComposeSkip("ensure");
             return false;
         }
-        if (FAILED(composeAllocator->Reset()))
+        const auto index = composeIndex(type);
+        auto& context = composeContexts[index];
+        if (FAILED(context.allocator->Reset()))
         {
             noteComposeSkip("allocator_reset");
             return false;
         }
-        if (FAILED(composeList->Reset(composeAllocator, nullptr)))
+        if (FAILED(context.list->Reset(context.allocator, nullptr)))
         {
             noteComposeSkip("list_reset");
             return false;
@@ -546,42 +655,46 @@ static constexpr bool kDumpEngineInputs = true;
         // Streamline's DLSS-G evaluation; the timer accepts both. A full
         // eight-slot window skips the sample instead of waiting.
         const auto timing =
-            timer && controls.measureGpuTime ? timer->begin(composeList) : GpuTimer::Ticket {};
+            timer && controls.measureGpuTime ? timer->begin(context.list) : GpuTimer::Ticket {};
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
         const bool dispatched =
-            dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
+            dispatch(context.list, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
                      controls);
         const bool recorded =
             dispatched &&
             (!controls.packedWriteBack ||
-             writeBack(composeList, originalMotion, originalDepth, motionState, depthState, rows));
+             writeBack(context.list, originalMotion, originalDepth, motionState, depthState, rows));
         if (timing)
-            timer->end(composeList, timing);
+            timer->end(context.list, timing);
         if (!recorded)
         {
             if (dispatched)
                 noteComposeSkip("writeback");
             return false;
         }
-        if (FAILED(composeList->Close()))
+        if (FAILED(context.list->Close()))
         {
             noteComposeSkip("close");
             return false;
         }
-        ID3D12CommandList* lists[] { composeList };
+        ID3D12CommandList* lists[] { context.list };
         queue->ExecuteCommandLists(1, lists);
-        composeSubmittedAt = std::chrono::steady_clock::now();
-        const auto value = ++composeValue;
+        context.submittedAt = std::chrono::steady_clock::now();
+        const auto value = ++context.value;
         // Pending is set before the signal on purpose: a list that was already
         // submitted must never be reclaimed by a later Reset while its
         // completion is unknown.
-        composePending = true;
-        if (FAILED(queue->Signal(composeFence, value)))
+        context.pending = true;
+        if (FAILED(queue->Signal(context.fence, value)))
             return false;
+        composeActive = index;
         if (dumpPending)
+        {
             dumpComposeValue = value;
+            dumpComposeContext = index;
+        }
         if (timing)
-            timer->submitted(composeList, queue, composeFence, composeValue);
+            timer->submitted(context.list, queue, context.fence, context.value);
         if (controls.trace && logFile && TraceWanted())
         {
             std::fprintf(logFile, "TRACE_COMPOSE queue=%p frame=%u rows=%u writeback=%u\n", queue, packed.frame,
@@ -594,37 +707,21 @@ static constexpr bool kDumpEngineInputs = true;
   private:
     bool ensureCompose(D3D12_COMMAND_LIST_TYPE type)
     {
-        if (composeList && composeType == type)
+        auto& context = composeContexts[composeIndex(type)];
+        if (context.list)
             return true;
-        // A new FG path can carry a different list type. The old objects are only
-        // dropped when nothing of theirs can still be executing.
-        if (composeList && composePending)
-            return false;
-        if (composeAllocator)
-        {
-            composeAllocator->Release();
-            composeAllocator = nullptr;
-        }
-        if (composeList)
-        {
-            composeList->Release();
-            composeList = nullptr;
-        }
-        if (composeFence)
-        {
-            composeFence->Release();
-            composeFence = nullptr;
-        }
-        composeValue = 0;
-        composePending = false;
-        composeType = type;
+        // Each context is created once and kept for the life of the packed
+        // outputs: the frame generation path switches list type per submission,
+        // so a type mismatch is not a reason to drop the other context's list,
+        // allocator or fence (the frame generation queue may still be waiting on
+        // that fence).
         if (!device ||
-            FAILED(device->CreateCommandAllocator(type, IID_PPV_ARGS(&composeAllocator))) ||
-            FAILED(device->CreateCommandList(0, type, composeAllocator, nullptr,
-                                             IID_PPV_ARGS(&composeList))) ||
-            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&composeFence))))
+            FAILED(device->CreateCommandAllocator(type, IID_PPV_ARGS(&context.allocator))) ||
+            FAILED(device->CreateCommandList(0, type, context.allocator, nullptr,
+                                             IID_PPV_ARGS(&context.list))) ||
+            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context.fence))))
             return false;
-        composeList->Close();
+        context.list->Close();
         return true;
     }
 
@@ -814,6 +911,13 @@ static constexpr bool kDumpEngineInputs = true;
             return;
         std::fprintf(file, "P6\n%u %u\n255\n", width, height);
         unsigned covered = 0;
+        const auto decode = [](std::uint64_t record, unsigned shift)
+        {
+            const auto raw = static_cast<unsigned>((record >> shift) & 0x7ffu);
+            return (raw & 0x400u) ? int(raw) - 2048 : int(raw);
+        };
+        packedMotionPixels = packedMotionSumAbsX = packedMotionSumAbsY = 0;
+        packedMotionMaxAbsX = packedMotionMaxAbsY = packedMotionSaturated = 0;
         for (unsigned y = 0; y < height; ++y)
         {
             const auto* row = reinterpret_cast<const std::uint64_t*>(data + UINT64(y) * width * 8);
@@ -826,6 +930,16 @@ static constexpr bool kDumpEngineInputs = true;
                 if (id)
                 {
                     ++covered;
+                    const int motionX = decode(record, 35), motionY = decode(record, 24);
+                    const auto absX = unsigned(motionX < 0 ? -motionX : motionX);
+                    const auto absY = unsigned(motionY < 0 ? -motionY : motionY);
+                    packedMotionSumAbsX += absX;
+                    packedMotionSumAbsY += absY;
+                    packedMotionMaxAbsX = (std::max)(packedMotionMaxAbsX, absX);
+                    packedMotionMaxAbsY = (std::max)(packedMotionMaxAbsY, absY);
+                    if (absX >= 1023 || absY >= 1023)
+                        ++packedMotionSaturated;
+                    ++packedMotionPixels;
                     const auto hue = unsigned((id * 2654435761u) >> 24) & 0xffu;
                     pixel[0] = static_cast<std::byte>(64 + ((hue * 3) & 0xbf));
                     pixel[1] = static_cast<std::byte>(64 + ((hue * 5) & 0xbf));
@@ -853,6 +967,15 @@ static constexpr bool kDumpEngineInputs = true;
             std::fprintf(file, "dispatched_pixels=%u packed_pixels=%u edge_pixels=%u interior_pixels=%u\n", value[0],
                          value[1], value[2], value[3]);
         }
+        if (packedMotionPixels)
+            std::fprintf(file,
+                         "captured_motion_pixels=%llu mean_abs_pixels=(%.3f,%.3f) max_abs_pixels=(%.3f,%.3f) "
+                         "saturated=%u mvec_scale=(%.6f,%.6f)\n",
+                         static_cast<unsigned long long>(packedMotionPixels),
+                         double(packedMotionSumAbsX) / (8.0 * double(packedMotionPixels)),
+                         double(packedMotionSumAbsY) / (8.0 * double(packedMotionPixels)),
+                         double(packedMotionMaxAbsX) / 8.0, double(packedMotionMaxAbsY) / 8.0,
+                         packedMotionSaturated, lastScaleX, lastScaleY);
         for (unsigned gy = 0; gy < 9; ++gy)
         {
             for (unsigned gx = 0; gx < 16; ++gx)
@@ -917,6 +1040,8 @@ static constexpr bool kDumpEngineInputs = true;
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState,
                   float scaleX, float scaleY, Controls controls)
     {
+        lastScaleX = scaleX;
+        lastScaleY = scaleY;
         // Named rejections: a silent false here removes the whole correction
         // while the FG still receives the substituted texture.
         if (!command)
@@ -1170,14 +1295,15 @@ static constexpr bool kDumpEngineInputs = true;
         if (dumpFence) dumpFence->Release();
         dumpFence = nullptr;
         dumpPending = false;
-        if (composeAllocator) composeAllocator->Release();
-        if (composeList) composeList->Release();
-        if (composeFence) composeFence->Release();
-        composeAllocator = nullptr;
-        composeList = nullptr;
-        composeFence = nullptr;
-        composeValue = 0;
-        composePending = false;
+        for (auto& context : composeContexts)
+        {
+            if (context.allocator) context.allocator->Release();
+            if (context.list) context.list->Release();
+            if (context.fence) context.fence->Release();
+            context = {};
+        }
+        composeActive = 0;
+        dumpComposeContext = 0;
         // The resources are gone; the next allocation starts in the states the
         // textures are created with.
         counterState = D3D12_RESOURCE_STATE_COMMON;

@@ -38,9 +38,26 @@ class NativeSession
     // feature instance arrive on a different list every other evaluation.
     // Binding a single list retired and rebuilt the whole session each frame,
     // which reallocated the packed outputs and cancelled the pending compose.
-    static constexpr unsigned kFgCommandSlots = 4;
+    // The engine rebuilds its frame generation lists on focus regain, swap-chain
+    // changes and frame generation restarts, so four identities were not enough:
+    // the fifth list retired and rebuilt the whole session (packed outputs,
+    // pipeline creation) inside the evaluation callback, which is the frame
+    // stall and the engine assert that followed. The set holds the lists the
+    // engine still submits; the least recently adopted identity is dropped when
+    // it is full.
+    static constexpr unsigned kFgCommandSlots = 16;
     ID3D12GraphicsCommandList* fgCommands[kFgCommandSlots] {};
+    // The list type belongs to the command list, not to the session: Streamline
+    // submits the frame generation list on a compute queue for the driver-level
+    // block and on a direct queue for the tagged evaluation. A session-wide
+    // type made the second submission look illegal and failed the session, and
+    // a failed session could never be released again.
+    D3D12_COMMAND_LIST_TYPE fgTypes[kFgCommandSlots] {};
     CommandLifetime fgLifetimes[kFgCommandSlots];
+    // Adoption order per slot, used only to pick the victim when the identity
+    // set is full.
+    std::uint64_t fgUse[kFgCommandSlots] {};
+    std::uint64_t fgUseClock = 0;
     unsigned fgCommandCount = 0;
     std::array<CommandLifetime, 64> producers {};
     std::array<ID3D12Fence*, 64> nativeFences {};
@@ -107,6 +124,16 @@ class NativeSession
         return nullptr;
     }
 
+    // Slot of a known frame generation list, or kFgCommandSlots when the list
+    // does not belong to this session.
+    unsigned fgCommandSlot(ID3D12GraphicsCommandList* command) const
+    {
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
+            if (fgCommands[i] == command)
+                return i;
+        return kFgCommandSlots;
+    }
+
     // Drops a list the engine destroyed and re-arms the primary identity. The
     // watch state is dropped rather than moved: CommandLifetime is intentionally
     // not movable, and a leftover callback token only publishes a flag.
@@ -116,6 +143,7 @@ class NativeSession
             if (fgCommands[i] == command)
             {
                 fgCommands[i] = nullptr;
+                fgTypes[i] = D3D12_COMMAND_LIST_TYPE_COMPUTE;
                 fgLifetimes[i].forget();
                 if (fgCommand == command)
                     fgCommand = firstKnownFgCommand();
@@ -231,10 +259,34 @@ class NativeSession
                 break;
             }
         if (slot == kFgCommandSlots)
-            return false;
+        {
+            // Full set: drop the least recently adopted identity instead of
+            // retiring the session. The list the engine is evaluating right now
+            // is never the victim.
+            for (unsigned i = 0; i < kFgCommandSlots; ++i)
+                if (fgCommands[i] != fgCommand && (slot == kFgCommandSlots || fgUse[i] < fgUse[slot]))
+                    slot = i;
+            if (slot == kFgCommandSlots)
+                return false;
+            static std::atomic<unsigned> evicted { 0 };
+            if (log != nullptr && evicted.fetch_add(1, std::memory_order_relaxed) < 8)
+            {
+                std::fprintf(log, "NATIVE_SESSION fg_command_evicted slot=%u command=%p\n", slot,
+                             static_cast<void*>(fgCommands[slot]));
+                std::fflush(log);
+            }
+            // Only the identity watch is dropped: the list may still be alive
+            // and its recording belongs to the frame slot that reuses it.
+            fgLifetimes[slot].forget();
+            fgCommands[slot] = nullptr;
+            fgTypes[slot] = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+            fgUse[slot] = 0;
+        }
         if (!link.registerFgCommand(command) || !fgLifetimes[slot].attach(command))
             return false;
         fgCommands[slot] = command;
+        fgTypes[slot] = type;
+        fgUse[slot] = ++fgUseClock;
         fgCommand = command;
         fgCommandType = type;
         recording.bind(command, true, supported, observed);
@@ -259,6 +311,16 @@ class NativeSession
 
     // Includes Close and every applicable state setter, including predication.
     void onStateMutation(ID3D12GraphicsCommandList* command) { recording.onMutation(command); }
+
+    // A compute command list may be executed on a compute or a direct queue; a
+    // direct list only on a direct queue. Streamline's frame-generation plugin
+    // submits the same list on both queue types, so the queue check must allow
+    // that instead of pinning one queue identity.
+    static bool compatibleQueue(D3D12_COMMAND_LIST_TYPE list, D3D12_COMMAND_LIST_TYPE queue) noexcept
+    {
+        return list == queue ||
+               (list == D3D12_COMMAND_LIST_TYPE_COMPUTE && queue == D3D12_COMMAND_LIST_TYPE_DIRECT);
+    }
 
     // Called immediately AFTER the verified game's depth transition. Multiple
     // matching candidates between phase-1 evaluations make that batch ambiguous.
@@ -291,24 +353,32 @@ class NativeSession
         ID3D12GraphicsCommandList* matched = nullptr;
         for (UINT i = 0; i < count; ++i)
         {
-            if (knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(commands[i])))
+            auto* submitted = static_cast<ID3D12GraphicsCommandList*>(commands[i]);
+            const auto slot = fgCommandSlot(submitted);
+            if (slot != kFgCommandSlots)
             {
-                matched = static_cast<ID3D12GraphicsCommandList*>(commands[i]);
+                matched = submitted;
                 const auto queueType = queue->GetDesc().Type;
-                if (queueType != fgCommandType)
+                // The list carries its own type: Streamline submits the same
+                // frame generation list on a compute queue for the driver-level
+                // block and on a direct queue for the tagged evaluation. A
+                // session-wide type turned the second case into a permanent
+                // session failure, and a failed session could never be released
+                // or replaced, which left every later frame uncorrected.
+                if (!compatibleQueue(fgTypes[slot], queueType))
                 {
-                    // The compose list is created for one queue type, so a type
-                    // mismatch is a real rejection. Log it instead of failing
-                    // silently.
+                    static std::atomic<unsigned> incompatible { 0 };
                     if (log)
                     {
-                        std::fprintf(log,
-                                     "NATIVE_HOST fg_queue_rejected type=%u expected=%u queue=%p\n",
-                                     static_cast<unsigned>(queueType), static_cast<unsigned>(fgCommandType),
-                                     static_cast<void*>(queue));
-                        std::fflush(log);
+                        if (incompatible.fetch_add(1, std::memory_order_relaxed) < 8)
+                        {
+                            std::fprintf(log,
+                                         "NATIVE_HOST fg_queue_incompatible list=%u queue_type=%u queue=%p\n",
+                                         static_cast<unsigned>(fgTypes[slot]), static_cast<unsigned>(queueType),
+                                         static_cast<void*>(queue));
+                            std::fflush(log);
+                        }
                     }
-                    failed = true;
                 }
                 else if (fgQueue != queue)
                 {
@@ -328,20 +398,21 @@ class NativeSession
                         fgQueue->Release();
                     fgQueue = queue;
                     fgQueue->AddRef();
+                    fgCommandType = fgTypes[slot];
                 }
+                // A deferred compose was queued on this queue just before the
+                // batch, so the completion signal covers it as well as a
+                // substituted input.
+                usesOutput |= outputRecording || composeInFlight;
             }
             if (!objectMode)
                 link.submit(queue, commands[i]);
-            // A deferred compose was queued on this queue just before the batch,
-            // so the completion signal covers it as well as a substituted input.
-            usesOutput |= (outputRecording || composeInFlight) &&
-                          knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(commands[i]));
         }
         if (!objectMode && (!pool.afterSubmit(queue, count, commands) || !link.healthy()))
             failed = true;
         if (usesOutput)
         {
-            if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != fgCommandType)
+            if (!fgQueue || fgQueue != queue || !compatibleQueue(fgCommandType, queue->GetDesc().Type))
                 failed = true;
             else
             {
@@ -429,7 +500,13 @@ class NativeSession
                 // own state before calling the NGX core. The compose runs on
                 // this module's own list, so the engine list's state is not a
                 // precondition there; allowAnyState carries that distinction.
-                if (!controls.active() || !inputs.valid() || (!fresh && !allowAnyState))
+                // The pristine-list requirement ("Reset seen, nothing set
+                // since") cannot hold for the graphics list Streamline's frame
+                // generation plugin evaluates on: it resets and then binds its
+                // own state before calling the NGX core. In packed mode the
+                // compose runs on this module's own list, so the engine list's
+                // binding history is not a precondition for the substitution.
+                if (!controls.active() || !inputs.valid() || (!fresh && !allowAnyState && !objectMode))
                 {
                     static std::atomic<unsigned> rejectLog { 0 };
                     if (log != nullptr && rejectLog.fetch_add(1, std::memory_order_relaxed) < 6)
@@ -462,8 +539,16 @@ class NativeSession
             outputRecording |= prepared.motion != nullptr;
             if (controls.trace && log && TraceWanted())
             {
-                std::fprintf(log, "TRACE_SUBSTITUTE index=%u applied=%u frame=%llu\n", inputs.index,
-                             prepared.motion ? 1u : 0u, static_cast<unsigned long long>(inputs.frame));
+                // The motion pointer separates a harmless second evaluation of an
+                // already corrected frame from an evaluation whose frame never
+                // received the correction at all.
+                std::fprintf(log,
+                             "TRACE_SUBSTITUTE index=%u applied=%u frame=%llu count=%u motion=%p command=%p "
+                             "scale=%.6f,%.6f\n",
+                             inputs.index, prepared.motion ? 1u : 0u,
+                             static_cast<unsigned long long>(inputs.frame), inputs.count,
+                             static_cast<void*>(inputs.motion), static_cast<void*>(command), inputs.scaleX,
+                             inputs.scaleY);
                 std::fflush(log);
             }
             return prepared;
@@ -610,7 +695,10 @@ class NativeSession
         if (objectMode && !objectPass.drained())
             return false;
         composeInFlight = false;
-        if (!stopped || failed || outputRecording || (!objectMode && !pool.idle()))
+        // A failed session still has to become releasable: the host keeps at
+        // most two retiring slots, and a session that could never be released
+        // blocked every later substitution for the rest of the process.
+        if (!stopped || outputRecording || (!objectMode && !pool.idle()))
             return false;
         for (const auto& producer : producers)
             if (producer.identity())

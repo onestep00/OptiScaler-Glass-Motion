@@ -1,0 +1,60 @@
+#pragma once
+#include <atomic>
+#include <cstdint>
+
+namespace GlassFg
+{
+// CPU cost of the two host callbacks that run inside the engine's frame
+// generation path, in microseconds. The counters are only ever incremented with
+// relaxed atomics from the render thread and formatted by the health thread, so
+// no allocation, formatting or locking happens per frame.
+struct HostTiming
+{
+    std::atomic<std::uint64_t> count { 0 };
+    std::atomic<std::uint64_t> totalUs { 0 };
+    std::atomic<std::uint64_t> maxUs { 0 };
+
+    void add(std::uint64_t microseconds) noexcept
+    {
+        count.fetch_add(1, std::memory_order_relaxed);
+        totalUs.fetch_add(microseconds, std::memory_order_relaxed);
+        auto previous = maxUs.load(std::memory_order_relaxed);
+        while (microseconds > previous &&
+               !maxUs.compare_exchange_weak(previous, microseconds, std::memory_order_relaxed))
+        {
+        }
+    }
+    void reset() noexcept
+    {
+        count.store(0, std::memory_order_relaxed);
+        totalUs.store(0, std::memory_order_relaxed);
+        maxUs.store(0, std::memory_order_relaxed);
+    }
+};
+
+// Session acquisition, NGX parameter read and the deferred compose preparation.
+inline HostTiming& EvaluationTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+// Pre-submit hook: producer wait plus the compose submission.
+inline HostTiming& SubmissionTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+// Pre-submit hook split: the packed capture's own command list submission and
+// the deferred compose. Both run inside the engine's ExecuteCommandLists call,
+// so a stall in either one is a stall of the engine's submission.
+inline HostTiming& CaptureTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+inline HostTiming& ComposeTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+} // namespace GlassFg

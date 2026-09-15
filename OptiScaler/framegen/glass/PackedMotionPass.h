@@ -30,6 +30,16 @@ class PackedMotionPass
     bool pendingValid = false;
     // Host timer for the deferred compose sample; never owned here.
     GpuTimer* pendingTimer = nullptr;
+    // Streamline evaluates the same frame generation inputs once per back-buffer
+    // command list. The capture hands a packed frame to the first evaluation
+    // only, so the second one has to reuse it: otherwise the FG core receives
+    // the corrected motion on one evaluation and the engine's original motion on
+    // the other, and the frames generated from the second evaluation keep the
+    // artifact.
+    PackedMotionFrame reuseFrame {};
+    ID3D12Resource* reuseMotion = nullptr;
+    ID3D12Resource* reuseDepth = nullptr;
+    bool reuseValid = false;
 
   public:
     bool initialize(ID3D12Device* device, const D3D12_RESOURCE_DESC (&descriptions)[3],
@@ -60,8 +70,17 @@ class PackedMotionPass
         }
         if (inputs.index == 1)
         {
+            // A new engine frame invalidates the reuse pair; a repeat evaluation
+            // of the same frame (same motion/depth identities and frame token)
+            // keeps it.
+            if (objectFrame && reuseValid && objectFrame.fgFrame != reuseFrame.fgFrame)
+                reuseValid = false;
+            PackedMotionFrame frame = objectFrame;
+            if (!frame && reuseValid && inputs.motion == reuseMotion && inputs.depth == reuseDepth &&
+                inputs.frame == reuseFrame.fgFrame)
+                frame = reuseFrame;
             invalidateHistory();
-            if (!objectFrame || inputs.frame == UINT64_MAX || objectFrame.fgFrame != inputs.frame)
+            if (!frame || inputs.frame == UINT64_MAX || frame.fgFrame != inputs.frame)
                 return {};
             // Staged activation: the copy+swap contract is exercised first.
             // The full-screen packed compute dispatch is the new GPU work that
@@ -95,7 +114,7 @@ class PackedMotionPass
                 invalidateHistory();
                 return {};
             }
-            pendingFrame = objectFrame;
+            pendingFrame = frame;
             pendingMotion = inputs.motion;
             pendingDepth = inputs.depth;
             pendingMotionState = states[0];
@@ -119,10 +138,14 @@ class PackedMotionPass
                 return {};
             }
             batch = inputs;
-            packed = objectFrame;
+            packed = frame;
             command = value;
             nextIndex = 2;
             batchReady = true;
+            reuseFrame = frame;
+            reuseMotion = inputs.motion;
+            reuseDepth = inputs.depth;
+            reuseValid = true;
         }
         else if (batchReady && value == command && inputs.index == nextIndex && inputs.index <= inputs.count &&
                  inputs.sameRenderedFrame(batch))

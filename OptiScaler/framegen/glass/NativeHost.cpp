@@ -11,11 +11,13 @@
 #include "GlassDebugControl.h"
 #include "NvngxDlssgBridge.h"
 #include "GeometryHealth.h"
+#include "GlassHostTiming.h"
 #include "GeometryCommands.h"
 #include <hooks/Streamline_Hooks.h>
 #include <Util.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -28,6 +30,20 @@ namespace
 // Rotation limit for the module log. Enforced at open and again during the
 // session, because the step trace keeps writing while the game runs.
 constexpr std::uintmax_t kLogLimit = 32ull * 1024 * 1024;
+// Per-callback CPU cost, reported once per health sample. Two steady_clock
+// reads and one relaxed atomic add are the whole cost on the normal path.
+struct TimingScope
+{
+    HostTiming& timing;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit TimingScope(HostTiming& value) : timing(value) {}
+    ~TimingScope()
+    {
+        timing.add(static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
+                .count()));
+    }
+};
 
 struct Entry
 {
@@ -69,6 +85,18 @@ struct Runtime
     FILE* log = nullptr;
     bool logAttempted = false, unavailable = false, stopped = false;
     uint64_t evaluations = 0, substitutions = 0, captures = 0;
+    // Per-generated-frame index split of the two counters above. Index 0 is the
+    // real frame, 1..n are the generated ones; a missing substitution on any of
+    // them means that frame kept the engine's original motion vectors.
+    uint64_t evaluationsByIndex[8] {}, substitutionsByIndex[8] {};
+    // A skipped substitution is only harmless when the motion texture it would
+    // have written was already corrected by an earlier evaluation of the same
+    // engine frame (the host evaluates one frame once per back buffer). A skip
+    // on a texture that was never corrected leaves that frame with the engine's
+    // own motion vectors.
+    ID3D12Resource* correctedMotion[4] {};
+    unsigned correctedMotionNext = 0;
+    uint64_t unsubstitutedReusedMotion = 0, unsubstitutedFreshMotion = 0;
     // Runtime extent change: the frame-generation inputs were rebuilt at a new
     // size. The draw capture is process-resident, so it is released and rebuilt
     // at a quiescent point (no active or retiring session) instead of leaving
@@ -231,21 +259,45 @@ std::filesystem::path packedShaderPath()
 // Crash forensics: this marker exists only while the batch that carries our
 // compose is in flight. After a driver reset the file is still there, which
 // proves the reset happened in a batch that contained our work.
-void writeComposeMarker(UINT64 value, bool active)
+// The file is a state marker, so it is written only on the transitions: one
+// create when the first compose of a run is queued and one delete when the last
+// one completes. Re-creating it every frame cost 1.0ms at the median and up to
+// 19.9ms at the tail on the render thread (1500-op probe, 2026-09-16), which
+// breaks the 1ms frame budget on its own.
+std::atomic<bool> composeMarkerActive { false };
+bool writeComposeMarker(UINT64 value, bool active)
 {
     const auto path = Util::DllPath().parent_path() / L"Glass" / L"glass-compose.pending";
     if (!active)
     {
         std::error_code error;
         std::filesystem::remove(path, error);
-        return;
+        return true;
     }
     FILE* file = _wfopen(path.c_str(), L"wb");
     if (!file)
-        return;
+        return false;
     std::fprintf(file, "tick=%llu producer=%llu\n", static_cast<unsigned long long>(GetTickCount64()),
                  static_cast<unsigned long long>(value));
     std::fclose(file);
+    return true;
+}
+
+void raiseComposeMarker(UINT64 value)
+{
+    if (composeMarkerActive.load(std::memory_order_relaxed))
+        return;
+    // The flag is published only after the file exists, so a failed create is
+    // retried on the next frame instead of silently dropping the marker.
+    if (writeComposeMarker(value, true))
+        composeMarkerActive.store(true, std::memory_order_release);
+}
+
+void clearComposeMarker()
+{
+    if (!composeMarkerActive.exchange(false, std::memory_order_acq_rel))
+        return;
+    writeComposeMarker(0, false);
 }
 
 // Automatic staged ramp for unattended sessions: the same order the manual
@@ -302,8 +354,13 @@ D3D12Callbacks makeCallbacks()
     value.beforeSubmit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {
         auto& r = *static_cast<Runtime*>(p);
+        TimingScope timing(SubmissionTiming());
         InternalD3D12Scope ownCalls;
-        NotifyGeometryCaptureBeforeSubmit(q, count, lists);
+        {
+            TimingScope capture(CaptureTiming());
+            NotifyGeometryCaptureBeforeSubmit(q, count, lists);
+        }
+        TimingScope compose(ComposeTiming());
         // The compose reads the packed raster written on the producer queue.
         // Establish that dependency before the batch that carries the FG call.
         r.each([&](Entry& e)
@@ -405,7 +462,7 @@ D3D12Callbacks makeCallbacks()
                     // The marker now describes the queued compose on the GPU, not
                     // the CPU window, so it is written only when one was queued.
                     if (queued)
-                        writeComposeMarker(waited ? value : 0, true);
+                        raiseComposeMarker(waited ? value : 0);
                     break;
                 }
             }
@@ -436,7 +493,7 @@ D3D12Callbacks makeCallbacks()
                     bool inFlight = false;
                     r.each([&](Entry& e) { inFlight |= e.session.packedComposeInFlight(); });
                     if (!inFlight)
-                        writeComposeMarker(0, false);
+                        clearComposeMarker();
                 }
         }
         // Attribute a driver reset to the exact submitted batch that carried
@@ -481,6 +538,7 @@ D3D12Callbacks makeCallbacks()
 std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                const Inputs& inputs, Controls controls)
 {
+    TimingScope timing(EvaluationTiming());
     r.reap();
     if (r.stopped || r.unavailable || !command || !handle || !inputs.valid())
         return {};
@@ -1050,6 +1108,13 @@ NativeHostStatus ReadNativeHostStatus() noexcept
     status.evaluations = r.evaluations;
     status.substitutions = r.substitutions;
     status.captures = r.captures;
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        status.evaluationsByIndex[i] = r.evaluationsByIndex[i];
+        status.substitutionsByIndex[i] = r.substitutionsByIndex[i];
+    }
+    status.unsubstitutedReusedMotion = r.unsubstitutedReusedMotion;
+    status.unsubstitutedFreshMotion = r.unsubstitutedFreshMotion;
     status.active = r.active ? 1u : 0u;
     status.retiring = (r.retiring[0] ? 1u : 0u) + (r.retiring[1] ? 1u : 0u);
     status.stopped = r.stopped ? 1u : 0u;
@@ -1194,6 +1259,8 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                 std::fflush(r.log);
             }
             ++entry->evaluations;
+            if (inputs.index < 8)
+                ++r.evaluationsByIndex[inputs.index];
             D3D12_RESOURCE_STATES states[3] {};
             ID3D12Resource* resources[] = { inputs.motion, inputs.color, inputs.depth };
             InternalD3D12Scope ownCalls;
@@ -1318,6 +1385,26 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         --entry->evaluations;
         ++r.evaluations;
         r.substitutions += applied;
+        if (applied && inputs.index < 8)
+            ++r.substitutionsByIndex[inputs.index];
+        if (applied)
+        {
+            r.correctedMotion[r.correctedMotionNext++ & 3] = inputs.motion;
+        }
+        else
+        {
+            bool reused = false;
+            for (auto* pointer : r.correctedMotion)
+                if (pointer != nullptr && pointer == inputs.motion)
+                {
+                    reused = true;
+                    break;
+                }
+            if (reused)
+                ++r.unsubstitutedReusedMotion;
+            else
+                ++r.unsubstitutedFreshMotion;
+        }
         if (applied && result == NVSDK_NGX_Result_Success)
         {
             const auto now = GetTickCount64();
@@ -1345,6 +1432,15 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         {
             std::fprintf(r.log, "NATIVE_HOST evaluations=%llu substitutions=%llu captures=%llu result=%x\n",
                          r.evaluations, r.substitutions, r.captures, static_cast<unsigned>(result));
+            std::fprintf(r.log, "NATIVE_HOST_BY_INDEX");
+            for (unsigned i = 0; i < 8; ++i)
+                if (r.evaluationsByIndex[i] != 0)
+                    std::fprintf(r.log, " %u:%llu/%llu", i,
+                                 static_cast<unsigned long long>(r.substitutionsByIndex[i]),
+                                 static_cast<unsigned long long>(r.evaluationsByIndex[i]));
+            std::fprintf(r.log, " (substituted/evaluated) skipped_reused=%llu skipped_uncorrected=%llu\n",
+                         static_cast<unsigned long long>(r.unsubstitutedReusedMotion),
+                         static_cast<unsigned long long>(r.unsubstitutedFreshMotion));
             ReportGeometryHost(r.log);
             std::fflush(r.log);
         }

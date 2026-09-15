@@ -140,7 +140,8 @@ void RenderSettings()
     changed |= ImGui::SliderInt("Correction strength", &strength, 0, 100, "%d%%");
     value.strength = static_cast<unsigned>(strength);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Scales the exact material opacity used for object motion inside the edge.\n"
+        ImGui::SetTooltip("How much of a transparent interior follows the surface's own motion.\n"
+                          "100%% corrects the whole object; 0%% keeps the content drawn behind it.\n"
                           "The selected edge always uses exact object motion while correction is enabled.");
     int edgeWidth = static_cast<int>(value.edgeWidth);
     changed |= ImGui::SliderInt("Object edge width", &edgeWidth, 1, 4, "%d px");
