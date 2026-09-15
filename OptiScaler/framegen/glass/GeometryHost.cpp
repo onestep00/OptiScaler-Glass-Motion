@@ -298,12 +298,12 @@ void ReportGeometryHost(FILE* log) noexcept
                     presentSamples.store(samples, std::memory_order_relaxed);
                     std::fprintf(log,
                                  "GEOMETRY_PRESENT presents=%llu engine_frames=%llu ratio=%.2f present_fps=%.1f "
-                                 "engine_fps=%.1f sample=%llu\n",
+                                 "engine_fps=%.1f sample=%llu epoch=%.3f\n",
                                  static_cast<unsigned long long>(presentDelta),
                                  static_cast<unsigned long long>(engineDelta),
                                  engineDelta ? double(presentDelta) / double(engineDelta) : 0.0,
                                  double(presentDelta) / seconds, double(engineDelta) / seconds,
-                                 static_cast<unsigned long long>(samples));
+                                 static_cast<unsigned long long>(samples), EpochSeconds());
                     {
                         // CPU cost of the frame generation callbacks. The render
                         // thread only adds; the health thread formats and resets,
@@ -323,23 +323,34 @@ void ReportGeometryHost(FILE* log) noexcept
                         auto& capture = CaptureTiming();
                         auto& compose = ComposeTiming();
                         auto& composeQueue = ComposeQueueTiming();
+                        auto& composeReset = ComposeResetTiming();
+                        auto& composeRecord = ComposeRecordTiming();
+                        auto& composeExecute = ComposeExecuteTiming();
+                        auto& composeSignal = ComposeSignalTiming();
                         std::fprintf(log,
                                      "GLASS_TIMING evaluate_n=%llu evaluate_ms=%.3f evaluate_max_ms=%.3f "
                                      "capture_n=%llu capture_ms=%.3f capture_max_ms=%.3f "
                                      "compose_n=%llu compose_ms=%.3f compose_max_ms=%.3f "
                                      "composeq_n=%llu composeq_ms=%.3f composeq_max_ms=%.3f "
-                                     "submit_n=%llu submit_ms=%.3f submit_max_ms=%.3f\n",
+                                     "cqreset_max_ms=%.3f cqrecord_max_ms=%.3f cqexec_max_ms=%.3f "
+                                     "cqsignal_max_ms=%.3f submit_n=%llu submit_ms=%.3f submit_max_ms=%.3f "
+                                     "epoch=%.3f\n",
                                      countOf(evaluation), averageMs(evaluation), maximumMs(evaluation),
                                      countOf(capture), averageMs(capture), maximumMs(capture), countOf(compose),
                                      averageMs(compose), maximumMs(compose), countOf(composeQueue),
-                                     averageMs(composeQueue), maximumMs(composeQueue), countOf(submission),
-                                     averageMs(submission), maximumMs(submission));
+                                     averageMs(composeQueue), maximumMs(composeQueue), maximumMs(composeReset),
+                                     maximumMs(composeRecord), maximumMs(composeExecute), maximumMs(composeSignal),
+                                     countOf(submission), averageMs(submission), maximumMs(submission), EpochSeconds());
                         std::fflush(log);
                         evaluation.reset();
                         submission.reset();
                         capture.reset();
                         compose.reset();
                         composeQueue.reset();
+                        composeReset.reset();
+                        composeRecord.reset();
+                        composeExecute.reset();
+                        composeSignal.reset();
                     }
                 }
                 presentCount.store(lastPresent, std::memory_order_relaxed);

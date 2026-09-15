@@ -37,6 +37,11 @@ $arrayMapExe = Join-Path $buildDirectory 'ArrayMapping.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Array mapping test build failed' }
 & $arrayMapExe
 if ($LASTEXITCODE -ne 0) { throw 'Array mapping contract failed' }
+$motionDumpExe = Join-Path $buildDirectory 'MotionDump.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'MotionDump.cpp') "/Fe$motionDumpExe"
+if ($LASTEXITCODE -ne 0) { throw 'Motion dump test build failed' }
+& $motionDumpExe
+if ($LASTEXITCODE -ne 0) { throw 'Motion dump format contract failed' }
 $bridgeExe = Join-Path $buildDirectory 'StreamlineTagBridge.exe'
 & $compiler @common "/I$optiDirectory" "/I$repository\external\streamline" `
     (Join-Path $PSScriptRoot 'StreamlineTagBridge.cpp') "/Fe$bridgeExe" /link d3d12.lib dxgi.lib dxguid.lib

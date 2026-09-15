@@ -1,9 +1,18 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 namespace GlassFg
 {
+// Wall clock seconds, for correlating a log line with the Windows event log.
+// Only the 2 s health line and the bounded stall lines call this; the per-frame
+// path never does.
+inline double EpochSeconds() noexcept
+{
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 // CPU cost of the two host callbacks that run inside the engine's frame
 // generation path, in microseconds. The counters are only ever incremented with
 // relaxed atomics from the render thread and formatted by the health thread, so
@@ -63,6 +72,30 @@ inline HostTiming& ComposeTiming() noexcept
 // the difference between the two attributes a block to the driver submission
 // instead of to a descheduled render thread.
 inline HostTiming& ComposeQueueTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+// Inside ComposeQueueTiming: the individual driver calls of one compose
+// submission. A 17,6 s block on the frame generation queue was measured inside
+// this scope, so the phases are split to attribute the next one: the allocator
+// and list Reset, the recording, the submission and its Signal.
+inline HostTiming& ComposeResetTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+inline HostTiming& ComposeRecordTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+inline HostTiming& ComposeExecuteTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
+inline HostTiming& ComposeSignalTiming() noexcept
 {
     static HostTiming value;
     return value;

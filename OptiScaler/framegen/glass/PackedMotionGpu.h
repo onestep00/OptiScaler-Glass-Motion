@@ -1,7 +1,9 @@
 #pragma once
 #include "GlassControls.h"
 #include "GlassGpuTimer.h"
+#include "GlassHostTiming.h"
 #include "GlassTrace.h"
+#include "MotionDumpFormat.h"
 #include "PackedMotionCapture.h"
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -18,6 +20,53 @@
 
 namespace GlassFg
 {
+// One bounded line when a driver call inside the compose submission blocks long
+// enough to be felt as a hitch. The budget is fixed so a stall that repeats
+// every frame cannot flood the log, and the line carries the wall clock so it
+// can be placed against the Windows event log.
+inline void NoteSlowComposePhase(FILE* log, const char* phase, double milliseconds, unsigned frame,
+                                 unsigned rows) noexcept
+{
+    constexpr double Threshold = 50.0;
+    if (log == nullptr || milliseconds < Threshold)
+        return;
+    static std::atomic<unsigned> written { 0 };
+    if (written.fetch_add(1, std::memory_order_relaxed) >= 32)
+        return;
+    std::fprintf(log, "GLASS_STALL phase=%s ms=%.3f frame=%u rows=%u epoch=%.3f\n", phase, milliseconds, frame,
+                 rows, EpochSeconds());
+    std::fflush(log);
+}
+
+// Wall time of one driver call, added to the host's per-window counters. The
+// destructor runs on every return path, so a failing call is attributed too.
+class ComposePhaseScope
+{
+    HostTiming* timing = nullptr;
+    FILE* log = nullptr;
+    const char* phase = nullptr;
+    unsigned frame = 0, rows = 0;
+    std::chrono::steady_clock::time_point start {};
+
+  public:
+    ComposePhaseScope(HostTiming& value, FILE* file, const char* name, unsigned packedFrame,
+                      unsigned packedRows) noexcept
+        : timing(&value), log(file), phase(name), frame(packedFrame), rows(packedRows),
+          start(std::chrono::steady_clock::now())
+    {}
+    ~ComposePhaseScope()
+    {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count();
+        const auto microseconds = static_cast<std::uint64_t>(elapsed > 0 ? elapsed : 0);
+        timing->add(microseconds);
+        NoteSlowComposePhase(log, phase, double(microseconds) / 1000.0, frame, rows);
+    }
+    ComposePhaseScope(const ComposePhaseScope&) = delete;
+    ComposePhaseScope& operator=(const ComposePhaseScope&) = delete;
+};
+
 class PackedMotionGpu
 {
     ID3D12Device* device = nullptr;
@@ -527,11 +576,20 @@ static constexpr bool kDumpEngineInputs = true;
         const auto base = (folder / L"dump").wstring() + L"-" + suffix;
         writeMotion(base + L"-mv.ppm", static_cast<const std::byte*>(data[0]));
         writeDepth(base + L"-depth.ppm", static_cast<const std::byte*>(data[1]));
+        // Full-precision copy of the same two motion textures. The PPM above
+        // cannot separate a corrected pixel from an uncorrected one when the
+        // correction is smaller than its 1/512 quantization step.
+        const auto motionStride = readbackFootprint[0].Footprint.RowPitch;
+        WriteMotion32F((base + L"-mv.f32").c_str(), readbackRow(static_cast<const std::byte*>(data[0]), 0, 0),
+                       width, height, motionStride, dumpSerial, dumpFrame);
         if (kDumpEngineInputs)
         {
             writeMotion(base + L"-original-mv.ppm", static_cast<const std::byte*>(data[3]));
             writeDepth(base + L"-original-depth.ppm", static_cast<const std::byte*>(data[4]));
             writePacked(base + L"-packed.ppm", static_cast<const std::byte*>(data[5]));
+            WriteMotion32F((base + L"-original-mv.f32").c_str(),
+                           readbackRow(static_cast<const std::byte*>(data[3]), 0, 0), width, height, motionStride,
+                           dumpSerial, dumpFrame);
         }
         writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]),
                      static_cast<const std::byte*>(data[2]), static_cast<const std::byte*>(data[3]),
@@ -671,15 +729,19 @@ static constexpr bool kDumpEngineInputs = true;
         }
         const auto index = composeIndex(type);
         auto& context = composeContexts[index];
-        if (FAILED(context.allocator->Reset()))
         {
-            noteComposeSkip("allocator_reset");
-            return false;
-        }
-        if (FAILED(context.list->Reset(context.allocator, nullptr)))
-        {
-            noteComposeSkip("list_reset");
-            return false;
+            const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
+            ComposePhaseScope phase(ComposeResetTiming(), logFile, "reset", packed.frame, rows);
+            if (FAILED(context.allocator->Reset()))
+            {
+                noteComposeSkip("allocator_reset");
+                return false;
+            }
+            if (FAILED(context.list->Reset(context.allocator, nullptr)))
+            {
+                noteComposeSkip("list_reset");
+                return false;
+            }
         }
         // Sparse GPU timing on the host's existing timer. The compose list
         // follows the frame-generation queue type, which is direct for
@@ -688,36 +750,45 @@ static constexpr bool kDumpEngineInputs = true;
         const auto timing =
             timer && controls.measureGpuTime ? timer->begin(context.list) : GpuTimer::Ticket {};
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
-        const bool dispatched =
-            dispatch(context.list, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
-                     controls);
-        const bool recorded =
-            dispatched &&
-            (!controls.packedWriteBack ||
-             writeBack(context.list, originalMotion, originalDepth, motionState, depthState, rows));
-        if (timing)
-            timer->end(context.list, timing);
-        if (!recorded)
         {
-            if (dispatched)
-                noteComposeSkip("writeback");
-            return false;
-        }
-        if (FAILED(context.list->Close()))
-        {
-            noteComposeSkip("close");
-            return false;
+            ComposePhaseScope phase(ComposeRecordTiming(), logFile, "record", packed.frame, rows);
+            const bool dispatched =
+                dispatch(context.list, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
+                         controls);
+            const bool recorded =
+                dispatched &&
+                (!controls.packedWriteBack ||
+                 writeBack(context.list, originalMotion, originalDepth, motionState, depthState, rows));
+            if (timing)
+                timer->end(context.list, timing);
+            if (!recorded)
+            {
+                if (dispatched)
+                    noteComposeSkip("writeback");
+                return false;
+            }
+            if (FAILED(context.list->Close()))
+            {
+                noteComposeSkip("close");
+                return false;
+            }
         }
         ID3D12CommandList* lists[] { context.list };
-        queue->ExecuteCommandLists(1, lists);
+        {
+            ComposePhaseScope phase(ComposeExecuteTiming(), logFile, "execute", packed.frame, rows);
+            queue->ExecuteCommandLists(1, lists);
+        }
         context.submittedAt = std::chrono::steady_clock::now();
         const auto value = ++context.value;
         // Pending is set before the signal on purpose: a list that was already
         // submitted must never be reclaimed by a later Reset while its
         // completion is unknown.
         context.pending = true;
-        if (FAILED(queue->Signal(context.fence, value)))
-            return false;
+        {
+            ComposePhaseScope phase(ComposeSignalTiming(), logFile, "signal", packed.frame, rows);
+            if (FAILED(queue->Signal(context.fence, value)))
+                return false;
+        }
         composeActive = index;
         if (dumpPending)
         {
