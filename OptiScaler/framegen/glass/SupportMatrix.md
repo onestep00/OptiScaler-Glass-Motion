@@ -1,9 +1,21 @@
 # Support matrix and current limitations
 
 - Created: 2026-09-14
-- Status: implementation stage complete for the packed object-motion path; live FG verification pending
+- Status: correction runs live on the real DLSS-G queue (2026-09-15 21:5x); particles/cloth/destruction stay unsupported
 - Scope: every non-HUD transparent family named in the objective, the implemented evidence for each, and the items that are still unsupported
 - Note: `Compatibility.md` is the 2026-09-11 evidence record and still says the capture owner is unimplemented. Read this file for the current state.
+
+## Live verification, 2026-09-15 (build 6DBB83E5 / 912461F5 sessions)
+
+| Item | Measured value |
+| --- | --- |
+| Correction applied per FG evaluation | `substitutions=10656` of `evaluations=21488` in one session; `active=1`, `retiring=0` |
+| Compose GPU time on the real (direct) FG queue | `gpu_ms=0.172032` (design target 1 ms) |
+| Same-frame A/B of the FG motion input | `changed_pixels 42845 (1.16%)`, `changed_inside_object_coverage 42845`, `changed_outside 0` |
+| Objects visible in that frame | cups, railing, windows, sunglasses, world icon - boundary pixels carry object motion (`glass-dumps-20260915-1634-align/align-1.png`) |
+| Grouped array element order | `grouped=1,375,262`, `compared=112,279`, `permuted=0`, `changed=6`, `same_address` on every span |
+| Vertex-history arena | `arena_full` 10.5% of history hits before the reclaim pass, 0.48% after; `arena_reclaimed` counts recovered allocations |
+| Hook robustness | engine functions are resolved by audited instruction-layout signatures; a rebuilt FG queue is adopted, a changed FG input extent rebuilds the capture |
 
 ## Required behaviour and where it is implemented
 
@@ -12,23 +24,23 @@
 | Object motion per transparent pixel | `PackedMotionCapture` admits a draw, the material PS is rewritten to write an 8-byte packed record (depth key, motion, opacity, object id) into a packed target | `PackedUavPreservation` fixture, `packed_material_gpu=1` |
 | Boundary uses the object's motion | `ApplyObjectMotion`: `edge ? 1.0 : saturate(opacity * InteriorStrength)` | `PACKED_MOTION_GPU_OK exact_inner_edge=1` |
 | Interior uses material transmittance with a user strength | same shader, `InteriorStrength` from the settings | `weighted_interior=1`, UI slider |
-| Nearest surface wins on overlap | the rewrite uses `dx.op.atomicBinOp.i64` opcode 7 (unsigned max) on a depth-ordered 64-bit key, so the nearest surface keeps the record | `PackedMotionShader.h` packed store; needs a dedicated GPU fixture |
+| Nearest surface wins on overlap | the rewrite uses `dx.op.atomicBinOp.i64` opcode 7 (unsigned max) on a depth-ordered 64-bit key, so the nearest surface keeps the record | `PackedMotionShader.h` packed store; `packed_material_gpu=1 nearest_layer_exact=1` in `build_geometry_shader.ps1` |
 | Real object motion, not image estimation | keys come from engine proxy/mesh/slot/generation, view identity, array lifetime and original element index | `GlassMotionIdentity.cpp`, `PackedMotionCapture` rejection reasons |
 | Same-frame original vs final comparison | `dump` writes composed and original MV/Depth as PPM plus paired samples | `PACKED_MOTION_DUMP_OK files=5`, `dump-1.txt` samples |
 | Settings and status | the window shows edge width, interior strength, dispatch/substitute/trace/writeback/arraymap toggles, GPU ms, hook/join/capture/replacement counters, the coarse skip reasons, the N-1 history reuse counters, the identity reject split, the FG boundary misses and the array-mapping counters (published/hits/misses/out_of_range/evictions); the same values also come through the file channel `status` | `GlassSettings.cpp`, `SETTINGS_OK`, `glass-ctl.ps1 -Command status` |
-| ~1 ms budget | compose pass measured offline at 0.2473 ms per 2560x1440 frame (copies included), 0.4167 ms with dump counters | `PACKED_MOTION_SCALE` |
+| ~1 ms budget | live compose GPU time `gpu_ms=0.172032` on the real DLSS-G queue; offline 0.2473 ms per 2560x1440 frame (copies included), 0.4167 ms with dump counters | `glass-ctl.ps1 status`, `PACKED_MOTION_SCALE` |
 | MO2/version.dll/DLSS-NR/MFG compatibility | mounted as the MO2 Root `dxgi.dll`; no driver-address or version pinning; MFG unlock untouched | deployment record `glass-module-deploy-20260914*` |
 
 ## Transparency families
 
 | Family | Object motion source | Current state | Evidence / next check |
 | --- | --- | --- | --- |
-| Individual glass objects (cups, bottles, railings, windows) | proxy + mesh + slot generation + depth-target view | Implemented; live FG result unverified | `GEOMETRY_PACKED admitted>0`, `GEOMETRY_HISTORY hits` |
-| The same objects inside an array (repeated cups) | the above plus array lifetime and original element index | Implemented: the module reuses the engine's original order when it is exposed, otherwise it consumes the plugin mapping | `GEOMETRY_IDENTITY no_element_index`, `GEOMETRY_PACKED_SPLIT unknown_resolve` |
-| Grouped array updates (`ownerFlags & 0x2000`) | the render packet repacks element order, so the live plugin reads the engine's own element list (`proxy+0x70` owner scan, list at owner+0x18, count +0x3C, output start `proxy+0x114`) and publishes `GlassArrayMapping` | Implemented (plugin `31D25A0E`); live counters pending | `arraymap published/hits/misses/out_of_range`, plugin log `candidate_off=`/`entries=` |
+| Individual glass objects (cups, bottles, railings, windows) | proxy + mesh + slot generation + depth-target view | Implemented and verified live: cup/railing/window/sunglass/icon outlines carry object motion, nothing outside coverage changes | `glass-dumps-20260915-1634-align/align-1.png`, `changed_outside 0` |
+| The same objects inside an array (repeated cups) | the above plus array lifetime and original element index | Implemented: the engine's own source order is used where it is exposed; grouped packets use the packet ordinal guarded by the array's observed lifetime generation | `GEOMETRY_IDENTITY`, `GEOMETRY_PACKED_SPLIT unknown_resolve` |
+| Grouped array updates (`ownerFlags & 0x2000`) | the render packet repacks the group's selected elements in engine selection order (`0x1e8778` reads the 16-bit source list at record `+0x18` and appends `proxy+0x108[index*48]` through `0x9c19e8`) | Packet ordinal is used as the element key; a live probe compared 112,279 frame pairs with `permuted=0`. The per-element source-index list itself is not reachable at the append site (the 2026-09-14 plugin route read zeros and was removed) | `GEOMETRY_ARRAY_ORDER grouped/compared/permuted/changed`, `work/glass-native-material-v1/group-original-1e8778.txt` |
 | Liquid inside a glass | the container material's own draw | Implemented if its material produces a packed variant | `GEOMETRY_COMPILER` / `GEOMETRY_PACKED_ERROR` |
 | Sunglasses and other skinned attachments | the attachment proxy transform; previous skinning reuses the original bone input | Implemented for rigid attachments; skinned detail unverified | packed variant presence per chunk |
-| Particles, smoke, ribbons | particle element state | Not implemented | open task `particle-original-history` |
+| Particles, smoke, ribbons | particle element state | Not implemented. Their transparent techniques are in the rewrite set (`particle` 4162, `hologram` 1488, `distortion` 1366, `trail` 678 entries in `all-transparent-material-techniques.json`), but their instanced draws have no engine-exposed element order, so they are rejected at the element-index gate. The current bar scene has `no_element_index=0`; the accumulated log shows up to 2,650,452, so the rejection is real in particle scenes | open task `particle-original-history` |
 | Holograms, world icons, decals | their own material draws | Implemented if the material produces a packed variant | `GEOMETRY_CHUNKS missing=` |
 | Vehicle glass | vehicle proxy and destruction state | Not verified | chunk histogram after driving |
 | Garments, cloth deformation | original garment deformation input | Not implemented | `custom-deformation-input-review.json` |

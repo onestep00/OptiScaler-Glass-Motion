@@ -541,12 +541,12 @@ static constexpr bool kDumpEngineInputs = true;
             noteComposeSkip("list_reset");
             return false;
         }
-        // Sparse GPU timing on the host's existing timer. This is a compute list
-        // on the FG queue, the same shape the timer already accepts; a full
+        // Sparse GPU timing on the host's existing timer. The compose list
+        // follows the frame-generation queue type, which is direct for
+        // Streamline's DLSS-G evaluation; the timer accepts both. A full
         // eight-slot window skips the sample instead of waiting.
-        const auto timing = timer && controls.measureGpuTime && type == D3D12_COMMAND_LIST_TYPE_COMPUTE
-                                ? timer->begin(composeList)
-                                : GpuTimer::Ticket {};
+        const auto timing =
+            timer && controls.measureGpuTime ? timer->begin(composeList) : GpuTimer::Ticket {};
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
         const bool dispatched =
             dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
