@@ -98,6 +98,13 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                                       (commands ? GeometryCommandHooks : 0u);
                 health.sampledMs = GetTickCount64();
                 PublishGeometryHealth(health);
+                // The packed object-motion HLSL compile (measured 160.85ms inside
+                // the first frame generation evaluation on 2026-09-16 05:17:34)
+                // is the moment the engine rebuilds its frame generation lists,
+                // which is when the game gets focus back. Compiling it from the
+                // device-creation path leaves only the per-session pipeline for
+                // the render thread.
+                WarmPackedShaderOnce();
                 GeometryTelemetry::refresh.store(refreshHealth, std::memory_order_release);
                 // The live channel and the periodic log must not depend on the
                 // game reaching the FG path: menus and loading screens never

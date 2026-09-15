@@ -309,15 +309,29 @@ static constexpr bool kDumpEngineInputs = true;
         std::vector<char> source;
         if (!readShaderSource(shader, source))
             return false;
+        const auto codeStart = std::chrono::steady_clock::now();
         ID3DBlob* code = sharedShaderCode(source, log);
+        const auto codeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - codeStart).count();
         if (code == nullptr)
             return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineDescription {};
         pipelineDescription.pRootSignature = root;
         pipelineDescription.CS = { code->GetBufferPointer(), code->GetBufferSize() };
         ID3D12PipelineState* created = nullptr;
+        const auto pipelineStart = std::chrono::steady_clock::now();
         const auto result = device->CreateComputePipelineState(&pipelineDescription, IID_PPV_ARGS(&created));
+        const auto pipelineMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pipelineStart).count();
         code->Release();
+        if (log != nullptr)
+        {
+            // A session starts on the engine's render thread when it rebuilds its
+            // frame generation lists (focus regain, frame generation restart), so
+            // the two halves are reported apart: the code half must be a process
+            // cache hit by then and the pipeline half is what remains.
+            std::fprintf(log, "OBJECT_SHADER code_ms=%.2f pso_ms=%.2f\n", codeMs, pipelineMs);
+            std::fflush(log);
+        }
         if (FAILED(result))
             return false;
         if (pipeline)
@@ -368,6 +382,7 @@ static constexpr bool kDumpEngineInputs = true;
             return false;
         device = value;
         this->logFile = log;
+        const auto createStart = std::chrono::steady_clock::now();
         dumpFolder = std::filesystem::path(shader).parent_path();
         width = static_cast<unsigned>(motionDescription.Width);
         height = motionDescription.Height;
@@ -500,7 +515,10 @@ static constexpr bool kDumpEngineInputs = true;
 
         if (!compilePipeline(shader, log))
             return false;
-        std::fprintf(log, "OBJECT_MOTION_GPU_READY %ux%u passes=1 edge_samples_max=32\n", width, height);
+        const auto createMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - createStart).count();
+        std::fprintf(log, "OBJECT_MOTION_GPU_READY %ux%u passes=1 edge_samples_max=32 create_ms=%.1f\n", width, height,
+                     createMs);
         std::fflush(log);
         return true;
     }
