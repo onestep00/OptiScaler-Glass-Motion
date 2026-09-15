@@ -140,6 +140,13 @@ class StreamlineHooks
 
     static void updateForceReflex();
     static void updateDlssgOptions();
+    // Latest engine motion-vector scale, shared with the DLSS-G provider path so
+    // the glass correction can convert packed pixels to motion-vector units.
+    static sl::float2& GlassMvecScale()
+    {
+        static sl::float2 value { 1.f, 1.f };
+        return value;
+    }
 
     // MenuOverlayVk submits on a queue it picks itself, into the present path DLSS-G's pacer owns;
     // the two cannot run together. Forces options.mode to eOff while the menu is up. Applies to every

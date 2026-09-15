@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "GeometryDrawCapture.h"
 #include "GeometryCreation.h"
 #include "GeometryHealth.h"
@@ -9,6 +9,10 @@
 #include "PackedMotionCapture.h"
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
+#include "NvngxDlssgBridge.h"
+#include "GeometryHealth.h"
+#include "GeometryCommands.h"
+#include <hooks/Streamline_Hooks.h>
 #include <Util.h>
 #include <algorithm>
 #include <atomic>
@@ -21,19 +25,27 @@ namespace GlassFg
 {
 namespace
 {
+// Rotation limit for the module log. Enforced at open and again during the
+// session, because the step trace keeps writing while the game runs.
+constexpr std::uintmax_t kLogLimit = 32ull * 1024 * 1024;
+
 struct Entry
 {
     NativeSession session;
     const NVSDK_NGX_Handle* handle = nullptr;
     ID3D12GraphicsCommandList* command = nullptr;
     D3D12_RESOURCE_DESC descriptions[3] {};
+    // Frame generation input identities of the run this session was created
+    // for. The session does not own them; they only make "the same frame
+    // generation inputs" decidable when the feature instance changes.
+    ID3D12Resource* motionInput = nullptr;
+    ID3D12Resource* depthInput = nullptr;
     unsigned evaluations = 0;
     bool releaseLogged = false;
 
     bool matches(ID3D12GraphicsCommandList* candidate, const Inputs& inputs) const
     {
-        if (candidate != command)
-            return false;
+        (void) candidate; // Command identity is owned by the session (one per back buffer).
         ID3D12Resource* resources[] = { inputs.motion, inputs.color, inputs.depth };
         for (unsigned i = 0; i < 3; ++i)
         {
@@ -166,11 +178,15 @@ Runtime& runtime()
 // recordings may be retired while the game keeps running.
 std::atomic<bool> softReloadRequested = false;
 std::atomic<bool> dumpRequested = false;
+// Bounded retry counter for a dump that arrived while no session was active.
+std::atomic<unsigned> dumpRetries { 0 };
+// Set from the loader lock by NoteProcessAttach, written into the session log
+// by the first health-service tick.
+std::atomic<bool> attachPending = false;
+// The driver-level frame generation block carries no Streamline frame token, so
+// the packed capture is keyed by this counter instead.
+std::atomic<std::uint64_t> driverFrameCounter { 0 };
 
-// Frame already delivered by the Streamline tag path. The NGX path must not
-// correct the same rendered frame a second time: the engine texture it would
-// read already holds the corrected motion.
-std::atomic<std::uint64_t> streamCorrectedFrame { UINT64_MAX };
 
 std::filesystem::path packedShaderPath()
 {
@@ -260,42 +276,104 @@ D3D12Callbacks makeCallbacks()
             if (!q || !e.command)
                 return;
             for (UINT i = 0; i < count; ++i)
-                if (lists[i] == e.command)
+            {
+                auto* candidate = static_cast<ID3D12GraphicsCommandList*>(lists[i]);
+                const bool known = e.session.handlesFgCommand(candidate);
+                // The batch that carries the frame generation list is matched by
+                // the session identity set. The most recent evaluation identity
+                // is accepted as well, because the engine can submit a list
+                // recorded in an earlier evaluation of the same frame.
+                const bool current = candidate == r.activeCommand.load(std::memory_order_acquire);
+                if (!known && !current)
+                    continue;
+                {
+                    static std::atomic<unsigned> unmatched { 0 };
+                    if (r.log != nullptr && !known && current && unmatched.fetch_add(1, std::memory_order_relaxed) < 4)
+                    {
+                        std::fprintf(r.log, "TRACE_PRERACE known=0 current=1 command=%p\n",
+                                     static_cast<void*>(candidate));
+                        std::fflush(r.log);
+                    }
+                }
                 {
                     ID3D12Fence* fence = nullptr;
                     std::uint64_t value = 0;
                     void* producerQueue = nullptr;
                     const bool waited = e.session.takeProducerWait(fence, value, producerQueue);
-                    // A wait for a value this same queue will signal later never
-                    // completes: the GPU stops there and the driver resets it.
-                    const bool selfWait = waited && producerQueue != nullptr && producerQueue == q;
-                    if (waited && !selfWait)
+                    if (!waited)
                     {
-                        q->Wait(fence, value);
-                        if (r.log && ReadControls().trace)
+                        // Matched the frame generation batch but the session had
+                        // no producer dependency to hand over, which leaves the
+                        // compose unqueued without any other trace.
+                        static std::atomic<unsigned> noWait { 0 };
+                        if (r.log != nullptr && noWait.fetch_add(1, std::memory_order_relaxed) < 4)
                         {
-                            // The fence value at the moment of the wait separates
-                            // "work still running" from "waiting for a value that
-                            // was never signaled".
-                            std::fprintf(r.log, "TRACE_WAIT producer=%llu completed=%llu queue=%p\n",
-                                         static_cast<unsigned long long>(value),
-                                         static_cast<unsigned long long>(fence->GetCompletedValue()), q);
+                            std::fprintf(r.log, "TRACE_PRENOWAIT command=%p queue=%p\n",
+                                         static_cast<void*>(candidate), static_cast<void*>(q));
                             std::fflush(r.log);
                         }
                     }
-                    else if (selfWait && r.log && ReadControls().trace)
+                    auto* objectQueue = static_cast<ID3D12CommandQueue*>(producerQueue);
+                    // A wait for a value this same queue will signal later never
+                    // completes: the GPU stops there and the driver resets it.
+                    const bool selfWait = waited && producerQueue != nullptr && producerQueue == q;
+                    // The compose reads the packed records and the engine's own
+                    // motion/depth textures. Reading them from the frame
+                    // generation queue is what reset the device in every session
+                    // that ran the dispatch (nvlddmkm 153 a few seconds later,
+                    // even at a single composed row), so it is submitted on the
+                    // producer queue that owns those resources instead. This
+                    // queue only waits on the compose fence.
+                    bool queued = false;
+                    if (waited && !selfWait && objectQueue != nullptr)
                     {
-                        std::fprintf(r.log, "TRACE_WAIT_SKIP producer=%llu completed=%llu queue=%p\n",
-                                     static_cast<unsigned long long>(value),
-                                     static_cast<unsigned long long>(fence->GetCompletedValue()), q);
-                        std::fflush(r.log);
+                        queued = e.session.executePending(objectQueue);
+                        if (queued)
+                        {
+                            if (auto* composeFence = e.session.composeFence())
+                                q->Wait(composeFence, e.session.packedComposeSubmitted());
+                            if (r.log && ReadControls().trace && TraceWanted())
+                            {
+                                std::fprintf(r.log, "TRACE_WAIT_FENCE producer=%llu completed=%llu objectQueue=%p queue=%p\n",
+                                             static_cast<unsigned long long>(value),
+                                             static_cast<unsigned long long>(fence->GetCompletedValue()), objectQueue, q);
+                                std::fflush(r.log);
+                            }
+                        }
+                    }
+                    else if (selfWait)
+                    {
+                        // The packed raster was produced by an earlier submission
+                        // on this same queue, so a compose queued here is already
+                        // ordered after it. Waiting on that fence would deadlock
+                        // (this queue signals it later), and skipping the compose
+                        // left the FG evaluating an input that was never written.
+                        // Queue the compose in order instead.
+                        queued = e.session.executePending(q);
+                        if (r.log && ReadControls().trace && TraceWanted())
+                        {
+                            std::fprintf(r.log,
+                                         "TRACE_WAIT_SKIP producer=%llu completed=%llu queue=%p submitted=%u\n",
+                                         static_cast<unsigned long long>(value),
+                                         static_cast<unsigned long long>(fence->GetCompletedValue()), q,
+                                         queued ? 1u : 0u);
+                            std::fflush(r.log);
+                        }
+                    }
+                    // Fallback: without a known producer queue the compose has to
+                    // run here, with the cross-queue wait that implies.
+                    if (!queued && waited && !selfWait)
+                    {
+                        q->Wait(fence, value);
+                        queued = e.session.executePending(q);
                     }
                     // The marker now describes the queued compose on the GPU, not
                     // the CPU window, so it is written only when one was queued.
-                    if (e.session.executePending(q))
+                    if (queued)
                         writeComposeMarker(waited ? value : 0, true);
                     break;
                 }
+            }
         });
     };
     value.submit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
@@ -308,31 +386,45 @@ D3D12Callbacks makeCallbacks()
         // submission window, so it is cleared only once the deferred compose of
         // every live entry has actually completed. A reset that frees the packed
         // outputs while the compose is still executing therefore leaves it.
-        if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
-            for (UINT i = 0; i < count; ++i)
-                if (lists[i] == fg)
+        // The frame generation batch can carry any of the lists the session
+        // knows (one per back buffer), so the match is by membership.
+        {
+            bool matched = false;
+            if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
+                for (UINT i = 0; i < count && !matched; ++i)
+                    matched = lists[i] == fg;
+            if (!matched && r.active)
+                for (UINT i = 0; i < count && !matched; ++i)
+                    matched = r.active->session.handlesFgCommand(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+            if (matched)
                 {
                     bool inFlight = false;
                     r.each([&](Entry& e) { inFlight |= e.session.packedComposeInFlight(); });
                     if (!inFlight)
                         writeComposeMarker(0, false);
-                    break;
                 }
+        }
         // Attribute a driver reset to the exact submitted batch that carried
         // our substituted inputs.
-        if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
-            for (UINT i = 0; i < count; ++i)
-                if (lists[i] == fg)
+        {
+            bool matched = false;
+            if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
+                for (UINT i = 0; i < count && !matched; ++i)
+                    matched = lists[i] == fg;
+            if (!matched && r.active)
+                for (UINT i = 0; i < count && !matched; ++i)
+                    matched = r.active->session.handlesFgCommand(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+            if (matched)
                 {
                     if (r.active)
                         r.active->session.dumpSubmitted(q);
-                    if (r.log && ReadControls().trace)
+                    if (r.log && ReadControls().trace && TraceWanted())
                     {
                         std::fprintf(r.log, "TRACE_SUBMIT fg=1 lists=%u queue=%p\n", count, q);
                         std::fflush(r.log);
                     }
-                    break;
                 }
+        }
         r.reap();
         // The live channel and the periodic log must not depend on the
         // OptiScaler overlay being rendered: this hook runs every frame.
@@ -357,10 +449,77 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     r.reap();
     if (r.stopped || r.unavailable || !command || !handle || !inputs.valid())
         return {};
-    if (r.active &&
-        (!r.active->session.accepting() || r.active->handle != handle || !r.active->matches(command, inputs)))
-        if (!r.retire())
-            return {};
+    if (r.active)
+    {
+        const bool accepting = r.active->session.accepting();
+        const auto observedMask = ObservedComputeMethods();
+        // The engine alternates between frame generation command lists (one per
+        // back buffer) for the same inputs, so a list the session does not know
+        // is added instead of retiring the session. The replacement list can
+        // land on the same address as a destroyed one, so the missing identity
+        // is checked as well as a changed pointer.
+        if (accepting && !r.active->session.handlesFgCommand(command) &&
+            r.active->session.adoptFgCommand(command, observedMask, observedMask))
+        {
+            r.active->command = command;
+            r.activeCommand.store(command, std::memory_order_release);
+        }
+        const bool sameInputs =
+            r.active->session.handlesFgCommand(command) && r.active->matches(command, inputs);
+        if (accepting && sameInputs && r.active->handle != handle)
+        {
+            // The feature instance pointer is not part of the correction state:
+            // the packed outputs are keyed by extent and format, and every frame
+            // reads its own inputs. Streamline was observed alternating between
+            // two instances for the same frame generation inputs on the same
+            // command list, and treating that as a different session rebuilt the
+            // packed outputs and cancelled the compose on every frame.
+            static std::atomic<unsigned> adopted { 0 };
+            if (r.log != nullptr && adopted.fetch_add(1, std::memory_order_relaxed) < 8)
+            {
+                std::fprintf(r.log, "NATIVE_HANDLE adopt=1 old=%p new=%p sameMotion=%u sameDepth=%u\n",
+                             static_cast<const void*>(r.active->handle), static_cast<const void*>(handle),
+                             inputs.motion == r.active->motionInput ? 1u : 0u,
+                             inputs.depth == r.active->depthInput ? 1u : 0u);
+                std::fflush(r.log);
+            }
+            r.active->handle = handle;
+        }
+        if (!accepting || !sameInputs || r.active->handle != handle)
+        {
+            // Bounded attribution for the per-frame session churn: the four
+            // conditions were indistinguishable in the log, so a recreated
+            // session could not be traced to its cause.
+            static std::atomic<unsigned> churn { 0 };
+            if (r.log != nullptr && churn.fetch_add(1, std::memory_order_relaxed) < 8)
+            {
+                std::fprintf(r.log, "NATIVE_CHURN accepting=%u inputs=%u handle=%u active=%p incoming=%p\n",
+                             accepting ? 1u : 0u, sameInputs ? 1u : 0u,
+                             r.active->handle == handle ? 1u : 0u, static_cast<const void*>(r.active->handle),
+                             static_cast<const void*>(handle));
+                // Which field of the incoming run differs: without it the second
+                // evaluation per frame cannot be identified at all.
+                const auto live = [](ID3D12Resource* value) { return value ? value->GetDesc() : D3D12_RESOURCE_DESC {}; };
+                const auto motion = live(inputs.motion), depth = live(inputs.depth);
+                std::fprintf(r.log,
+                             "NATIVE_CHURN_IN incoming motion=%llux%u f=%u depth=%llux%u f=%u "
+                             "active motion=%llux%u f=%u depth=%llux%u f=%u command=%u sameMotion=%u sameDepth=%u\n",
+                             static_cast<unsigned long long>(motion.Width), motion.Height,
+                             static_cast<unsigned>(motion.Format), static_cast<unsigned long long>(depth.Width),
+                             depth.Height, static_cast<unsigned>(depth.Format),
+                             static_cast<unsigned long long>(r.active->descriptions[0].Width),
+                             r.active->descriptions[0].Height, static_cast<unsigned>(r.active->descriptions[0].Format),
+                             static_cast<unsigned long long>(r.active->descriptions[2].Width),
+                             r.active->descriptions[2].Height, static_cast<unsigned>(r.active->descriptions[2].Format),
+                             r.active->command == command ? 1u : 0u,
+                             inputs.motion == r.active->motionInput ? 1u : 0u,
+                             inputs.depth == r.active->depthInput ? 1u : 0u);
+                std::fflush(r.log);
+            }
+            if (!r.retire())
+                return {};
+        }
+    }
     if (r.active)
         return r.active;
     if (!controls.active() || inputs.index != 1)
@@ -375,7 +534,6 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         const auto path = Util::DllPath().parent_path() / L"OptiScaler.Glass.log";
         // The step trace is per frame, so the file grows without bound if it is
         // only ever appended to. Rotate a bounded file once and start fresh.
-        constexpr std::uintmax_t kLogLimit = 32ull * 1024 * 1024;
         std::error_code sizeError;
         if (std::filesystem::exists(path, sizeError) && !sizeError &&
             std::filesystem::file_size(path, sizeError) > kLogLimit && !sizeError)
@@ -402,6 +560,8 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     auto entry = std::make_shared<Entry>();
     entry->handle = handle;
     entry->command = command;
+    entry->motionInput = inputs.motion;
+    entry->depthInput = inputs.depth;
     entry->descriptions[0] = inputs.motion->GetDesc();
     entry->descriptions[1] = inputs.color->GetDesc();
     entry->descriptions[2] = inputs.depth->GetDesc();
@@ -513,11 +673,8 @@ bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* feat
         if (!entry)
             return false;
         const D3D12_RESOURCE_STATES states[3] { frame.motionState, D3D12_RESOURCE_STATE_COMMON, frame.depthState };
-        const auto prepared = entry->session.prepare(command, inputs, states, controls, true);
-        // Record the frame so the NGX path does not correct the same rendered
-        // frame a second time.
-        streamCorrectedFrame.store(frame.frame, std::memory_order_release);
-        (void) prepared;
+        entry->session.prepare(command, inputs, states, controls, true);
+        StreamlineFrameCounter().fetch_add(1, std::memory_order_relaxed);
         return true;
     }
     catch (...)
@@ -526,11 +683,306 @@ bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* feat
     }
 }
 
+void NoteStreamlineFeature(unsigned id) noexcept
+{
+    try
+    {
+        static std::atomic<unsigned> seen[32] {};
+        static std::atomic<unsigned> logged { 0 };
+        const auto slot = id % 32u;
+        const auto bit = 1u << (id % 31u);
+        if ((seen[slot].fetch_or(bit, std::memory_order_relaxed) & bit) != 0)
+            return;
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 8)
+            return;
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            // Only a successful open may close the door: a failed one has to
+            // stay retryable, otherwise the whole session stops logging.
+            r.logAttempted = r.log != nullptr;
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "SL_FEATURE id=%u\n", id);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void NoteNgxFeature(unsigned feature, unsigned handleId, const char* provider) noexcept
+{
+    try
+    {
+        struct Pair
+        {
+            unsigned feature = 0;
+            unsigned handle = 0;
+        };
+        static Pair seen[16] {};
+        static std::atomic<unsigned> seenCount { 0 };
+        static std::atomic<unsigned> logged { 0 };
+        const auto count = (std::min)(seenCount.load(std::memory_order_relaxed), 16u);
+        for (unsigned i = 0; i < count; ++i)
+            if (seen[i].feature == feature && seen[i].handle == handleId)
+                return;
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 12)
+            return;
+        if (count < 16)
+        {
+            seen[count] = { feature, handleId };
+            seenCount.store(count + 1, std::memory_order_relaxed);
+        }
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "NGX_FEATURE feature=%u handleId=%u fgConstant=%u provider=%s\n", feature, handleId,
+                         static_cast<unsigned>(NVSDK_NGX_Feature_FrameGeneration), provider ? provider : "-");
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void NoteNgxCreate(unsigned feature, unsigned handleId, const char* route) noexcept
+{
+    try
+    {
+        struct Pair
+        {
+            unsigned feature = 0;
+            unsigned handle = 0;
+        };
+        static Pair seen[16] {};
+        static std::atomic<unsigned> seenCount { 0 };
+        static std::atomic<unsigned> logged { 0 };
+        const auto count = (std::min)(seenCount.load(std::memory_order_relaxed), 16u);
+        for (unsigned i = 0; i < count; ++i)
+            if (seen[i].feature == feature && seen[i].handle == handleId)
+                return;
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 16)
+            return;
+        if (count < 16)
+        {
+            seen[count] = { feature, handleId };
+            seenCount.store(count + 1, std::memory_order_relaxed);
+        }
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "NGX_CREATE feature=%u handleId=%u route=%s\n", feature, handleId, route ? route : "-");
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void NoteNvngxLoad(const wchar_t* name, bool redirect) noexcept
+{
+    try
+    {
+        static std::atomic<unsigned> logged { 0 };
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 16)
+            return;
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_NVNGX_LOAD name=%ls redirect=%u\n", name ? name : L"-", redirect ? 1u : 0u);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void NoteHookStage(const wchar_t* name, unsigned stage) noexcept
+{
+    try
+    {
+        static std::atomic<unsigned> logged { 0 };
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 8)
+            return;
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            r.logAttempted = r.log != nullptr;
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_NGX_HOOK module=%ls stage=%u\n", name ? name : L"-", stage);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+LONG WINAPI glassUnhandledFilter(EXCEPTION_POINTERS* info) noexcept
+{
+    try
+    {
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            const auto* record = info != nullptr ? info->ExceptionRecord : nullptr;
+            std::fprintf(r.log, "GLASS_EXCEPTION code=0x%08lX address=%p\n",
+                         record != nullptr ? static_cast<unsigned long>(record->ExceptionCode) : 0ul,
+                         record != nullptr ? static_cast<void*>(record->ExceptionAddress) : nullptr);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG CALLBACK glassVectoredHandler(EXCEPTION_POINTERS* info) noexcept
+{
+    try
+    {
+        const auto* record = info != nullptr ? info->ExceptionRecord : nullptr;
+        if (record == nullptr)
+            return EXCEPTION_CONTINUE_SEARCH;
+        const auto code = static_cast<unsigned long>(record->ExceptionCode);
+        // Only fault-class exceptions: first-chance C++/DRM noise is not useful
+        // and must not fill the log.
+        if (code != 0xC0000005ul && code != 0xC000001Dul && code != 0xC0000094ul && code != 0xC0000096ul &&
+            code != 0xC00000FDul && code != 0xC0000409ul && code != 0x80000003ul)
+            return EXCEPTION_CONTINUE_SEARCH;
+        static std::atomic<unsigned> faults { 0 };
+        if (faults.fetch_add(1, std::memory_order_relaxed) >= 8)
+            return EXCEPTION_CONTINUE_SEARCH;
+        wchar_t moduleName[MAX_PATH] {};
+        MEMORY_BASIC_INFORMATION memory {};
+        const auto* address = static_cast<const unsigned char*>(record->ExceptionAddress);
+        const auto* base = static_cast<const unsigned char*>(nullptr);
+        if (record->ExceptionAddress != nullptr &&
+            VirtualQuery(record->ExceptionAddress, &memory, sizeof(memory)) == sizeof(memory) &&
+            memory.AllocationBase != nullptr)
+        {
+            GetModuleFileNameW(static_cast<HMODULE>(memory.AllocationBase), moduleName, MAX_PATH);
+            base = static_cast<const unsigned char*>(memory.AllocationBase);
+        }
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            r.logAttempted = r.log != nullptr;
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_FAULT code=0x%08lX address=%p base=%p offset=0x%llX module=%ls\n", code,
+                         static_cast<const void*>(address), static_cast<const void*>(base),
+                         static_cast<unsigned long long>(address != nullptr && base != nullptr ? address - base : 0),
+                         moduleName[0] != 0 ? moduleName : L"-");
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void InstallProcessDiagnostics() noexcept
+{
+    // The engine installs its own unhandled filter later, which replaced this
+    // one; a vectored handler is not replaced and still sees the fatal fault.
+    AddVectoredExceptionHandler(1, &glassVectoredHandler);
+    SetUnhandledExceptionFilter(&glassUnhandledFilter);
+}
+
+void NoteProcessAttach() noexcept
+{
+    // No file work from the loader lock: the module path resolved there lands
+    // outside the overlay the rest of the session logs into, and RootBuilder
+    // deletes that copy when the game exits. The marker is written by the first
+    // health-service tick instead, into the same log as every other line.
+    attachPending.store(true, std::memory_order_release);
+}
+
+void NoteProcessDetach() noexcept
+{
+    try
+    {
+        auto& r = runtime();
+        // Never open a handle from the loader lock: only report through a log
+        // that a running session already opened.
+        if (!r.log)
+            return;
+        std::lock_guard lock(r.mutex);
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_PROCESS detach=1\n");
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
 
 void ServiceNativeDiagnostics() noexcept
 {
+    // Outside the runtime lock on purpose: installing a detour suspends the
+    // process briefly, and a suspended thread must not be holding a lock this
+    // call would need.
+    InstallLoadedNgxHooks();
     auto& r = runtime();
     std::lock_guard lock(r.mutex);
+    if (attachPending.exchange(false, std::memory_order_acq_rel))
+    {
+        if (!r.logAttempted)
+        {
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            r.logAttempted = r.log != nullptr;
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_PROCESS attach=1 pid=%lu\n", GetCurrentProcessId());
+            std::fflush(r.log);
+        }
+    }
     r.each([&](Entry& e) { e.session.serviceDump(); });
 }
 
@@ -556,6 +1008,30 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     if (!original)
         return NVSDK_NGX_Result_FAIL_FeatureNotFound;
     auto& r = runtime();
+    // Hard log cap, applied from this thread so the handle is never closed while
+    // a hook on another thread writes to it.
+    if (r.log != nullptr && r.evaluations != 0 && (r.evaluations % 900) == 0)
+    {
+        const auto path = Util::DllPath().parent_path() / L"OptiScaler.Glass.log";
+        std::error_code sizeError;
+        const auto size = std::filesystem::file_size(path, sizeError);
+        if (!sizeError && size > kLogLimit)
+        {
+            std::fflush(r.log);
+            std::fclose(r.log);
+            const auto previous = Util::DllPath().parent_path() / L"OptiScaler.Glass.previous.log";
+            std::error_code rotateError;
+            std::filesystem::remove(previous, rotateError);
+            std::filesystem::rename(path, previous, rotateError);
+            r.log = _wfopen(path.c_str(), L"a");
+            if (r.log != nullptr)
+            {
+                std::fprintf(r.log, "GLASS_LOG rotated=1 size_bytes=%llu\n",
+                             static_cast<unsigned long long>(size));
+                std::fflush(r.log);
+            }
+        }
+    }
     // File-driven live controls. Both run on this thread because it owns the
     // native recordings; the request file itself is polled elsewhere.
     if (softReloadRequested.exchange(false, std::memory_order_acq_rel))
@@ -577,12 +1053,33 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     if (dumpRequested.exchange(false, std::memory_order_acq_rel))
     {
         std::lock_guard lock(r.mutex);
-        if (r.active)
-            r.active->session.requestDump();
-        else if (r.log)
+        // The session is created and retired inside each evaluation, so the
+        // health thread rarely sees an active entry. A retiring entry still owns
+        // its packed outputs until the compose fence completes, and the dump
+        // service below runs for every entry, so target either.
+        Entry* target = r.active.get();
+        if (!target)
+            for (auto& entry : r.retiring)
+                if (entry)
+                    target = entry.get();
+        if (target)
         {
-            std::fprintf(r.log, "PACKED_DUMP skipped reason=no_active_entry\n");
-            std::fflush(r.log);
+            dumpRetries.store(0, std::memory_order_relaxed);
+            target->session.requestDump();
+        }
+        else
+        {
+            // The session is created later in this same evaluation call, so a
+            // request that lands between frames has to survive until one is
+            // active instead of being dropped.
+            const auto attempt = dumpRetries.fetch_add(1, std::memory_order_relaxed);
+            if (attempt < 240)
+                dumpRequested.store(true, std::memory_order_release);
+            if (r.log && (attempt < 3 || attempt == 240u))
+            {
+                std::fprintf(r.log, "PACKED_DUMP %s\n", attempt < 240 ? "requeued" : "skipped reason=no_active_entry");
+                std::fflush(r.log);
+            }
         }
     }
     if (TakeShaderReloadRequest())
@@ -610,6 +1107,19 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     }
     if (Inputs::read(parameters, inputs))
     {
+        if (inputs.motionKey != nullptr && std::strcmp(inputs.motionKey, "DLSSG.MVecs") != 0)
+        {
+            // The driver-level block (Streamline's frame generation plugin
+            // through _nvngx.dll) names only the two textures. The motion-vector
+            // scale lives in the Streamline constants this module already
+            // tracks, so take it from there instead of assuming 1.
+            const auto scale = StreamlineHooks::GlassMvecScale();
+            if (std::isfinite(scale.x) && std::isfinite(scale.y) && scale.x > 0.f && scale.y > 0.f)
+            {
+                inputs.scaleX = scale.x;
+                inputs.scaleY = scale.y;
+            }
+        }
         std::lock_guard lock(r.mutex);
         entry = acquire(r, command, handle, inputs, controls);
         if (!entry)
@@ -619,6 +1129,14 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                                                                               : RuntimeStatus::Waiting);
         if (entry)
         {
+            static std::atomic<unsigned> flowLogged { 0 };
+            if (r.log && flowLogged.fetch_add(1, std::memory_order_relaxed) < 4)
+            {
+                std::fprintf(r.log, "GLASS_FLOW host_evaluate index=%u driverKeys=%u\n", inputs.index,
+                             inputs.motionKey != nullptr && std::strcmp(inputs.motionKey, "DLSSG.MVecs") != 0 ? 1u
+                                                                                                             : 0u);
+                std::fflush(r.log);
+            }
             ++entry->evaluations;
             D3D12_RESOURCE_STATES states[3] {};
             ID3D12Resource* resources[] = { inputs.motion, inputs.color, inputs.depth };
@@ -631,35 +1149,89 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                     std::fprintf(r.log, "NATIVE_TAG ok hits=%llu frame=%llu\n",
                                  static_cast<unsigned long long>(tagHits.load()),
                                  static_cast<unsigned long long>(frame.frame));
-                // The Streamline tag path already wrote the corrected motion into
-                // the engine texture for this frame; substituting again would
-                // blend the object motion over its own result.
-                if (inputs.index == 1 && inputs.frame != UINT64_MAX &&
-                    streamCorrectedFrame.load(std::memory_order_acquire) == inputs.frame)
-                {
-                    if (r.log && controls.trace)
-                    {
-                        std::fprintf(r.log, "NATIVE_HOST skip_duplicate_frame frame=%llu\n",
-                                     static_cast<unsigned long long>(inputs.frame));
-                        std::fflush(r.log);
-                    }
-                    entry->session.bypass(inputs.index);
-                }
-                else
-                    prepared = entry->session.prepare(command, inputs, states, controls);
+                prepared = entry->session.prepare(command, inputs, states, controls);
             }
             else
             {
                 if (r.log && inputs.index == 1 && !(++tagMisses % 300))
                     std::fprintf(r.log, "NATIVE_TAG miss count=%llu\n",
                                  static_cast<unsigned long long>(tagMisses.load()));
-                entry->session.bypass(inputs.index);
+                // Driver-level block: Streamline's frame generation plugin hands
+                // the two textures straight to the NGX core, so no tag state and
+                // no Streamline frame token exist. The DLSS-G input convention
+                // delivers both in COPY_DEST, and the module's own frame counter
+                // keys the packed capture for this frame.
+                if (inputs.motionKey != nullptr && std::strcmp(inputs.motionKey, "DLSSG.MVecs") != 0)
+                {
+                    states[0] = D3D12_RESOURCE_STATE_COPY_DEST;
+                    states[2] = D3D12_RESOURCE_STATE_COPY_DEST;
+                    // The packed capture numbers its frames with the engine's
+                    // render frame (the draw packets), so the driver path has to
+                    // use that same counter. A private sequence would never match
+                    // and the capture would report acquire_no_candidate.
+                    const auto commandsFrame = GetGeometryCommandStats().lastFrame;
+                    const auto healthFrame = ReadGeometryHealth().frame;
+                    const auto engineFrame = commandsFrame != 0 ? commandsFrame : healthFrame;
+                    inputs.frame = engineFrame != 0 ? engineFrame : ++driverFrameCounter;
+                    static std::atomic<unsigned> driverPrepared { 0 };
+                    if (r.log && driverPrepared.fetch_add(1, std::memory_order_relaxed) < 4)
+                    {
+                        std::fprintf(r.log, "GLASS_FLOW driver_prepare frame=%llu\n",
+                                     static_cast<unsigned long long>(inputs.frame));
+                        std::fprintf(r.log, "GLASS_FLOW session_log=%p host_log=%p initialized=%u\n",
+                                     static_cast<void*>(entry->session.logFileHandle()), static_cast<void*>(r.log),
+                                     entry->session.initializedForDiagnostics() ? 1u : 0u);
+                        std::fflush(r.log);
+                    }
+                    prepared = entry->session.prepare(command, inputs, states, controls, true);
+                }
+                else
+                    entry->session.bypass(inputs.index);
             }
         }
     }
     else
     {
         std::lock_guard lock(r.mutex);
+        // Bounded diagnostic: which keys the provider did not supply. Without it
+        // a rejected frame leaves no trace at all.
+        static std::atomic<unsigned> readMisses { 0 };
+        if (readMisses.fetch_add(1, std::memory_order_relaxed) < 3)
+        {
+            if (!r.logAttempted)
+            {
+                r.logAttempted = true;
+                r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            }
+            // The driver-level evaluate does not use the game's parameter names,
+            // so the probe also reports which candidate keys are present at all.
+            const char* keys[] { "DLSSG.MVecs", "DLSSG.HUDLess", "DLSSG.Depth", "DLSSG.MultiFrameIndex",
+                                 "DLSSG.MultiFrameCount", "DLSSG.Reset", "DLSSG.ClipToPrevClip" };
+            const char* probes[] { "MVecs", "MotionVectors", "DLSSG.MotionVectors", "Depth", "DLSSG.DepthInverted",
+                                   "HudlessColor", "DLSSG.Color", "DLSSG.HudlessColor", "Width", "Height",
+                                   "DLSS.Feature.Create.Flags", "DLSSG.OpticalFlowEnabled", "DLSSG.CameraNear",
+                                   "DLSSG.CameraFar", "DLSSG.JitterOffset", "DLSSG.MVecScale" };
+            if (r.log)
+            {
+                std::fprintf(r.log, "GLASS_READFAIL missing=");
+                for (const auto* key : keys)
+                {
+                    void* value = nullptr;
+                    if (parameters == nullptr || parameters->Get(key, &value) != 1)
+                        std::fprintf(r.log, " %s", key);
+                }
+                std::fprintf(r.log, "\n");
+                std::fprintf(r.log, "GLASS_READPROBE present=");
+                for (const auto* key : probes)
+                {
+                    void* value = nullptr;
+                    if (parameters != nullptr && parameters->Get(key, &value) == 1)
+                        std::fprintf(r.log, " %s", key);
+                }
+                std::fprintf(r.log, "\n");
+                std::fflush(r.log);
+            }
+        }
         if (r.active && r.active->handle == handle)
             r.active->session.bypass(1);
         PublishRuntimeStatus(RuntimeStatus::Waiting);
@@ -751,6 +1323,11 @@ void CreatedNativeFG()
 {
     auto& r = runtime();
     std::lock_guard lock(r.mutex);
+    if (r.log)
+    {
+        std::fprintf(r.log, "NATIVE_HOST created_native_fg=1\n");
+        std::fflush(r.log);
+    }
     // Only the host's successful native FG creation reopens admission after
     // shutdown. Retiring recordings still prevent allocation until drained.
     r.stopped = false;

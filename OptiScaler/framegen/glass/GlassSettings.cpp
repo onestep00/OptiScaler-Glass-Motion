@@ -3,6 +3,7 @@
 #include "GlassArrayMapping.h"
 #include "GeometryHealth.h"
 #include "PackedMotionCapture.h"
+#include "NvngxDlssgBridge.h"
 #include <Util.h>
 #include <SimpleIni.h>
 #include <imgui/imgui.h>
@@ -48,7 +49,9 @@ bool load()
                               ini.GetBoolValue("GlassFG", "PackedWriteBack", false),
                               ini.GetBoolValue("GlassFG", "PackedSkipRead", false),
                               ini.GetBoolValue("GlassFG", "ArrayMapping", false),
-                              ini.GetBoolValue("GlassFG", "CompilePipelines", true) }
+                              ini.GetBoolValue("GlassFG", "CompilePipelines", true),
+                              ini.GetBoolValue("GlassFG", "GroupedOrder", true),
+                              ini.GetBoolValue("GlassFG", "ArrayProbe", false) }
                        .packed(),
                    std::memory_order_relaxed);
     SetGeometryPipelineCompilation(Controls::unpack(controls.load(std::memory_order_relaxed)).compilePipelines);
@@ -77,6 +80,8 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "PackedSkipRead", value.packedSkipRead);
     ini.SetBoolValue("GlassFG", "ArrayMapping", value.arrayMapping);
     ini.SetBoolValue("GlassFG", "CompilePipelines", value.compilePipelines);
+    ini.SetBoolValue("GlassFG", "GroupedOrder", value.groupedOrder);
+    ini.SetBoolValue("GlassFG", "ArrayProbe", value.arrayProbe);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -189,6 +194,22 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Consumes the grouped-array element mapping published by the live\n"
                           "plugin so repeated objects keep per-element motion history.");
+    bool groupedOrder = value.groupedOrder;
+    changed |= ImGui::Checkbox("Grouped arrays: packet order element identity", &groupedOrder);
+    value.groupedOrder = groupedOrder;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Grouped update arrays (flag 0x2000) expose no source index at the draw\n"
+                          "site. The packet ordinal is used as the element position and the array's\n"
+                          "observed lifetime generation invalidates it whenever the array mutates.\n"
+                          "Turn off if a repacked group shows a one-frame ghost.");
+    bool arrayProbe = value.arrayProbe;
+    changed |= ImGui::Checkbox("Diagnostic: measure grouped array reordering", &arrayProbe);
+    value.arrayProbe = arrayProbe;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Hashes the element bytes each grouped array packet receives and compares\n"
+                          "them with the previous frame for the same array. If the element set is\n"
+                          "unchanged while the positions move, the packet ordinal is not a stable\n"
+                          "element identity and the counter reports it.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);
@@ -294,7 +315,11 @@ void RenderSettings()
     // Stage verdicts: whether the composed inputs actually reach the FG
     // evaluation, and whether our own compose work is still executing. The
     // compose fence pair is what the session teardown waits for.
+    // The host counter is the one the 9/10 injection point feeds: it counts the
+    // engine's own DLSS-G evaluations that reach the NGX proxy. The tag-path
+    // counter is a second, narrower route and must not stand in for it.
     const auto liveEvaluations = ReadLiveStatus(LiveStatusEvaluations);
+    const auto liveTagFrames = ReadStreamlineFrameCalls();
     const auto liveSubstitutions = ReadLiveStatus(LiveStatusSubstitutions);
     const auto liveInFlight = ReadLiveStatus(LiveStatusComposeInFlight) != 0;
     const auto liveSubmitted = ReadLiveStatus(LiveStatusComposeSubmitted);
@@ -312,12 +337,15 @@ void RenderSettings()
         ImGui::TextDisabled(value.packedSubstitute ? "- FG path has not reached the host hook yet"
                                                    : "- FG input swap is off");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The correction runs on the host's native DLSS-G call. With OptiScaler\n"
-                              "frame generation switched off, the game drives DLSS-G through Streamline\n"
-                              "directly and that call never happens.");
+            ImGui::SetTooltip("The correction runs on the host's native DLSS-G call. It only runs when the\n"
+                              "engine's frame generation actually reaches this module's NGX entry point.");
     }
     else if (!liveSubstitutions && value.packedSubstitute)
         ImGui::SameLine(), ImGui::TextDisabled("- swap requested but not applied");
+    ImGui::Text("Streamline DLSS-G tag frames: %llu", static_cast<unsigned long long>(liveTagFrames));
+    ImGui::Text("nvngx_dlssg evaluate hook: %s; calls %llu",
+                NvngxDlssgHookInstalled() ? "installed" : "not installed",
+                static_cast<unsigned long long>(NvngxDlssgHookCalls().load(std::memory_order_relaxed)));
     ImGui::Text("Compose fence: %s; submitted %llu; completed %llu%s", liveInFlight ? "in flight" : "idle",
                 static_cast<unsigned long long>(liveSubmitted), static_cast<unsigned long long>(liveCompleted),
                 liveForced ? " (forced release)" : "");

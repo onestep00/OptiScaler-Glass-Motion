@@ -41,6 +41,16 @@ struct Controls
     // but never creates its rewritten pipelines. Used to separate the D3D12
     // hooks from the pipeline-creation path in the 2026-09-14 resets.
     bool compilePipelines = true;
+    // Grouped update arrays (flag 0x2000) have no engine-verified source order
+    // at the append site. When enabled, the packet ordinal is used as the
+    // element position and the array's observed lifetime generation is the
+    // guard: any mutation of the array invalidates the element history.
+    bool groupedOrder = true;
+    // Diagnostic: compare the element bytes a grouped array packet receives
+    // between consecutive frames for the same array. An unchanged element set
+    // in a changed position is a permutation, which is the condition under
+    // which a packet ordinal stops being the element's previous-frame key.
+    bool arrayProbe = false;
 
     bool active() const { return enabled && strength > 0; }
     float coverage() const { return std::min(strength, 100u) / 100.f; }
@@ -55,7 +65,9 @@ struct Controls
                (packedWriteBack ? (std::uint64_t(1) << 33) : 0u) |
                (arrayMapping ? (std::uint64_t(1) << 34) : 0u) |
                (packedSkipRead ? (std::uint64_t(1) << 36) : 0u) |
-               (compilePipelines ? (std::uint64_t(1) << 37) : 0u);
+               (compilePipelines ? (std::uint64_t(1) << 37) : 0u) |
+               (groupedOrder ? (std::uint64_t(1) << 38) : 0u) |
+               (arrayProbe ? (std::uint64_t(1) << 39) : 0u);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -65,7 +77,8 @@ struct Controls
                  unsigned((value >> 13) & 0xffffu), (value & (1ull << 29)) != 0, (value & (1ull << 30)) != 0,
                  (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
                  (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 36)) != 0,
-                 (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0 };
+                 (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0,
+                 (value & (std::uint64_t(1) << 38)) != 0, (value & (std::uint64_t(1) << 39)) != 0 };
     }
 };
 
@@ -116,6 +129,17 @@ inline void PublishLiveStatus(LiveStatusField field, std::uint64_t value) noexce
 inline std::uint64_t ReadLiveStatus(LiveStatusField field) noexcept
 {
     return LiveStatusSlot(field).load(std::memory_order_relaxed);
+}
+// Frames the correction prepared from the engine's DLSS-G tag handoff. Header
+// only so the settings panel and its test do not need the native host headers.
+inline std::atomic<std::uint64_t>& StreamlineFrameCounter() noexcept
+{
+    static std::atomic<std::uint64_t> value { 0 };
+    return value;
+}
+inline std::uint64_t ReadStreamlineFrameCalls() noexcept
+{
+    return StreamlineFrameCounter().load(std::memory_order_relaxed);
 }
 enum class RuntimeStatus : unsigned { Waiting, Correcting, Unavailable, Retiring, Stopped };
 void PublishRuntimeStatus(RuntimeStatus status);

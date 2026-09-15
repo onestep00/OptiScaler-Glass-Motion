@@ -4,6 +4,7 @@
 #include "CyberpunkLayout.h"
 #include "CyberpunkInstanceSelection.h"
 #include "DetourThreads.h"
+#include "GlassControls.h"
 #include <bit>
 #include <cmath>
 #include <mutex>
@@ -44,6 +45,9 @@ struct EngineDrawState
     std::atomic<std::uint64_t> parentNoSelectionGrouped = 0, parentNoSelectionNonGlobal = 0,
                              parentNoSelectionRange = 0;
     std::atomic<std::uint64_t> parentSeeded = 0;
+    std::atomic<std::uint64_t> arrayProbeCompared = 0, arrayProbePermuted = 0, arrayProbeChanged = 0;
+    std::atomic<std::uint64_t> arrayProbeSameAddress = 0, arrayProbeDistinctAddress = 0;
+    std::atomic<std::uint64_t> arrayProbeGrouped = 0;
 };
 std::atomic<EngineDrawState*> activeDrawState = nullptr;
 thread_local Batch* currentBatch = nullptr;
@@ -108,6 +112,111 @@ bool seedObject(EngineDrawState& state, std::uint64_t proxy) noexcept
     {
         return false;
     }
+}
+// Grouped-array element order probe.
+//
+// The grouped update path (proxy flag 0x2000) repacks the group's selected
+// elements into the packet in the engine's own selection order, so a packet
+// ordinal is a usable element key only while that order is unchanged. This
+// probe hashes the element bytes each packet received and compares them with
+// the previous frame of the same array: an unchanged element set sitting at a
+// different ordinal is a permutation, which is exactly the case that pairs an
+// element with another element's previous transform. It reads only bytes the
+// engine already wrote into the packet and is off unless the live arrayprobe
+// switch is on.
+constexpr unsigned kArrayProbeElements = 64;
+constexpr unsigned kArrayProbeSlots = 6;
+constexpr unsigned kArrayProbePerFrame = 2;
+struct ArrayProbeSlot
+{
+    std::uint64_t proxy = 0;
+    std::uint32_t generation = 0, count = 0;
+    std::uint64_t hashes[kArrayProbeElements] {};
+};
+thread_local ArrayProbeSlot arrayProbeSlots[kArrayProbeSlots];
+thread_local unsigned arrayProbeCursor = 0, arrayProbeInFrame = 0;
+thread_local std::uint32_t arrayProbeFrame = UINT32_MAX;
+
+bool arrayElementHash(std::uint64_t address, std::uint64_t& hash) noexcept
+{
+    std::array<std::byte, 48> bytes {};
+    if (!copyAt(address, bytes))
+        return false;
+    std::uint64_t value = 0xcbf29ce484222325ull;
+    for (const auto byte : bytes)
+    {
+        value ^= std::to_integer<std::uint8_t>(byte);
+        value *= 0x100000001b3ull;
+    }
+    hash = value ? value : 1;
+    return true;
+}
+void probeArrayOrder(EngineDrawState& state, const GeometryBatchSpan& record, std::uint64_t destination,
+                     std::uint64_t container) noexcept
+{
+    if (!ReadControls().arrayProbe || record.orderKind != 2)
+        return;
+    (destination == container ? state.arrayProbeSameAddress : state.arrayProbeDistinctAddress)
+        .fetch_add(1, std::memory_order_relaxed);
+    state.arrayProbeGrouped.fetch_add(1, std::memory_order_relaxed);
+    if (!record.parent || record.count < 2 || record.count > kArrayProbeElements)
+        return;
+    const auto frame = state.tick ? *state.tick : 0;
+    if (frame != arrayProbeFrame)
+    {
+        arrayProbeFrame = frame;
+        arrayProbeInFrame = 0;
+    }
+    if (arrayProbeInFrame >= kArrayProbePerFrame)
+        return;
+    ++arrayProbeInFrame;
+    std::uint64_t hashes[kArrayProbeElements] {};
+    for (unsigned i = 0; i < record.count; ++i)
+        if (!arrayElementHash(container + std::uint64_t(i) * 48, hashes[i]))
+            return;
+    ArrayProbeSlot* slot = nullptr;
+    for (auto& candidate : arrayProbeSlots)
+        if (candidate.count == record.count && candidate.proxy == record.parent.proxy &&
+            candidate.generation == record.parent.generation)
+        {
+            slot = &candidate;
+            break;
+        }
+    if (!slot)
+        slot = &arrayProbeSlots[arrayProbeCursor++ % kArrayProbeSlots];
+    else
+    {
+        bool taken[kArrayProbeElements] {};
+        bool sameSet = true, sameOrder = true;
+        for (unsigned i = 0; i < record.count && sameSet; ++i)
+        {
+            bool matched = false;
+            for (unsigned j = 0; j < record.count; ++j)
+                if (!taken[j] && slot->hashes[j] == hashes[i])
+                {
+                    taken[j] = true;
+                    matched = true;
+                    if (j != i)
+                        sameOrder = false;
+                    break;
+                }
+            if (!matched)
+                sameSet = false;
+        }
+        if (sameSet)
+        {
+            state.arrayProbeCompared.fetch_add(1, std::memory_order_relaxed);
+            if (!sameOrder)
+                state.arrayProbePermuted.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+            state.arrayProbeChanged.fetch_add(1, std::memory_order_relaxed);
+    }
+    slot->proxy = record.parent.proxy;
+    slot->generation = record.parent.generation;
+    slot->count = record.count;
+    for (unsigned i = 0; i < record.count; ++i)
+        slot->hashes[i] = hashes[i];
 }
 struct EngineContext
 {
@@ -272,17 +381,32 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                         if (selection.resolveGlobalPacket(record.global, record.transformIndex, record.count,
                             instances.globalStart, instances.count, flags))
                         {
-                            record.originalOrder = true;
+                            record.orderKind = 1;
                             record.originalFirst = static_cast<std::uint16_t>(selection.linearFirst);
                         }
                         else
                         {
                             ++state->parentNoSelection;
-                            switch (CyberpunkInstanceSelection::rejectCode(record.global, record.transformIndex,
-                                                                            record.count, instances.globalStart,
-                                                                            instances.count, flags))
+                            const auto code = CyberpunkInstanceSelection::rejectCode(
+                                record.global, record.transformIndex, record.count, instances.globalStart,
+                                instances.count, flags);
+                            switch (code)
                             {
-                            case 1: ++state->parentNoSelectionGrouped; break;
+                            case 1:
+                                ++state->parentNoSelectionGrouped;
+                                // Grouped update array. The engine repacks the
+                                // source elements into this same allocation in
+                                // group order, so the packet ordinal is the
+                                // element's position in the group. It is only
+                                // used together with the array's observed
+                                // lifetime generation, which invalidates the
+                                // history whenever the array is mutated.
+                                if (ReadControls().groupedOrder && record.count > 1)
+                                {
+                                    record.orderKind = 2;
+                                    record.originalFirst = 0;
+                                }
+                                break;
                             case 2: ++state->parentNoSelectionNonGlobal; break;
                             default: ++state->parentNoSelectionRange; break;
                             }
@@ -295,6 +419,13 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
         }
     }
     originalAppend(transforms, packet, c, d, context);
+    if (tracked && !skin && state && batch && record.count > 1 && record.orderKind == 2)
+    {
+        // The engine has written this packet's elements by now. Compare the
+        // ordinal order with the previous frame of the same array.
+        const auto container = batch->renderer + 0x574280 + std::uint64_t(record.transformIndex) * 48;
+        probeArrayOrder(*state, record, reinterpret_cast<std::uint64_t>(transforms), container);
+    }
     if (!state || !batch)
         return;
     EngineContext after;
@@ -543,6 +674,12 @@ CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept
     value.parentNoSelectionNonGlobal = state->parentNoSelectionNonGlobal.load();
     value.parentNoSelectionRange = state->parentNoSelectionRange.load();
     value.parentSeeded = state->parentSeeded.load();
+    value.arrayProbeCompared = state->arrayProbeCompared.load();
+    value.arrayProbePermuted = state->arrayProbePermuted.load();
+    value.arrayProbeChanged = state->arrayProbeChanged.load();
+    value.arrayProbeSameAddress = state->arrayProbeSameAddress.load();
+    value.arrayProbeDistinctAddress = state->arrayProbeDistinctAddress.load();
+    value.arrayProbeGrouped = state->arrayProbeGrouped.load();
     return value;
 }
 std::uint32_t ReadCyberpunkDrawFrame() noexcept

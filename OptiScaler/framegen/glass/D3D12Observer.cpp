@@ -259,9 +259,14 @@ bool InstallD3D12Observer(Command* command, const D3D12Callbacks& supplied)
     if (attempted)
         return installed && MatchesD3D12Observer(command);
     attempted = true;
-    if (!command || command->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE || !supplied.enter || !supplied.leave ||
-        !supplied.reset || !supplied.mutation || !supplied.barrier || !supplied.submit || !supplied.signal ||
-        !supplied.wait)
+    // Direct lists carry the frame generation evaluation when Streamline drives
+    // it through the NGX core; the observed interface and vtable slots are the
+    // same as for the compute list this originally watched.
+    const auto listType = command != nullptr ? command->GetType() : D3D12_COMMAND_LIST_TYPE_BUNDLE;
+    if (command == nullptr ||
+        (listType != D3D12_COMMAND_LIST_TYPE_COMPUTE && listType != D3D12_COMMAND_LIST_TYPE_DIRECT) ||
+        !supplied.enter || !supplied.leave || !supplied.reset || !supplied.mutation || !supplied.barrier ||
+        !supplied.submit || !supplied.signal || !supplied.wait)
         return false;
     ComPtr<ID3D12Device> device;
     if (FAILED(command->GetDevice(IID_PPV_ARGS(&device))))

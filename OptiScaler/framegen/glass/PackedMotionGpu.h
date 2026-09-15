@@ -1,6 +1,7 @@
 #pragma once
 #include "GlassControls.h"
 #include "GlassGpuTimer.h"
+#include "GlassTrace.h"
 #include "PackedMotionCapture.h"
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -33,6 +34,18 @@ class PackedMotionGpu
     // [dispatched, packed_id, edge, interior].
     ID3D12Resource* counters = nullptr;
     ID3D12Resource* zeroCounters = nullptr;
+    // The counters are copy destination, then a UAV write by the compose shader,
+    // then (only on a dump) a copy source. The state has to follow that order on
+    // every driver; a UAV access while the resource is still COPY_DEST is a
+    // state mismatch and hung the device in the 2026-09-15 sessions.
+    D3D12_RESOURCE_STATES counterState = D3D12_RESOURCE_STATE_COMMON;
+    // Actual current states of the compose outputs. The dispatch leaves them in
+    // UNORDERED_ACCESS, so a hardcoded COPY_DEST before-state produced a
+    // transition whose StateBefore did not match the resource, which is
+    // undefined behaviour for every dispatch after the first.
+    D3D12_RESOURCE_STATES outputMotionState = D3D12_RESOURCE_STATE_COPY_DEST;
+    D3D12_RESOURCE_STATES outputDepthState = D3D12_RESOURCE_STATE_COPY_DEST;
+    D3D12_RESOURCE_STATES outputSelectionState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     unsigned width = 0, height = 0, increment = 0;
     // Diagnostic readback. Nothing is allocated or copied until the live
     // channel asks for a dump, so the correction path pays nothing by default.
@@ -44,6 +57,15 @@ class PackedMotionGpu
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[6] {};
     unsigned packedCovered = 0;
     ID3D12Fence* dumpFence = nullptr;
+    // Compose fence value that covers the readback copies of a pending dump.
+    std::uint64_t dumpComposeValue = 0;
+    // Diagnostic bisect switch: record the engine's own motion/depth and the
+    // packed object records as well. Those copies are the ones under suspicion
+    // for stalling the compose, so they can be excluded without touching the
+    // composed outputs.
+// The dump records the engine's own motion/depth for the same frame as well, so
+// the correction can be compared pixel by pixel instead of only inspected.
+static constexpr bool kDumpEngineInputs = true;
     UINT64 dumpValue = 0;
     unsigned dumpSerial = 0, dumpFrame = 0;
     bool dumpPending = false;
@@ -63,6 +85,15 @@ class PackedMotionGpu
     D3D12_COMMAND_LIST_TYPE composeType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     std::uint64_t composeValue = 0;
     bool composePending = false;
+    // Descriptor views of the packed record buffers, keyed by resource so a
+    // descriptor is never rewritten while it can still be read by the GPU.
+    static constexpr unsigned kPackedViewCount = 4;
+    struct PackedView
+    {
+        ID3D12Resource* resource = nullptr;
+    };
+    PackedView packedViews[kPackedViewCount] {};
+    unsigned packedViewCount = 0;
     // The compose list is submitted without the host completion signal whenever
     // the input swap is inactive, so the session teardown needs its own proof
     // that the list finished before these outputs are freed. Freeing them while
@@ -89,6 +120,25 @@ class PackedMotionGpu
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition = { resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after };
         command->ResourceBarrier(1, &barrier);
+    }
+    // Returns the descriptor slot holding this raster, creating it once. The
+    // packed records are eight bytes per pixel, so the view is sized from the
+    // configured extent instead of relying on a bare address.
+    unsigned packedView(ID3D12Resource* resource)
+    {
+        for (unsigned i = 0; i < packedViewCount; ++i)
+            if (packedViews[i].resource == resource)
+                return i;
+        if (!device || !resource || packedViewCount >= kPackedViewCount)
+            return 0;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC view {};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        view.Buffer.NumElements = static_cast<UINT>(UINT64(width) * height * 2);
+        view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device->CreateUnorderedAccessView(resource, nullptr, &view, cpu(packedViewCount));
+        packedViews[packedViewCount].resource = resource;
+        return packedViewCount++;
     }
     bool createTexture(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES state, ID3D12Resource** output)
     {
@@ -224,7 +274,10 @@ class PackedMotionGpu
 
         D3D12_DESCRIPTOR_HEAP_DESC heapDescription {};
         heapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heapDescription.NumDescriptors = 4;
+        // 0..3 = packed object records (one view per capture frame slot, never
+        // rewritten while an earlier compose may still read it),
+        // 4..7 = motion/depth/selection/counters.
+        heapDescription.NumDescriptors = 8;
         heapDescription.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&heapDescription, IID_PPV_ARGS(&heap))))
             return false;
@@ -236,26 +289,32 @@ class PackedMotionGpu
             D3D12_UNORDERED_ACCESS_VIEW_DESC view {};
             view.Format = formats[i];
             view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            device->CreateUnorderedAccessView(outputs[i], nullptr, &view, cpu(i));
+            device->CreateUnorderedAccessView(outputs[i], nullptr, &view, cpu(i + kPackedViewCount));
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC counterView {};
         counterView.Format = DXGI_FORMAT_R32_TYPELESS;
         counterView.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         counterView.Buffer.NumElements = 16;
         counterView.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-        device->CreateUnorderedAccessView(counters, nullptr, &counterView, cpu(3));
+        device->CreateUnorderedAccessView(counters, nullptr, &counterView, cpu(3 + kPackedViewCount));
 
+        // The packed object records are bound through a descriptor rather than a
+        // root UAV. A root UAV is a bare GPU virtual address with no size; the
+        // per-pixel read through it reset the GPU on this driver while the same
+        // read pattern inside a small window stayed stable, so the view is
+        // created explicitly (with NumElements) for every submit.
+        D3D12_DESCRIPTOR_RANGE packedRange {};
+        packedRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        packedRange.BaseShaderRegister = 0;
+        packedRange.OffsetInDescriptorsFromTableStart = 0;
+        packedRange.NumDescriptors = 1;
         D3D12_DESCRIPTOR_RANGE range {};
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        // The packed object records moved from a root SRV to a root UAV: the
-        // capture writes that buffer only as a UAV, so a shader-resource read
-        // relied on implicit COMMON promotion and left the UAV barrier covering
-        // an ill-defined state pair.
         range.BaseShaderRegister = 1;
         range.NumDescriptors = 4;
         D3D12_ROOT_PARAMETER parameters[3] {};
-        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        parameters[0].Descriptor = { 0, 0 };
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable = { 1, &packedRange };
         parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         parameters[1].DescriptorTable = { 1, &range };
         parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -314,11 +373,30 @@ class PackedMotionGpu
 
     bool serviceDump() noexcept
     {
-        if (!dumpPending || !dumpFence || !readback[0] || !readback[1])
+        if (!dumpPending || !readback[0] || !readback[1])
             return false;
-        const auto completed = dumpFence->GetCompletedValue();
-        if (completed == UINT64_MAX || completed < dumpValue)
+        // The readback copies are recorded into the compose list, and the
+        // compose list can run on the producer queue, so the completion proof is
+        // the compose fence - the frame generation queue's own signal does not
+        // cover those copies.
+        ID3D12Fence* completion = composeFence != nullptr ? composeFence : dumpFence;
+        if (completion == nullptr)
             return false;
+        const auto completed = completion->GetCompletedValue();
+        if (completed == UINT64_MAX || (dumpComposeValue != 0 && completed < dumpComposeValue))
+        {
+            // Bounded attribution: separates "our GPU work never completed" from
+            // "the health thread never reached this call".
+            static std::atomic<unsigned> waits { 0 };
+            if (logFile && waits.fetch_add(1, std::memory_order_relaxed) < 6)
+            {
+                std::fprintf(logFile, "PACKED_DUMP waiting serial=%u frame=%u completed=%llu need=%llu\n", dumpSerial,
+                             dumpFrame, static_cast<unsigned long long>(completed),
+                             static_cast<unsigned long long>(dumpComposeValue));
+                std::fflush(logFile);
+            }
+            return false;
+        }
         void* data[6] {};
         for (unsigned i = 0; i < 6; ++i)
             if (FAILED(readback[i]->Map(0, nullptr, &data[i])) || !data[i])
@@ -335,9 +413,12 @@ class PackedMotionGpu
         const auto base = (folder / L"dump").wstring() + L"-" + suffix;
         writeMotion(base + L"-mv.ppm", static_cast<const std::byte*>(data[0]));
         writeDepth(base + L"-depth.ppm", static_cast<const std::byte*>(data[1]));
-        writeMotion(base + L"-original-mv.ppm", static_cast<const std::byte*>(data[3]));
-        writeDepth(base + L"-original-depth.ppm", static_cast<const std::byte*>(data[4]));
-        writePacked(base + L"-packed.ppm", static_cast<const std::byte*>(data[5]));
+        if (kDumpEngineInputs)
+        {
+            writeMotion(base + L"-original-mv.ppm", static_cast<const std::byte*>(data[3]));
+            writeDepth(base + L"-original-depth.ppm", static_cast<const std::byte*>(data[4]));
+            writePacked(base + L"-packed.ppm", static_cast<const std::byte*>(data[5]));
+        }
         writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]),
                      static_cast<const std::byte*>(data[2]), static_cast<const std::byte*>(data[3]),
                      static_cast<const std::byte*>(data[4]));
@@ -350,10 +431,13 @@ class PackedMotionGpu
             std::fflush(logFile);
         }
         dumpPending = false;
+        dumpComposeValue = 0;
         return true;
     }
 
   public:
+    // Diagnostics: the session log the packed pass reports into.
+    FILE* logHandle() const { return logFile; }
     bool composeReady()
     {
         if (!composePending)
@@ -374,6 +458,10 @@ class PackedMotionGpu
     }
     std::uint64_t composeSubmitted() const { return composeValue; }
     bool composeInFlight() const { return composePending; }
+    // The host submits the compose on the queue that owns the packed raster and
+    // then makes the frame generation queue wait on this fence, so the packed
+    // records are never read across queues.
+    ID3D12Fence* composeFenceHandle() const { return composeFence; }
     std::uint64_t composeForced() const { return composeForcedReleases; }
     // Teardown gate: true only when no compose list of this object can still be
     // executing on the GPU. A submission whose completion never arrives would
@@ -405,20 +493,54 @@ class PackedMotionGpu
     // write-back on our own compute list, then submits it on the FG queue. The
     // caller performs the producer wait on that queue before this call, so the
     // engine's command list state and the NGX recording sequence stay clean.
+    // Bounded attribution for a compose that could not be queued: the FG then
+    // keeps an input nothing wrote, and the reason is otherwise invisible.
+    void noteComposeSkip(const char* reason) noexcept
+    {
+        static std::atomic<unsigned> logged { 0 };
+        if (logFile != nullptr && logged.fetch_add(1, std::memory_order_relaxed) < 12)
+        {
+            std::fprintf(logFile, "PACKED_COMPOSE_SKIP reason=%s width=%u height=%u\n", reason, width, height);
+            std::fflush(logFile);
+        }
+    }
+
     bool submitCompose(ID3D12CommandQueue* queue, const PackedMotionFrame& packed, ID3D12Resource* originalMotion,
                        ID3D12Resource* originalDepth, D3D12_RESOURCE_STATES motionState,
                        D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, Controls controls,
                        GpuTimer* timer)
     {
         if (!queue)
+        {
+            noteComposeSkip("queue");
             return false;
+        }
         const auto type = queue->GetDesc().Type;
         if (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        {
+            noteComposeSkip("queue_type");
             return false;
-        if (!composeReady() || !ensureCompose(type))
+        }
+        if (!composeReady())
+        {
+            noteComposeSkip("pending");
             return false;
-        if (FAILED(composeAllocator->Reset()) || FAILED(composeList->Reset(composeAllocator, nullptr)))
+        }
+        if (!ensureCompose(type))
+        {
+            noteComposeSkip("ensure");
             return false;
+        }
+        if (FAILED(composeAllocator->Reset()))
+        {
+            noteComposeSkip("allocator_reset");
+            return false;
+        }
+        if (FAILED(composeList->Reset(composeAllocator, nullptr)))
+        {
+            noteComposeSkip("list_reset");
+            return false;
+        }
         // Sparse GPU timing on the host's existing timer. This is a compute list
         // on the FG queue, the same shape the timer already accepts; a full
         // eight-slot window skips the sample instead of waiting.
@@ -426,15 +548,26 @@ class PackedMotionGpu
                                 ? timer->begin(composeList)
                                 : GpuTimer::Ticket {};
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
-        const bool recorded =
+        const bool dispatched =
             dispatch(composeList, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
-                     controls) &&
+                     controls);
+        const bool recorded =
+            dispatched &&
             (!controls.packedWriteBack ||
              writeBack(composeList, originalMotion, originalDepth, motionState, depthState, rows));
         if (timing)
             timer->end(composeList, timing);
-        if (!recorded || FAILED(composeList->Close()))
+        if (!recorded)
+        {
+            if (dispatched)
+                noteComposeSkip("writeback");
             return false;
+        }
+        if (FAILED(composeList->Close()))
+        {
+            noteComposeSkip("close");
+            return false;
+        }
         ID3D12CommandList* lists[] { composeList };
         queue->ExecuteCommandLists(1, lists);
         composeSubmittedAt = std::chrono::steady_clock::now();
@@ -445,9 +578,11 @@ class PackedMotionGpu
         composePending = true;
         if (FAILED(queue->Signal(composeFence, value)))
             return false;
+        if (dumpPending)
+            dumpComposeValue = value;
         if (timing)
             timer->submitted(composeList, queue, composeFence, composeValue);
-        if (controls.trace && logFile)
+        if (controls.trace && logFile && TraceWanted())
         {
             std::fprintf(logFile, "TRACE_COMPOSE queue=%p frame=%u rows=%u writeback=%u\n", queue, packed.frame,
                          (std::min)(height, (std::max)(1u, controls.packedRows)), controls.packedWriteBack ? 1u : 0u);
@@ -782,9 +917,38 @@ class PackedMotionGpu
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState,
                   float scaleX, float scaleY, Controls controls)
     {
-        if (!pipeline || !command || !packed || packed.width != width || packed.height != height ||
-            !originalMotion || !originalDepth || scaleX <= 0 || scaleY <= 0)
+        // Named rejections: a silent false here removes the whole correction
+        // while the FG still receives the substituted texture.
+        if (!command)
+        {
+            noteComposeSkip("dispatch_command");
             return false;
+        }
+        if (!pipeline)
+        {
+            noteComposeSkip("dispatch_pipeline");
+            return false;
+        }
+        if (!packed)
+        {
+            noteComposeSkip("dispatch_frame");
+            return false;
+        }
+        if (packed.width != width || packed.height != height)
+        {
+            noteComposeSkip("dispatch_extent");
+            return false;
+        }
+        if (!originalMotion || !originalDepth)
+        {
+            noteComposeSkip("dispatch_input");
+            return false;
+        }
+        if (scaleX <= 0 || scaleY <= 0)
+        {
+            noteComposeSkip("dispatch_scale");
+            return false;
+        }
         if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
@@ -815,10 +979,21 @@ class PackedMotionGpu
         if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
             transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
 
-        transition(command, motion, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        transition(command, depth, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        transition(command, selection, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (outputMotionState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(command, motion, outputMotionState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            outputMotionState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        if (outputDepthState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(command, depth, outputDepthState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            outputDepthState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        if (outputSelectionState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            transition(command, selection, outputSelectionState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            outputSelectionState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
         struct Constants
         {
             unsigned width, height;
@@ -827,12 +1002,15 @@ class PackedMotionGpu
             float interiorStrength;
             unsigned debug, reserved;
         } constants { width, height, scaleX, scaleY, (std::min)(controls.edgeWidth, 4u), controls.coverage(),
-                       dumpRequests.load(std::memory_order_relaxed) ? 1u : 0u, 0 };
+                       (dumpRequests.load(std::memory_order_relaxed) ? 1u : 0u) |
+                           (controls.packedSkipRead ? 2u : 0u),
+                       0 };
         static_assert(sizeof(Constants) == 32);
+        const auto packedSlot = packedView(packed.resource);
         command->SetDescriptorHeaps(1, &heap);
         command->SetComputeRootSignature(root);
-        command->SetComputeRootUnorderedAccessView(0, packed.resource->GetGPUVirtualAddress());
-        command->SetComputeRootDescriptorTable(1, gpu(0));
+        command->SetComputeRootDescriptorTable(0, gpu(packedSlot));
+        command->SetComputeRootDescriptorTable(1, gpu(kPackedViewCount));
         command->SetComputeRoot32BitConstants(2, 8, &constants, 0);
         command->SetPipelineState(pipeline);
         // The packed raster writes this buffer as a UAV/ROV during the draw, so
@@ -845,7 +1023,14 @@ class PackedMotionGpu
         command->ResourceBarrier(1, &packedBarrier);
         // Coverage counters are per measured frame: reset, then let the shader
         // count dispatched, packed, edge and interior pixels.
+        transition(command, counters, counterState, D3D12_RESOURCE_STATE_COPY_DEST);
+        counterState = D3D12_RESOURCE_STATE_COPY_DEST;
         command->CopyBufferRegion(counters, 0, zeroCounters, 0, 64);
+        // The shader writes these counters as a UAV (register u4). A copy
+        // destination is not a UAV state, so the transition is explicit here
+        // rather than left to implicit promotion.
+        transition(command, counters, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        counterState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         D3D12_RESOURCE_BARRIER counterBarrier {};
         counterBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         counterBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -860,7 +1045,7 @@ class PackedMotionGpu
         // optional, so a reset can be attributed to the swap or to the compute.
         if (controls.packedCompute)
             command->Dispatch((width + 7) / 8, (rows + 7) / 8, 1);
-        if (controls.trace && logFile)
+        if (controls.trace && logFile && TraceWanted())
         {
             std::fprintf(logFile, "TRACE_DISPATCH frame=%u rows=%u groups=%u edges=%u compute=%u copy=%u\n",
                          packed.frame, rows, (width + 7) / 8, (std::min)(controls.edgeWidth, 4u),
@@ -869,8 +1054,8 @@ class PackedMotionGpu
         }
         if (!dumpPending && dumpRequests.load(std::memory_order_relaxed) && prepareReadback())
         {
-            transition(command, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            transition(command, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(command, motion, outputMotionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(command, depth, outputDepthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
             ID3D12Resource* sources[] { motion, depth };
             for (unsigned i = 0; i < 2; ++i)
             {
@@ -884,8 +1069,20 @@ class PackedMotionGpu
             }
             transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            outputMotionState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            outputDepthState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            transition(command, counters, counterState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            counterState = D3D12_RESOURCE_STATE_COPY_SOURCE;
             command->CopyBufferRegion(readback[2], 0, counters, 0, 64);
-            // Same-frame originals for a direct before/after comparison.
+            transition(command, counters, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            counterState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            // Same-frame originals for a direct before/after comparison. The
+            // engine's own textures are only read here, and the transition uses
+            // the state Streamline reported for the frame generation boundary;
+            // this is the copy under suspicion for the stalled dump, so it can
+            // be switched off to bisect without touching anything else.
+            if (kDumpEngineInputs)
+            {
             if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
                 transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
             if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
@@ -911,6 +1108,7 @@ class PackedMotionGpu
             command->CopyBufferRegion(readback[5], 0, packed.resource, 0, readbackBytes[5]);
             transition(command, packed.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
             dumpFrame = packed.frame;
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;
@@ -980,6 +1178,15 @@ class PackedMotionGpu
         composeFence = nullptr;
         composeValue = 0;
         composePending = false;
+        // The resources are gone; the next allocation starts in the states the
+        // textures are created with.
+        counterState = D3D12_RESOURCE_STATE_COMMON;
+        outputMotionState = D3D12_RESOURCE_STATE_COPY_DEST;
+        outputDepthState = D3D12_RESOURCE_STATE_COPY_DEST;
+        outputSelectionState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        for (auto& view : packedViews)
+            view.resource = nullptr;
+        packedViewCount = 0;
         if (pipeline) pipeline->Release();
         if (root) root->Release();
         if (heap) heap->Release();

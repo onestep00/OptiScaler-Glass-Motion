@@ -2,6 +2,7 @@
 #include "GlassRegionGpu.h"
 #include "GlassControls.h"
 #include "GlassGpuTimer.h"
+#include "GlassTrace.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -25,6 +26,11 @@ struct Inputs
     unsigned index = 0, count = 0, reset = 0;
     float scaleX = 0, scaleY = 0, jitterX = 0, jitterY = 0;
     std::array<float, 16> clipToPrevious {};
+    // Parameter key names the two textures were read from. The game-level block
+    // uses the DLSSG.* names; the block Streamline's frame generation plugin
+    // hands to the NGX core (via _nvngx.dll) uses MotionVectors/Depth.
+    const char* motionKey = "DLSSG.MVecs";
+    const char* depthKey = "DLSSG.Depth";
     // Native Streamline frame domain, independent of the engine render tick.
     // UINT64_MAX means absent (for example an older replay); never infer it
     // from a repeated resource address or the multipass interpolation index.
@@ -49,9 +55,9 @@ struct Inputs
         if (!params)
             return false;
         void* matrix = nullptr;
-        if (params->Get("DLSSG.MVecs", &value.motion) != 1 || !value.motion ||
+        if (params->Get(value.motionKey, &value.motion) != 1 || !value.motion ||
             params->Get("DLSSG.HUDLess", &value.color) != 1 || !value.color ||
-            params->Get("DLSSG.Depth", &value.depth) != 1 || !value.depth ||
+            params->Get(value.depthKey, &value.depth) != 1 || !value.depth ||
             params->Get("DLSSG.MultiFrameIndex", &value.index) != 1 ||
             params->Get("DLSSG.MultiFrameCount", &value.count) != 1 || params->Get("DLSSG.Reset", &value.reset) != 1 ||
             params->Get("DLSSG.MvecScaleX", &value.scaleX) != 1 ||
@@ -59,7 +65,28 @@ struct Inputs
             params->Get("DLSSG.JitterOffsetX", &value.jitterX) != 1 ||
             params->Get("DLSSG.JitterOffsetY", &value.jitterY) != 1 ||
             params->Get("DLSSG.ClipToPrevClip", &matrix) != 1 || !matrix)
-            return false;
+        {
+            // Driver-level block: only the two textures are named. The caller
+            // fills the missing motion-vector metadata from the Streamline
+            // constants it already tracks, so the compose sees the same units.
+            value.motionKey = "MotionVectors";
+            value.depthKey = "Depth";
+            if (params->Get(value.motionKey, &value.motion) != 1 || !value.motion ||
+                params->Get(value.depthKey, &value.depth) != 1 || !value.depth)
+                return false;
+            value.color = value.motion;
+            value.index = 1;
+            value.count = 1;
+            value.reset = 0;
+            value.scaleX = 1.f;
+            value.scaleY = 1.f;
+            value.jitterX = 0.f;
+            value.jitterY = 0.f;
+            value.clipToPrevious.fill(0.f);
+            for (unsigned i = 0; i < 4; ++i)
+                value.clipToPrevious[i * 4 + i] = 1.f;
+            return true;
+        }
         // Only the recorded 2x/4x conventions are supported by this candidate.
         if ((value.count != 1 && value.count != 3) || value.index < 1 || value.index > value.count ||
             !std::isfinite(value.scaleX) || !std::isfinite(value.scaleY) || value.scaleX <= 0 || value.scaleY <= 0 ||
@@ -86,6 +113,8 @@ struct PreparedInputs
     ID3D12Resource* originalDepth = nullptr;
     ID3D12Resource* motion = nullptr;
     ID3D12Resource* depth = nullptr;
+    const char* motionKey = "DLSSG.MVecs";
+    const char* depthKey = "DLSSG.Depth";
 };
 
 // Keep this scope strictly around the native FG call. The shared parameter
@@ -101,13 +130,13 @@ template <class Parameters> class ScopedInputs
         ID3D12Resource* motion = nullptr;
         ID3D12Resource* depth = nullptr;
         if (!parameters || !prepared.originalMotion || !prepared.originalDepth || !prepared.motion || !prepared.depth ||
-            parameters->Get("DLSSG.MVecs", &motion) != 1 || parameters->Get("DLSSG.Depth", &depth) != 1 ||
+            parameters->Get(prepared.motionKey, &motion) != 1 || parameters->Get(prepared.depthKey, &depth) != 1 ||
             motion != prepared.originalMotion || depth != prepared.originalDepth)
             return;
         params = parameters;
         pair = prepared;
-        params->Set("DLSSG.MVecs", pair.motion);
-        params->Set("DLSSG.Depth", pair.depth);
+        params->Set(pair.motionKey, pair.motion);
+        params->Set(pair.depthKey, pair.depth);
     }
     ScopedInputs(const ScopedInputs&) = delete;
     ScopedInputs& operator=(const ScopedInputs&) = delete;
@@ -115,8 +144,8 @@ template <class Parameters> class ScopedInputs
     {
         if (params)
         {
-            params->Set("DLSSG.MVecs", pair.originalMotion);
-            params->Set("DLSSG.Depth", pair.originalDepth);
+            params->Set(pair.motionKey, pair.originalMotion);
+            params->Set(pair.depthKey, pair.originalDepth);
         }
     }
     bool applied() const { return params != nullptr; }

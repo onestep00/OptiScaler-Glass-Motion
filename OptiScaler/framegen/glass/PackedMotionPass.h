@@ -13,6 +13,11 @@ class PackedMotionPass
     unsigned nextIndex = 0;
     std::uint64_t dispatches = 0;
     bool initialized = false, batchReady = false;
+    // A substituted input is only meaningful when the compose that writes it is
+    // actually queued for the same frame. Two substitutions in a row without a
+    // queued compose means the FG would evaluate a texture nothing wrote, so the
+    // swap is withheld until a compose is queued again.
+    std::uint64_t substitutedFrames = 0, composedFrames = 0;
     // Deferred compose: prepared inside the FG call, submitted on our own list
     // right before the batch that carries the FG command.
     PackedMotionFrame pendingFrame {};
@@ -70,6 +75,26 @@ class PackedMotionPass
                 invalidateHistory();
                 return {};
             }
+            const bool wasPending = pendingValid;
+            if (substitutedFrames > composedFrames + 1)
+            {
+                static std::atomic<unsigned> stalled { 0 };
+                if (auto* log = gpu.logHandle())
+                {
+                    if (stalled.fetch_add(1, std::memory_order_relaxed) < 4)
+                    {
+                        std::fprintf(log, "PACKED_SUBSTITUTE stalled substituted=%llu composed=%llu\n",
+                                     static_cast<unsigned long long>(substitutedFrames),
+                                     static_cast<unsigned long long>(composedFrames));
+                        std::fflush(log);
+                    }
+                }
+                // Without resynchronising the counters the gate stays closed and
+                // the correction never resumes.
+                substitutedFrames = composedFrames;
+                invalidateHistory();
+                return {};
+            }
             pendingFrame = objectFrame;
             pendingMotion = inputs.motion;
             pendingDepth = inputs.depth;
@@ -80,6 +105,11 @@ class PackedMotionPass
             pendingControls = controls;
             pendingTimer = timer;
             pendingValid = true;
+            // A frame can be prepared more than once (one evaluation per
+            // back-buffer list). Only the first prepare of a frame counts as an
+            // unqueued substitution.
+            if (!wasPending)
+                ++substitutedFrames;
             ++dispatches;
             if (!controls.packedSubstitute)
             {
@@ -102,7 +132,8 @@ class PackedMotionPass
             invalidateHistory();
             return {};
         }
-        return { inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput() };
+        return { inputs.motion,          inputs.depth,      gpu.motionOutput(),
+                 gpu.depthOutput(), inputs.motionKey, inputs.depthKey };
     }
     std::uint64_t renderedDispatches() const { return dispatches; }
     // Session teardown: a compose prepared for a retired FG command must not be
@@ -117,6 +148,7 @@ class PackedMotionPass
     bool composeInFlight() const { return gpu.composeInFlight(); }
     std::uint64_t composeSubmitted() const { return gpu.composeSubmitted(); }
     std::uint64_t composeCompleted() const { return gpu.composeCompleted(); }
+    ID3D12Fence* composeFence() const { return gpu.composeFenceHandle(); }
     std::uint64_t composeForced() const { return gpu.composeForced(); }
     // Live debug channel: recompile the compose shader without a restart.
     bool reloadShader(const wchar_t* shader, FILE* log) { return gpu.reload(shader, log); }
@@ -125,12 +157,27 @@ class PackedMotionPass
     bool executePending(ID3D12CommandQueue* queue)
     {
         if (!pendingValid)
+        {
+            // Bounded attribution: without it "no compose was prepared" and
+            // "the compose was rejected" look identical in the log.
+            static std::atomic<unsigned> missing { 0 };
+            if (auto* log = gpu.logHandle())
+            {
+                if (missing.fetch_add(1, std::memory_order_relaxed) < 8)
+                {
+                    std::fprintf(log, "PACKED_COMPOSE_SKIP reason=no_pending\n");
+                    std::fflush(log);
+                }
+            }
             return false;
+        }
         auto* timer = pendingTimer;
         pendingTimer = nullptr;
         const auto result = gpu.submitCompose(queue, pendingFrame, pendingMotion, pendingDepth, pendingMotionState,
                                               pendingDepthState, pendingScaleX, pendingScaleY, pendingControls, timer);
         pendingValid = false;
+        if (result)
+            ++composedFrames;
         return result;
     }
     // Live diagnostics: one-frame motion/depth dump and submit correlation.

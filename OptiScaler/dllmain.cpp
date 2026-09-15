@@ -6,6 +6,7 @@
 #include "Logger.h"
 #include "resource.h"
 #include "DllNames.h"
+#include <framegen/glass/NativeHost.h>
 
 #include "proxies/Dxgi_Proxy.h"
 #include "proxies/Kernel32_Proxy.h"
@@ -1782,6 +1783,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         exeModule = GetModuleHandle(nullptr);
         processId = GetCurrentProcessId();
 
+        // Glass: attach marker plus the first unhandled exception record, so a
+        // session that ends can be classified from the module log instead of
+        // guessed from the surrounding event log.
+        GlassFg::NoteProcessAttach();
+        GlassFg::InstallProcessDiagnostics();
+
         // Main Opti DLL path
         if (!Config::Instance()->MainDllPath.has_value())
         {
@@ -2179,6 +2186,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
     case DLL_PROCESS_DETACH:
         State::Instance().isShuttingDown = true;
+        GlassFg::NoteProcessDetach();
 
         // Unhooking and cleaning stuff causing issues during shutdown.
         // Disabled for now to check if it cause any issues

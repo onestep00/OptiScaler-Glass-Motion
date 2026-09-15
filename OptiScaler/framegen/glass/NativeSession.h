@@ -33,7 +33,15 @@ class NativeSession
     D3D12_COMMAND_LIST_TYPE fgCommandType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     ID3D12CommandQueue* fgQueue = nullptr;
     ID3D12Fence* completion = nullptr;
-    CommandLifetime fgLifetime;
+    // The engine alternating between two frame generation command lists (one
+    // per back buffer) is the observed reality: the same inputs and the same
+    // feature instance arrive on a different list every other evaluation.
+    // Binding a single list retired and rebuilt the whole session each frame,
+    // which reallocated the packed outputs and cancelled the pending compose.
+    static constexpr unsigned kFgCommandSlots = 4;
+    ID3D12GraphicsCommandList* fgCommands[kFgCommandSlots] {};
+    CommandLifetime fgLifetimes[kFgCommandSlots];
+    unsigned fgCommandCount = 0;
     std::array<CommandLifetime, 64> producers {};
     std::array<ID3D12Fence*, 64> nativeFences {};
     SurfaceSnapshotPool::Token newest {};
@@ -77,18 +85,62 @@ class NativeSession
             link.resetCommand(command);
         }
         timer.discardRecording(command);
-        if (command == fgCommand)
+        if (knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command))))
             outputRecording = false;
+    }
+
+    bool knowsFgCommand(ID3D12GraphicsCommandList* command) const
+    {
+        if (command == nullptr)
+            return false;
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
+            if (fgCommands[i] == command)
+                return true;
+        return false;
+    }
+
+    ID3D12GraphicsCommandList* firstKnownFgCommand() const
+    {
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
+            if (fgCommands[i] != nullptr)
+                return fgCommands[i];
+        return nullptr;
+    }
+
+    // Drops a list the engine destroyed and re-arms the primary identity. The
+    // watch state is dropped rather than moved: CommandLifetime is intentionally
+    // not movable, and a leftover callback token only publishes a flag.
+    void forgetFgCommand(ID3D12GraphicsCommandList* command)
+    {
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
+            if (fgCommands[i] == command)
+            {
+                fgCommands[i] = nullptr;
+                fgLifetimes[i].forget();
+                if (fgCommand == command)
+                    fgCommand = firstKnownFgCommand();
+                return;
+            }
     }
 
     void collectDestroyed()
     {
-        if (const auto command = fgLifetime.takeDestroyed())
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
         {
-            recording.onMutation(command);
+            const auto command = fgLifetimes[i].takeDestroyed();
+            if (command == nullptr)
+                continue;
+            // A destroyed frame generation list only loses its identity: the
+            // session keeps its packed outputs and re-arms on the next list.
+            static std::atomic<unsigned> logged { 0 };
+            if (log != nullptr && logged.fetch_add(1, std::memory_order_relaxed) < 4)
+            {
+                std::fprintf(log, "NATIVE_SESSION fg_command_destroyed=1\n");
+                std::fflush(log);
+            }
+            recording.onMutation(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command)));
             discardRecording(command, true);
-            fgCommand = nullptr;
-            stop();
+            forgetFgCommand(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command)));
         }
         for (auto& producer : producers)
             if (const auto command = producer.takeDestroyed())
@@ -143,12 +195,46 @@ class NativeSession
     // host hooks. Never call repeatedly: rebinding would erase Reset evidence.
     bool bindFgCommand(ID3D12GraphicsCommandList* command, uint32_t supported, uint32_t observed)
     {
-        const auto type = command ? command->GetType() : D3D12_COMMAND_LIST_TYPE_DIRECT;
-        if (!initialized || stopped || failed || !command || fgCommand ||
-            (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT) ||
-            !link.registerFgCommand(command) ||
-            !fgLifetime.attach(command))
+        if (!initialized || stopped || failed || !command || fgCommand)
             return false;
+        return adoptFgCommand(command, supported, observed);
+    }
+
+    ID3D12GraphicsCommandList* fgCommandIdentity() const { return fgCommand; }
+    // Public view of the identity set: the host matches submitted batches and
+    // evaluations against every list the session accepted.
+    bool handlesFgCommand(ID3D12GraphicsCommandList* command) const { return knowsFgCommand(command); }
+
+    // Adds a command list identity to this session. The engine alternates
+    // between frame generation command lists (one per back buffer) for the same
+    // inputs, so both have to belong to the same session; only the identity is
+    // added, the packed outputs and the compose list stay alive.
+    bool adoptFgCommand(ID3D12GraphicsCommandList* command, uint32_t supported, uint32_t observed)
+    {
+        if (!initialized || stopped || failed || !command)
+            return false;
+        if (command == fgCommand)
+            return true;
+        if (knowsFgCommand(command))
+        {
+            fgCommand = command;
+            return true;
+        }
+        const auto type = command->GetType();
+        if (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+            return false;
+        unsigned slot = kFgCommandSlots;
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
+            if (fgCommands[i] == nullptr)
+            {
+                slot = i;
+                break;
+            }
+        if (slot == kFgCommandSlots)
+            return false;
+        if (!link.registerFgCommand(command) || !fgLifetimes[slot].attach(command))
+            return false;
+        fgCommands[slot] = command;
         fgCommand = command;
         fgCommandType = type;
         recording.bind(command, true, supported, observed);
@@ -162,8 +248,10 @@ class NativeSession
         if (!success)
             return;
         discardRecording(command);
-        if (stopped && command == fgCommand)
-            fgLifetime.detachLive(command);
+        if (stopped && knowsFgCommand(command))
+            for (auto& lifetime : fgLifetimes)
+                if (lifetime.identity() == command)
+                    lifetime.detachLive(command);
         for (auto& producer : producers)
             if (producer.identity() == command)
                 producer.detachLive(command);
@@ -200,10 +288,12 @@ class NativeSession
         if (!initialized || failed || !queue || !commands || !count)
             return false;
         bool usesOutput = false;
+        ID3D12GraphicsCommandList* matched = nullptr;
         for (UINT i = 0; i < count; ++i)
         {
-            if (commands[i] == fgCommand)
+            if (knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(commands[i])))
             {
+                matched = static_cast<ID3D12GraphicsCommandList*>(commands[i]);
                 if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != fgCommandType)
                 {
                     // Streamline's own DLSS-G evaluation may arrive on a direct
@@ -230,7 +320,8 @@ class NativeSession
                 link.submit(queue, commands[i]);
             // A deferred compose was queued on this queue just before the batch,
             // so the completion signal covers it as well as a substituted input.
-            usesOutput |= (outputRecording || composeInFlight) && commands[i] == fgCommand;
+            usesOutput |= (outputRecording || composeInFlight) &&
+                          knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(commands[i]));
         }
         if (!objectMode && (!pool.afterSubmit(queue, count, commands) || !link.healthy()))
             failed = true;
@@ -245,7 +336,7 @@ class NativeSession
                 else
                 {
                     composeInFlight = false;
-                    if (timing && !timer.submitted(fgCommand, queue, completion, submitted))
+                    if (timing && matched != nullptr && !timer.submitted(matched, queue, completion, submitted))
                         timing = false;
                 }
             }
@@ -288,9 +379,29 @@ class NativeSession
                            const D3D12_RESOURCE_STATES (&states)[3], Controls controls,
                            bool allowAnyState = false)
     {
+        static std::atomic<unsigned> entered { 0 };
+        if (log != nullptr && entered.fetch_add(1, std::memory_order_relaxed) < 6)
+        {
+            std::fprintf(log, "NATIVE_PREPARE enter index=%u objectMode=%u trace=%u active=%u initialized=%u\n",
+                         inputs.index, objectMode ? 1u : 0u, controls.trace ? 1u : 0u, controls.active() ? 1u : 0u,
+                         initialized ? 1u : 0u);
+            std::fflush(log);
+        }
         collectDestroyed();
-        if (!initialized || stopped || failed || command != fgCommand)
+        if (!initialized || stopped || failed || !knowsFgCommand(command))
+        {
+            // Bounded attribution for a frame the host admitted but the session
+            // then refused, which otherwise leaves no trace at all.
+            static std::atomic<unsigned> rejected { 0 };
+            if (log != nullptr && rejected.fetch_add(1, std::memory_order_relaxed) < 6)
+            {
+                std::fprintf(log, "NATIVE_PREPARE skip initialized=%u stopped=%u failed=%u cmdMatch=%u\n",
+                             initialized ? 1u : 0u, stopped ? 1u : 0u, failed ? 1u : 0u,
+                             knowsFgCommand(command) ? 1u : 0u);
+                std::fflush(log);
+            }
             return {};
+        }
         if (objectMode)
         {
             PackedMotionFrame objectFrame;
@@ -298,22 +409,44 @@ class NativeSession
             {
                 auto ticket = recording.begin(command);
                 const bool fresh = ticket && recording.finish(command, ticket);
-                if (!controls.active() || !inputs.valid() || !fresh)
+                // The pristine-list requirement (Reset observed, nothing set
+                // since) cannot hold for the graphics list Streamline's frame
+                // generation plugin evaluates on: it resets and then binds its
+                // own state before calling the NGX core. The compose runs on
+                // this module's own list, so the engine list's state is not a
+                // precondition there; allowAnyState carries that distinction.
+                if (!controls.active() || !inputs.valid() || (!fresh && !allowAnyState))
                 {
+                    static std::atomic<unsigned> rejectLog { 0 };
+                    if (log != nullptr && rejectLog.fetch_add(1, std::memory_order_relaxed) < 6)
+                    {
+                        std::fprintf(log, "NATIVE_PREPARE reject active=%u valid=%u fresh=%u ticket=%u\n",
+                                     controls.active() ? 1u : 0u, inputs.valid() ? 1u : 0u, fresh ? 1u : 0u,
+                                     ticket ? 1u : 0u);
+                        std::fflush(log);
+                    }
                     objectPass.invalidateHistory();
                     return {};
                 }
                 const auto description = inputs.motion->GetDesc();
                 objectFrame = objectProvider.acquire(command, static_cast<std::uint32_t>(description.Width),
                                                      description.Height, inputs.frame, inputs.reset != 0);
-                pendingProducerFence = objectFrame.producerFence;
-                pendingProducerValue = objectFrame.producerValue;
-                pendingProducerQueue = objectFrame.producerQueue;
+                // A frame can be evaluated more than once (one per back-buffer
+                // command list). Only the evaluation that actually received a
+                // packed frame may publish the producer dependency; an empty
+                // acquire used to overwrite it with zero and the pre-submit hook
+                // then found nothing to queue the compose with.
+                if (objectFrame)
+                {
+                    pendingProducerFence = objectFrame.producerFence;
+                    pendingProducerValue = objectFrame.producerValue;
+                    pendingProducerQueue = objectFrame.producerQueue;
+                }
             }
             auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
                                                timing ? &timer : nullptr, allowAnyState);
             outputRecording |= prepared.motion != nullptr;
-            if (controls.trace && log)
+            if (controls.trace && log && TraceWanted())
             {
                 std::fprintf(log, "TRACE_SUBSTITUTE index=%u applied=%u frame=%llu\n", inputs.index,
                              prepared.motion ? 1u : 0u, static_cast<unsigned long long>(inputs.frame));
@@ -390,6 +523,8 @@ class NativeSession
             objectPass.requestDump();
     }
     bool serviceDump() { return objectMode && objectPass.serviceDump(); }
+    FILE* logFileHandle() const { return log; }
+    bool initializedForDiagnostics() const { return initialized; }
     // Deferred compose submission (called from the host pre-submit hook).
     bool executePending(ID3D12CommandQueue* queue)
     {
@@ -407,6 +542,9 @@ class NativeSession
     std::uint64_t packedComposeSubmitted() const { return objectMode ? objectPass.composeSubmitted() : 0; }
     std::uint64_t packedComposeCompleted() const { return objectMode ? objectPass.composeCompleted() : 0; }
     std::uint64_t packedComposeForced() const { return objectMode ? objectPass.composeForced() : 0; }
+    // The compose runs on the queue that owns the packed records; the frame
+    // generation queue waits on this fence instead of cross-queue reading them.
+    ID3D12Fence* composeFence() const { return objectMode ? objectPass.composeFence() : nullptr; }
     // Cross-queue dependency of the packed raster read. The caller performs the
     // wait on the queue that submits the FG command list.
     bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value, void*& producerQueue)
@@ -488,7 +626,11 @@ class NativeSession
         timer.releaseAfterGpuDrain();
         for (auto& producer : producers)
             producer.forget();
-        fgLifetime.forget();
+        for (unsigned i = 0; i < kFgCommandSlots; ++i)
+        {
+            fgLifetimes[i].forget();
+            fgCommands[i] = nullptr;
+        }
         for (auto& fence : nativeFences)
             if (fence)
             {

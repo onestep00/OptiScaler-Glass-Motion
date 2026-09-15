@@ -1,4 +1,4 @@
-#include <pch.h>
+﻿#include <pch.h>
 
 #include "Streamline_Hooks.h"
 
@@ -592,8 +592,44 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
                                                 sl::CommandBuffer* cmdBuffer)
 {
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
-
+    GlassFg::NoteStreamlineFeature(static_cast<unsigned>(feature));
     g_glassLastFrame = static_cast<std::uint64_t>(frame);
+
+    // Glass: the DLSS-G evaluate call also carries the frame's resource tags in
+    // some engines. Hand whatever is present to the correction, which records a
+    // bounded diagnostic when the set is incomplete.
+    if (feature == sl::kFeatureDLSS_G && cmdBuffer != nullptr && inputs != nullptr && numInputs > 0)
+    {
+        GlassFg::StreamlineFrame correction {};
+        for (uint32_t i = 0; i < numInputs; i++)
+        {
+            if (inputs[i] == nullptr || inputs[i]->structType != sl::ResourceTag::s_structType)
+                continue;
+            const auto* tag = (const sl::ResourceTag*) inputs[i];
+            if (tag->resource == nullptr || tag->resource->native == nullptr)
+                continue;
+            auto* resource = (ID3D12Resource*) tag->resource->native;
+            if (tag->type == sl::kBufferTypeMotionVectors)
+            {
+                correction.motion = resource;
+                correction.motionState = (D3D12_RESOURCE_STATES) tag->resource->state;
+            }
+            else if (tag->type == sl::kBufferTypeDepth || tag->type == sl::kBufferTypeHiResDepth)
+            {
+                if (correction.depth == nullptr || tag->type == sl::kBufferTypeDepth)
+                {
+                    correction.depth = resource;
+                    correction.depthState = (D3D12_RESOURCE_STATES) tag->resource->state;
+                }
+            }
+            else if (tag->type == sl::kBufferTypeHUDLessColor)
+                correction.color = resource;
+        }
+        correction.frame = g_glassLastFrame;
+        correction.scaleX = g_glassLastConstants.mvecScale.x;
+        correction.scaleY = g_glassLastConstants.mvecScale.y;
+        GlassFg::CorrectStreamlineFrame((ID3D12GraphicsCommandList*) cmdBuffer, (const void*) &feature, correction);
+    }
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
     {
@@ -1127,6 +1163,7 @@ sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const 
     LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
     g_glassLastConstants = values;
+    GlassMvecScale() = values.mvecScale;
     State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
 
     return o_slSetConstants(values, frame, viewport);

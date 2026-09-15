@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "PackedMotionCapture.h"
 #include "DxilVertexHistory.h"
 #include "CyberpunkDraws.h"
@@ -23,6 +23,21 @@ using Microsoft::WRL::ComPtr;
 constexpr unsigned FrameCount = 3, RecordingCount = 64, FgCommandCount = 4;
 constexpr unsigned MappingCapacity = 16384, ConstantCapacity = 4096;
 constexpr unsigned HistoryCapacity = 1u << 19;
+// The draw batch's frame field is a render-context tick that stays zero in some
+// configurations; a zero frame number made the capture reject every draw and the
+// frame generation side then had no candidate at all. Fall back to the engine
+// render frame the command observer tracks, which is the same counter the
+// correction uses, and finally to a private monotone counter.
+std::uint32_t resolvedDrawFrame(const GeometryDrawView& draw)
+{
+    if (draw.frame != 0)
+        return draw.frame;
+    static std::atomic<std::uint32_t> fallback { 0 };
+    const auto commands = GetGeometryCommandStats().lastFrame;
+    if (commands != 0)
+        return commands;
+    return fallback.fetch_add(1, std::memory_order_relaxed) + 1;
+}
 
 void checked(HRESULT value, const char* message)
 {
@@ -160,8 +175,27 @@ class Capture final : public GeometryDrawCaptureOwner
         if (!frame.number) return true;
         for (const auto& recording : frame.recordings)
             if (recording.command) return false;
+        // A frame whose draws were captured is the candidate the frame generation
+        // evaluation consumes. Recycling it as soon as the draw recordings were
+        // discarded left the FG side with no candidate at all
+        // (acquire_no_candidate with every slot empty). Hold it until the FG call
+        // consumes it, with a bounded margin so the pool cannot be pinned.
+        if (frame.producerValue && !frame.consumerCommand)
+        {
+            const auto newest = newestFrameNumber();
+            if (newest == 0 || frame.number + 4 >= newest)
+                return false;
+        }
         return !frame.consumerCommand && completed(producerFence.Get(), frame.producerValue) &&
                completed(consumerFence.Get(), frame.consumerValue);
+    }
+    std::uint32_t newestFrameNumber() const
+    {
+        std::uint32_t newest = 0;
+        for (const auto& value : frames)
+            if (value.number > newest)
+                newest = value.number;
+        return newest;
     }
     bool beginMappings(std::uint32_t number)
     {
@@ -344,6 +378,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             frame.mapping = buffer(device.Get(), UINT64(MappingCapacity) * sizeof(GeometryInstance),
                                    D3D12_HEAP_TYPE_UPLOAD);
             frame.constantBuffer = buffer(device.Get(), UINT64(ConstantCapacity) * 256, D3D12_HEAP_TYPE_UPLOAD);
+            // The compose reads this raster as a UAV on the frame generation
+            // queue while the capture writes it on the graphics queue. The
+            // simultaneous-access flag would legalise that overlap, but this
+            // driver rejects the flag for every combination
+            // (D3D12CreateDevice probe: E_INVALIDARG), so the overlap has to be
+            // removed by submitting the compose on the producer queue instead.
             frame.capture = buffer(device.Get(), pixels * 8, D3D12_HEAP_TYPE_DEFAULT,
                                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -365,7 +405,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     {
         std::unique_lock lock(mutex, std::try_to_lock);
         if (!lock) return false; // Counters share this lock too.
-        if (failed || !command || !draw.frame || !args.instances || args.instances > MappingCapacity ||
+        const auto frameNumber = resolvedDrawFrame(draw);
+        if (failed || !command || frameNumber == 0 || !args.instances || args.instances > MappingCapacity ||
             !pipeline || !pipeline->packed || !pipeline->root || !pipeline->root->extended)
         {
             if (pipeline && !pipeline->packed)
@@ -396,9 +437,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             ++counters.topologyRejected; ++counters.viewportRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
-        auto* frameSlot = frame(draw.frame);
+        auto* frameSlot = frame(frameNumber);
         if (!frameSlot) return false;
-        if (!beginMappings(draw.frame)) { ++counters.orderingRejected; return false; }
+        if (!beginMappings(frameNumber)) { ++counters.orderingRejected; return false; }
         if (frameSlot->mappingUsed > MappingCapacity - args.instances || frameSlot->constantsUsed == ConstantCapacity)
         {
             ++counters.mappingOverflow;
@@ -452,7 +493,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     ++counters.unknownIdentity; ++counters.unknownNoArrayGeneration;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
-                const auto allocation = objectMappings.acquire(key, shape.vertices, draw.frame);
+                const auto allocation = objectMappings.acquire(key, shape.vertices, frameNumber);
                 if (!allocation) { ++counters.historyOverflow; continue; }
                 auto& item = mapping[span.first + ordinal];
                 item.historyBase = allocation.history.base;
@@ -477,7 +518,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         const MaterialCaptureConstants constants {
             raster->viewport.TopLeftX, raster->viewport.TopLeftY,
             1.f / raster->viewport.Width, 1.f / raster->viewport.Height,
-            0, 0, draw.frame, reverse ? 1u : 0u,
+            0, 0, frameNumber, reverse ? 1u : 0u,
             0, 0, configuredWidth, configuredHeight,
             0, configuredWidth, configuredWidth * configuredHeight, 0
         };
@@ -485,19 +526,19 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         frameSlot->mappingUsed += args.instances;
         prepared.pipeline = pipeline->packed.Get();
         prepared.history = { mappingBase, MappingCapacity, HistoryCapacity, 0, args.instances, 0,
-                             draw.frame, draw.frame - 1 };
-        prepared.previous = history[(draw.frame - 1) & 1]->GetGPUVirtualAddress();
-        prepared.current = history[draw.frame & 1]->GetGPUVirtualAddress();
+                             frameNumber, frameNumber - 1 };
+        prepared.previous = history[(frameNumber - 1) & 1]->GetGPUVirtualAddress();
+        prepared.current = history[frameNumber & 1]->GetGPUVirtualAddress();
         prepared.material = frameSlot->constantBuffer->GetGPUVirtualAddress() + UINT64(constantIndex) * 256;
         prepared.capture = frameSlot->capture->GetGPUVirtualAddress();
         prepared.mapping = frameSlot->mapping->GetGPUVirtualAddress();
         // Crash attribution for the replay path. Sparse on purpose: one line per
         // few hundred frames keeps the log bounded while still proving that the
         // packed raster was drawn after the last load.
-        if (log && draw.frame != lastReplayFrame && draw.frame % 300 == 0)
+        if (log && frameNumber != lastReplayFrame && frameNumber % 300 == 0)
         {
-            lastReplayFrame = draw.frame;
-            std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", draw.frame, draw.chunk);
+            lastReplayFrame = frameNumber;
+            std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", frameNumber, draw.chunk);
             std::fflush(log);
         }
         return true;
@@ -685,7 +726,41 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 selected = &value;
             }
         if (!selected)
-        { ++counters.orderingRejected; ++counters.acquireNoCandidate; return {}; }
+        {
+            // Driver path: Streamline's frame generation block carries no engine
+            // frame number, so the ordered lookup above cannot match. Take the
+            // newest frame this queue already produced instead; the frames are
+            // held until a consumer takes them, so it is the frame under
+            // construction for this evaluation.
+            for (auto& value : frames)
+                if (value.producerValue && value.clearSubmitted && !value.consumerCommand &&
+                    (!value.orderedQueue || value.orderedQueue.Get() == fg->queue.Get()) &&
+                    (!selected || value.number > selected->number))
+                    selected = &value;
+        }
+        if (!selected)
+        {
+            ++counters.orderingRejected;
+            ++counters.acquireNoCandidate;
+            // Bounded attribution: which admission condition the candidate frames
+            // failed, so a silent rejection can be interpreted.
+            static std::atomic<unsigned> rejected { 0 };
+            if (log != nullptr && rejected.fetch_add(1, std::memory_order_relaxed) < 6)
+            {
+                std::fprintf(log, "PACKED_ACQUIRE reject fgFrame=%llu engineFrame=%llu fgSubmitBatch=%llu\n",
+                             static_cast<unsigned long long>(fgFrame),
+                             static_cast<unsigned long long>(framePair.engineFrame()),
+                             static_cast<unsigned long long>(fg->submitBatch));
+                for (const auto& value : frames)
+                    std::fprintf(log,
+                                 "PACKED_ACQUIRE frame number=%u producer=%llu clear=%u submitBatch=%llu ordered=%u\n",
+                                 value.number, static_cast<unsigned long long>(value.producerValue),
+                                 value.clearSubmitted ? 1u : 0u, static_cast<unsigned long long>(value.submitBatch),
+                                 value.orderedQueue ? 1u : 0u);
+                std::fflush(log);
+            }
+            return {};
+        }
         if (multiple)
             ++counters.acquireAmbiguous; // Informational: older eligible frames were present.
         if (selected->consumerCommand && selected->consumerCommand != command)

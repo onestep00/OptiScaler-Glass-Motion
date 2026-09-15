@@ -39,6 +39,13 @@ struct CyberpunkDrawStatus
     // transforms, or a range outside the owner's array.
     std::uint64_t parentNoSelectionGrouped = 0, parentNoSelectionNonGlobal = 0, parentNoSelectionRange = 0;
     std::uint64_t parentSeeded = 0;
+    // Grouped-array order probe: consecutive frames of the same array are
+    // compared by element bytes. "permuted" counts frames where every element
+    // byte pattern still exists in the packet but sits at a different ordinal,
+    // which is the condition that invalidates a packet-ordinal element key.
+    std::uint64_t arrayProbeGrouped = 0;
+    std::uint64_t arrayProbeCompared = 0, arrayProbePermuted = 0, arrayProbeChanged = 0;
+    std::uint64_t arrayProbeSameAddress = 0, arrayProbeDistinctAddress = 0;
 };
 CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept;
 } // namespace GlassFg

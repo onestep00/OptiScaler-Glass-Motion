@@ -206,9 +206,9 @@ void ReportGeometryHost(FILE* log) noexcept
         const auto identity = ReadGlassMotionIdentityStats();
         fprintf(log,
                 "GEOMETRY_IDENTITY resolved=%llu rejected=%llu no_owner=%llu no_view=%llu no_lifetime=%llu "
-                "no_element_index=%llu\n",
+                "no_element_index=%llu no_element_parent=%llu no_element_order=%llu\n",
                 identity.resolved, identity.rejected, identity.noOwner, identity.noView, identity.noLifetime,
-                identity.noElementIndex);
+                identity.noElementIndex, identity.noElementParent, identity.noElementOrder);
         fprintf(log,
                 "GEOMETRY_PARENT no_flag=%llu no_entry=%llu no_ticket=%llu no_slot=%llu no_mesh=%llu "
                 "no_header=%llu no_selection=%llu seeded=%llu\n",
@@ -219,6 +219,15 @@ void ReportGeometryHost(FILE* log) noexcept
                      static_cast<unsigned long long>(packets.parentNoSelectionGrouped),
                      static_cast<unsigned long long>(packets.parentNoSelectionNonGlobal),
                      static_cast<unsigned long long>(packets.parentNoSelectionRange));
+        std::fprintf(log,
+                     "GEOMETRY_ARRAY_ORDER grouped=%llu compared=%llu permuted=%llu changed=%llu "
+                     "same_address=%llu distinct_address=%llu\n",
+                     static_cast<unsigned long long>(packets.arrayProbeGrouped),
+                     static_cast<unsigned long long>(packets.arrayProbeCompared),
+                     static_cast<unsigned long long>(packets.arrayProbePermuted),
+                     static_cast<unsigned long long>(packets.arrayProbeChanged),
+                     static_cast<unsigned long long>(packets.arrayProbeSameAddress),
+                     static_cast<unsigned long long>(packets.arrayProbeDistinctAddress));
         fprintf(log, "GEOMETRY_CHUNKS unknown=");
         for (const auto& entry : packed.unknownChunks)
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));

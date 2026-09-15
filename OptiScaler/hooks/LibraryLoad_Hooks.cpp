@@ -5,6 +5,8 @@
 #include <DllNames.h>
 
 #include <framegen/dlssg/MfgUnlock.h>
+#include <framegen/glass/NativeHost.h>
+#include <framegen/glass/NvngxDlssgBridge.h>
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/Kernel32_Proxy.h>
@@ -71,6 +73,16 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 
     auto pos = libName.rfind(exePath);
 
+    // Glass: bounded record of the nvngx loads this hook sees, so a session that
+    // never reaches the correction can be told apart from one that never loads
+    // the frame generation library at all.
+    if (CheckDllNameW(&libName, &nvngxNamesW))
+    {
+        const bool glassRedirect = Config::Instance()->EnableDlssInputs.value_or_default() &&
+                                   (!Config::Instance()->HookOriginalNvngxOnly.value_or_default() || pos == std::string::npos);
+        GlassFg::NoteNvngxLoad(libName.c_str(), glassRedirect);
+    }
+
     if (Config::Instance()->EnableDlssInputs.value_or_default() && CheckDllNameW(&libName, &nvngxNamesW) &&
         (!Config::Instance()->HookOriginalNvngxOnly.value_or_default() || pos == std::string::npos))
     {
@@ -119,7 +131,18 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
         auto dlssgSnippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
 
         if (dlssgSnippet != nullptr)
+        {
             MfgUnlock::TryApply();
+            // The real module is handed back unchanged so the MFG unlocker can
+            // patch it. That also means every frame generation evaluation runs
+            // there instead of the NGX proxy, so the export is wrapped here: the
+            // wrapper forwards to the same evaluation and only adds the
+            // correction, which is inert while the correction is switched off.
+            if (GlassFg::InstallNgxEvaluateHook(dlssgSnippet))
+                GlassFg::NoteNvngxLoad(libName.c_str(), true);
+            else
+                GlassFg::NoteNvngxLoad(libName.c_str(), false);
+        }
         else
             LOG_ERROR("Trying to load dll as nvngx_dlssg: {}", libNameA);
 

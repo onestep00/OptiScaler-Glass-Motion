@@ -51,4 +51,24 @@ struct StreamlineFrame
 };
 bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* featureKey,
                             const StreamlineFrame& frame) noexcept;
+// Bounded observation of the feature ids the host's Streamline evaluate hook
+// sees, so the frame generation id of this engine build can be identified.
+void NoteStreamlineFeature(unsigned id) noexcept;
+// Bounded observation of the NGX evaluate calls the host proxy sees: feature id
+// and handle id, so the correction can match the real call.
+void NoteNgxFeature(unsigned feature, unsigned handleId, const char* provider) noexcept;
+// Bounded observation of the feature creations the proxy performs: feature id,
+// handle id and which route created it.
+void NoteNgxCreate(unsigned feature, unsigned handleId, const char* route) noexcept;
+// Bounded observation of nvngx library loads the loader hook sees, so a host
+// that never reaches the proxy can be told apart from one that never loads.
+void NoteNvngxLoad(const wchar_t* name, bool redirect) noexcept;
+// Bounded record of a failed NGX evaluate-hook installation: module and stage.
+void NoteHookStage(const wchar_t* name, unsigned stage) noexcept;
+// Process lifetime diagnostics: the module log records the attach, the detach
+// and the first unhandled exception, so a session that ends can be classified
+// as a clean exit, a crash or an external termination.
+void InstallProcessDiagnostics() noexcept;
+void NoteProcessAttach() noexcept;
+void NoteProcessDetach() noexcept;
 } // namespace GlassFg

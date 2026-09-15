@@ -6,6 +6,18 @@
 namespace GlassFg
 {
 std::shared_ptr<GeometryObjectRegistry> GetCyberpunkObjects() noexcept { return {}; }
+// This fixture owns no settings file, so the grouped-array switch is driven
+// directly. The array order probe stays off: it only measures live packets.
+namespace
+{
+std::atomic<bool> fixtureGroupedOrder { false };
+}
+Controls ReadControls()
+{
+    Controls value;
+    value.groupedOrder = fixtureGroupedOrder.load(std::memory_order_relaxed);
+    return value;
+}
 } // namespace GlassFg
 namespace
 {
@@ -220,6 +232,16 @@ void fixtureRun(void*, void*, void*)
     flush(false, 310);
     require(observed.size() == 1 && !observed[0].originalIndex(0, originalIndex),
             "Grouped packed order became original identity");
+    // With packet-order element identity enabled, a grouped span exposes the
+    // packet ordinal as the element position and nothing outside the span.
+    fixtureGroupedOrder.store(true, std::memory_order_relaxed);
+    storeInstance(0, 310, false, 2, true);
+    flush(false, 310);
+    require(observed.size() == 1 && observed[0].originalIndex(0, originalIndex) && originalIndex == 0 &&
+                observed[0].originalIndex(1, originalIndex) && originalIndex == 1 &&
+                !observed[0].originalIndex(2, originalIndex),
+            "Grouped packet order did not become the element key");
+    fixtureGroupedOrder.store(false, std::memory_order_relaxed);
     put(proxies[0].data(), 0xea, std::uint16_t(0));
     storeInstance(0, 310, false, 2, true);
     auto mutation = fixture->registry->beginArrayUpdate(proxy, 1);
@@ -289,7 +311,7 @@ int main()
         GlassFg::activeDrawState.store(fixture.get());
         GlassFg::run(nullptr, nullptr, nullptr);
         require(!GlassFg::currentBatch && fixture->occupied == 0 && !GlassFg::currentFlush, "Scope cleanup");
-        require(forwardedAppends == 25 && forwardedFlushes == 18, "Original operations were dropped or repeated");
+        require(forwardedAppends == 26 && forwardedFlushes == 19, "Original operations were dropped or repeated");
         GlassFg::GeometryDrawBatch batch;
         for (unsigned i = 0; i < 2049; ++i)
             batch.append(i, i + 1, { {}, 0, 1, i, false });
@@ -306,7 +328,7 @@ int main()
                "unknown_intervals_preserved=1 global_range=1 failed_upload_rejected=1 lifetime_reuse_rejected=1 "
                "mixed_frame_rejected=1 borrowed_view_scope=1 bounded_pool=1 original_calls_preserved=1 "
                "single_visible_cluster_rejected=1 array_parent_preserved=1 native_array_source=1 "
-               "array_mutation_gate=1 grouped_source_rejected=1 game_hooks_installed=0\n");
+               "array_mutation_gate=1 grouped_source_rejected=1 grouped_packet_order=1 game_hooks_installed=0\n");
         return 0;
     }
     catch (const std::exception& error)

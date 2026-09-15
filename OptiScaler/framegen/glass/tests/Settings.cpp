@@ -80,6 +80,21 @@ int wmain(int argc, wchar_t** argv)
         require(GlassFg::load(), "reload");
         current = GlassFg::ReadControls();
         require(current.enabled && current.strength == 37 && current.measureGpuTime, "round trip");
+        // The grouped-array order probe and the packet-order identity switch are
+        // separate diagnostics: a live session must be able to turn the probe on
+        // without changing which element key the correction uses.
+        require(!current.arrayProbe && current.groupedOrder, "array probe default");
+        {
+            auto probe = current;
+            probe.arrayProbe = true;
+            probe.groupedOrder = false;
+            require(GlassFg::save(probe), "save array probe");
+        }
+        require(GlassFg::load(), "reload array probe");
+        current = GlassFg::ReadControls();
+        require(current.arrayProbe && !current.groupedOrder, "array probe round trip");
+        require(GlassFg::save({ true, 37 }) && GlassFg::load(), "restore array probe");
+        require(!GlassFg::ReadControls().arrayProbe && GlassFg::ReadControls().groupedOrder, "array probe restored");
         CSimpleIniA ini;
         require(ini.LoadFile(path.c_str()) >= 0, "reread");
         require(std::string(ini.GetValue("Unrelated", "Keep", "")) == "preserved", "other section damaged");

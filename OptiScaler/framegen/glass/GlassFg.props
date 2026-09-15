@@ -47,6 +47,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassArrayMapping.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionGpu.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)PackedMotionPass.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)NvngxDlssgBridge.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)NvngxDlssgBridge.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)PackedMotionCapture.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassMotionIdentity.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassDebugControl.cpp" />

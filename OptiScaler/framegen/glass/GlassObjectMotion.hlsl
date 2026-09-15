@@ -59,8 +59,8 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
 
     float4 originalMotion = Motion[pixel];
     float originalDepth = Depth[pixel];
-    // Diagnostic bit 2: exercise the dispatch without reading the packed records.
-    // A stall that survives this proves the read is not the cause.
+    // Diagnostic bit 2: exercise the dispatch without reading the packed
+    // records. A stall that survives this proves the read is not the cause.
     if (DebugMode & 2u)
     {
         Motion[pixel] = originalMotion;

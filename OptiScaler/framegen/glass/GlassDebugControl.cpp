@@ -7,6 +7,7 @@
 #include "GlassPluginHost.h"
 #include "GlassArrayMapping.h"
 #include "GeometryPipeline.h"
+#include "CyberpunkDraws.h"
 #include <Util.h>
 #include <cstdio>
 #include <fstream>
@@ -48,7 +49,14 @@ void writeStatus(std::ofstream& file)
          << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute
          << " packed_compute=" << controls.packedCompute << " trace=" << controls.trace
          << " autostage=" << controls.autoStage << " writeback=" << controls.packedWriteBack
-         << " arraymap=" << controls.arrayMapping << " pipelines=" << controls.compilePipelines << "\n";
+         << " readskip=" << controls.packedSkipRead
+         << " arraymap=" << controls.arrayMapping << " pipelines=" << controls.compilePipelines
+         << " grouped=" << controls.groupedOrder << " arrayprobe=" << controls.arrayProbe << "\n";
+    const auto draws = GetCyberpunkDrawStatus();
+    file << "array_order grouped=" << draws.arrayProbeGrouped << " compared=" << draws.arrayProbeCompared
+         << " permuted=" << draws.arrayProbePermuted << " changed=" << draws.arrayProbeChanged
+         << " same_address=" << draws.arrayProbeSameAddress
+         << " distinct_address=" << draws.arrayProbeDistinctAddress << "\n";
     file << "packed initialized=" << packed.initialized << " healthy=" << packed.healthy
          << " admitted=" << packed.admittedDraws << " captured_frames=" << packed.capturedFrames
          << " fg_frames=" << packed.fgFrames << " missing_pipeline=" << packed.missingPipeline
@@ -63,6 +71,7 @@ void writeStatus(std::ofstream& file)
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected
          << " no_owner=" << identity.noOwner << " no_view=" << identity.noView
          << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex
+         << " no_element_parent=" << identity.noElementParent << " no_element_order=" << identity.noElementOrder
          << " no_view_state=" << identity.noViewState << " no_view_unknown=" << identity.noViewUnknown
          << " no_view_descriptor=" << identity.noViewDescriptor << "\n";
     file << "history hits=" << packed.historyHits << " inserted=" << packed.historyInserted
@@ -201,6 +210,8 @@ void PollGlassDebugControl() noexcept
                 value.strength = static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 9, nullptr, 10), 0ul, 100ul));
             else if (line.rfind("substitute=", 0) == 0)
                 value.packedSubstitute = line.substr(11) == "on";
+            else if (line.rfind("readskip=", 0) == 0)
+                value.packedSkipRead = line.substr(9) == "on";
             else if (line.rfind("trace=", 0) == 0)
                 value.trace = line.substr(6) == "on";
             else if (line.rfind("autostage=", 0) == 0)
@@ -215,6 +226,10 @@ void PollGlassDebugControl() noexcept
                 value.compilePipelines = line.substr(10) == "on";
             else if (line.rfind("enabled=", 0) == 0)
                 value.enabled = line.substr(8) == "on";
+            else if (line.rfind("grouped=", 0) == 0)
+                value.groupedOrder = line.substr(8) == "on";
+            else if (line.rfind("arrayprobe=", 0) == 0)
+                value.arrayProbe = line.substr(11) == "on";
             else
             {
                 output << "unknown=" << line << "\n";

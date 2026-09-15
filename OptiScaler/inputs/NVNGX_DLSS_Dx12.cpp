@@ -15,6 +15,7 @@
 
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/glass/NativeHost.h>
+#include <framegen/glass/NvngxDlssgBridge.h>
 #include "FG/FSR3_Dx12_FG.h"
 #include "FG/Upscaler_Inputs_Dx12.h"
 
@@ -773,6 +774,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsComma
         {
             LOG_INFO("Created modded DLSSG feature with HandleId: {}", (*OutHandle)->Id);
             HandleToFeature[(*OutHandle)->Id] = InFeatureID;
+            GlassFg::NoteNgxCreate(static_cast<unsigned>(InFeatureID), (*OutHandle)->Id, "replacement");
         }
 
         return res;
@@ -792,6 +794,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsComma
             {
                 LOG_INFO("Native CreateFeature success, HandleId: {}", (*OutHandle)->Id);
                 HandleToFeature[(*OutHandle)->Id] = InFeatureID;
+                GlassFg::NoteNgxCreate(static_cast<unsigned>(InFeatureID), (*OutHandle)->Id, "native");
                 if (res == NVSDK_NGX_Result_Success && InFeatureID == NVSDK_NGX_Feature_FrameGeneration)
                     GlassFg::CreatedNativeFG();
             }
@@ -811,7 +814,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsComma
     auto tryResult = TryCreateOptiFeature(InCmdList, InFeatureID, InParameters, OutHandle);
 
     if (tryResult == NVSDK_NGX_Result_Success)
+    {
         HandleToFeature[(*OutHandle)->Id] = InFeatureID;
+        GlassFg::NoteNgxCreate(static_cast<unsigned>(InFeatureID), (*OutHandle)->Id, "internal");
+    }
 
     return tryResult;
 }
@@ -1096,6 +1102,17 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
  * @brief Per-frame feature execution. Runs a feature (upscaler, framegen, etc.) on a given command list using a
  * preexisting feature instance referenced by a unique handle.
  */
+namespace
+{
+// Plain adapter so the glass correction receives a function pointer for the
+// DLSS-G replacement evaluation it wraps.
+NVSDK_NGX_Result GlassUpstreamDLSSG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
+                                    const NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback)
+{
+    return Nvngx_FG::D3D12_EvaluateFeature(command, handle, const_cast<NVSDK_NGX_Parameter*>(parameters), callback);
+}
+} // namespace
+
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InCmdList,
                                                                const NVSDK_NGX_Handle* InFeatureHandle,
                                                                NVSDK_NGX_Parameter* InParameters,
@@ -1120,6 +1137,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     const Config& cfg = *Config::Instance();
 
     auto feature = HandleToFeature[handleId];
+    // Glass: bounded record of every evaluate the proxy sees, so the frame
+    // generation call can be matched by its real feature and handle id.
+    auto* glassProvider = reinterpret_cast<IFGFeature_Dx12*>(State::Instance().currentFG);
+    GlassFg::NoteNgxFeature(static_cast<unsigned>(feature), handleId,
+                            glassProvider != nullptr ? glassProvider->Name() : nullptr);
     static size_t evalWithoutFG = 0;
     bool fgCreated = std::any_of(HandleToFeature.begin(), HandleToFeature.end(),
                                  [](const auto& pair) { return pair.second == NVSDK_NGX_Feature_FrameGeneration; });
@@ -1210,11 +1232,18 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
 
             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
 
-            NVSDK_NGX_Result result =
-                feature == NVSDK_NGX_Feature_FrameGeneration
-                    ? GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
-                                               NVNGXProxy::D3D12_EvaluateFeature())
-                    : NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
+            NVSDK_NGX_Result result {};
+            if (feature == NVSDK_NGX_Feature_FrameGeneration)
+            {
+                // The native module's evaluate export is wrapped by the glass
+                // bridge; without this marker the same call would be corrected
+                // twice (once here, once inside the wrapper).
+                GlassFg::NativeFgScope nativeScope;
+                result = GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
+                                                   NVNGXProxy::D3D12_EvaluateFeature());
+            }
+            else
+                result = NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
 
             // Neural Rendering runs over what the upscaler just wrote, on the same list, so frame
@@ -1240,6 +1269,12 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     if (State::Instance().activeFgNvngx != FGNvngxReplacement::None && handleId >= NVNGX_PROVIDER_ID_OFFSET)
     {
         LOG_DEBUG("Passthrough to DLSSG Replacement's EvaluateFeature for handle {}", handleId);
+        // Glass: this is the frame generation call that actually runs in this
+        // configuration. The correction runs through the same entry point the
+        // native path uses; every other feature stays untouched.
+        if (feature == NVSDK_NGX_Feature_FrameGeneration)
+            return GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
+                                             &GlassUpstreamDLSSG);
         return Nvngx_FG::D3D12_EvaluateFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
     }
 
@@ -1253,6 +1288,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     PreUpscaleNr preNr;
     preNr.run(InCmdList, InParameters, feature);
 
+    // Frame generation never reaches this branch: the engine's DLSS-G is either
+    // the native provider (handleId < DLSS_MOD_ID_OFFSET, handled above) or the
+    // DLSSG replacement (handleId >= NVNGX_PROVIDER_ID_OFFSET, handled above).
+    // Feature 13 in this SDK is RayReconstruction, so matching it here would
+    // pull every DLSS-RR evaluation into the correction.
     const NVSDK_NGX_Result optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
 
     // Same pass, for OptiScaler's own upscalers rather than native DLSS.
