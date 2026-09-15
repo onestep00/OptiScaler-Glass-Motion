@@ -57,4 +57,14 @@ inline HostTiming& ComposeTiming() noexcept
     static HostTiming value;
     return value;
 }
+// Inside the pre-submit hook: the command recording and the submission of the
+// deferred compose (allocator reset, list recording, ExecuteCommandLists,
+// Signal). The surrounding ComposeTiming also covers the producer hand-off, so
+// the difference between the two attributes a block to the driver submission
+// instead of to a descheduled render thread.
+inline HostTiming& ComposeQueueTiming() noexcept
+{
+    static HostTiming value;
+    return value;
+}
 } // namespace GlassFg

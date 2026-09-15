@@ -40,6 +40,14 @@ struct NativeHostStatus
     unsigned active = 0, retiring = 0, stopped = 0, unavailable = 0;
 };
 NativeHostStatus ReadNativeHostStatus() noexcept;
+// Periodic module log report for the host and the geometry stages. It formats
+// dozens of lines and flushes the log, so the host's background thread calls it
+// and the frame generation callback (engine render thread) never does.
+void ReportNativeHostLog() noexcept;
+// Precompiles the packed object-motion shader on a helper thread. The first
+// session creation happens inside the frame generation callback when the engine
+// rebuilds its lists (game regains focus), where the HLSL compile measured 153ms.
+void WarmPackedShaderOnce() noexcept;
 
 // Game-side Streamline handoff, independent of OptiScaler's own frame generation
 // setting. The host passes the motion/depth/hudless tags the engine submits for

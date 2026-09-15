@@ -239,20 +239,26 @@ static constexpr bool kDumpEngineInputs = true;
         code->AddRef();
         return code;
     }
-    // Compiles the compose shader and swaps the compute PSO. Safe to call again
-    // from the live debug channel; the old PSO stays until the new one exists.
-    bool compilePipeline(const wchar_t* shader, FILE* log)
+    // Shader source read shared by the pipeline build and the background warm-up.
+    static bool readShaderSource(const wchar_t* path, std::vector<char>& source)
     {
-        FILE* file = _wfopen(shader, L"rb");
+        FILE* file = _wfopen(path, L"rb");
         if (!file)
             return false;
         std::fseek(file, 0, SEEK_END);
         const auto size = std::ftell(file);
         std::rewind(file);
-        std::vector<char> source(size > 0 ? static_cast<size_t>(size) : 0);
+        source.assign(size > 0 ? static_cast<size_t>(size) : 0, 0);
         const bool read = size > 0 && std::fread(source.data(), 1, source.size(), file) == source.size();
         std::fclose(file);
-        if (!read)
+        return read;
+    }
+    // Compiles the compose shader and swaps the compute PSO. Safe to call again
+    // from the live debug channel; the old PSO stays until the new one exists.
+    bool compilePipeline(const wchar_t* shader, FILE* log)
+    {
+        std::vector<char> source;
+        if (!readShaderSource(shader, source))
             return false;
         ID3DBlob* code = sharedShaderCode(source, log);
         if (code == nullptr)
@@ -275,6 +281,31 @@ static constexpr bool kDumpEngineInputs = true;
     PackedMotionGpu() = default;
     PackedMotionGpu(const PackedMotionGpu&) = delete;
     PackedMotionGpu& operator=(const PackedMotionGpu&) = delete;
+
+    // Non-render-thread warm-up. The first frame generation session is created
+    // from inside the engine's frame generation callback, which runs on the
+    // render thread; the HLSL compile there measured 153ms (2026-09-16). The
+    // compiled code depends only on the source, so filling the process-wide
+    // cache from the host's background thread leaves only the pipeline state
+    // object for the session start.
+    static bool warmShaderCode(const wchar_t* shader, FILE* log) noexcept
+    {
+        try
+        {
+            std::vector<char> source;
+            if (!readShaderSource(shader, source))
+                return false;
+            ID3DBlob* code = sharedShaderCode(source, log);
+            if (code == nullptr)
+                return false;
+            code->Release();
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
 
     bool initialize(ID3D12Device* value, const D3D12_RESOURCE_DESC& motionDescription,
                     const D3D12_RESOURCE_DESC& depthDescription, const wchar_t* shader, FILE* log)

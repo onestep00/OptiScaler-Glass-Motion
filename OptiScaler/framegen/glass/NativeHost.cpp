@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <wrl/client.h>
 
 namespace GlassFg
@@ -85,6 +86,9 @@ struct Runtime
     FILE* log = nullptr;
     bool logAttempted = false, unavailable = false, stopped = false;
     uint64_t evaluations = 0, substitutions = 0, captures = 0;
+    // Last frame generation result, reported by the background log pass instead
+    // of by the callback that observes it.
+    unsigned lastResult = 0;
     // Per-generated-frame index split of the two counters above. Index 0 is the
     // real frame, 1..n are the generated ones; a missing substitution on any of
     // them means that frame kept the engine's original motion vectors.
@@ -419,11 +423,18 @@ D3D12Callbacks makeCallbacks()
                     bool queued = false;
                     if (waited && !selfWait && objectQueue != nullptr)
                     {
-                        queued = e.session.executePending(objectQueue);
+                        {
+                            // Driver submission of the compose: attributed
+                            // separately from the rest of the compose scope so a
+                            // block can be told apart from a descheduled thread.
+                            TimingScope queue(ComposeQueueTiming());
+                            queued = e.session.executePending(objectQueue);
+                            if (queued)
+                                if (auto* composeFence = e.session.composeFence())
+                                    q->Wait(composeFence, e.session.packedComposeSubmitted());
+                        }
                         if (queued)
                         {
-                            if (auto* composeFence = e.session.composeFence())
-                                q->Wait(composeFence, e.session.packedComposeSubmitted());
                             if (r.log && ReadControls().trace && TraceWanted())
                             {
                                 std::fprintf(r.log, "TRACE_WAIT_FENCE producer=%llu completed=%llu objectQueue=%p queue=%p\n",
@@ -441,7 +452,10 @@ D3D12Callbacks makeCallbacks()
                         // (this queue signals it later), and skipping the compose
                         // left the FG evaluating an input that was never written.
                         // Queue the compose in order instead.
-                        queued = e.session.executePending(q);
+                        {
+                            TimingScope queue(ComposeQueueTiming());
+                            queued = e.session.executePending(q);
+                        }
                         if (r.log && ReadControls().trace && TraceWanted())
                         {
                             std::fprintf(r.log,
@@ -456,6 +470,7 @@ D3D12Callbacks makeCallbacks()
                     // run here, with the cross-queue wait that implies.
                     if (!queued && waited && !selfWait)
                     {
+                        TimingScope queue(ComposeQueueTiming());
                         q->Wait(fence, value);
                         queued = e.session.executePending(q);
                     }
@@ -473,6 +488,10 @@ D3D12Callbacks makeCallbacks()
         auto& r = *static_cast<Runtime*>(p);
         InternalD3D12Scope ownSignals;
         NotifyGeometryCaptureSubmit(q, count, lists);
+        // One-time, off-thread: the packed object-motion HLSL compile measured
+        // 153ms when it ran inside the frame generation callback, which is the
+        // exact moment the engine rebuilds its lists (focus regain).
+        WarmPackedShaderOnce();
         r.each([&](Entry& e) { e.session.afterSubmit(q, count, lists); });
         // Crash forensics: the marker describes the GPU state, not the CPU
         // submission window, so it is cleared only once the deferred compose of
@@ -1122,6 +1141,79 @@ NativeHostStatus ReadNativeHostStatus() noexcept
     return status;
 }
 
+void ReportNativeHostLog() noexcept
+{
+    try
+    {
+        // Snapshot under the runtime lock, format outside it: the render thread
+        // must never wait for the log. The old call site held the lock across the
+        // whole report, which is why a busy file system stalled the render thread.
+        const auto status = ReadNativeHostStatus();
+        auto& r = runtime();
+        unsigned lastResult = 0;
+        FILE* log = nullptr;
+        {
+            std::lock_guard lock(r.mutex);
+            lastResult = r.lastResult;
+            log = r.log;
+        }
+        if (log == nullptr)
+            return;
+        std::fprintf(log, "NATIVE_HOST evaluations=%llu substitutions=%llu captures=%llu result=%x\n",
+                     static_cast<unsigned long long>(status.evaluations),
+                     static_cast<unsigned long long>(status.substitutions),
+                     static_cast<unsigned long long>(status.captures), lastResult);
+        std::fprintf(log, "NATIVE_HOST_BY_INDEX");
+        for (unsigned i = 0; i < 8; ++i)
+            if (status.evaluationsByIndex[i] != 0)
+                std::fprintf(log, " %u:%llu/%llu", i,
+                             static_cast<unsigned long long>(status.substitutionsByIndex[i]),
+                             static_cast<unsigned long long>(status.evaluationsByIndex[i]));
+        std::fprintf(log, " (substituted/evaluated) skipped_reused=%llu skipped_uncorrected=%llu\n",
+                     static_cast<unsigned long long>(status.unsubstitutedReusedMotion),
+                     static_cast<unsigned long long>(status.unsubstitutedFreshMotion));
+        ReportGeometryHost(log);
+        std::fflush(log);
+    }
+    catch (...)
+    {
+    }
+}
+
+void WarmPackedShaderOnce() noexcept
+{
+    try
+    {
+        static std::once_flag once;
+        std::call_once(once, []
+        {
+            std::thread([] {
+                try
+                {
+                    auto& r = runtime();
+                    FILE* log = nullptr;
+                    {
+                        std::lock_guard lock(r.mutex);
+                        log = r.log;
+                    }
+                    const bool warmed = PackedMotionGpu::warmShaderCode(packedShaderPath().c_str(), log);
+                    if (warmed && log != nullptr)
+                    {
+                        std::fprintf(log, "OBJECT_SHADER warmed=1\n");
+                        std::fflush(log);
+                    }
+                }
+                catch (...)
+                {
+                }
+            }).detach();
+        });
+    }
+    catch (...)
+    {
+    }
+}
+
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                   NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
                                   NativeEvaluate original)
@@ -1384,6 +1476,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         std::lock_guard lock(r.mutex);
         --entry->evaluations;
         ++r.evaluations;
+        r.lastResult = static_cast<unsigned>(result);
         r.substitutions += applied;
         if (applied && inputs.index < 8)
             ++r.substitutionsByIndex[inputs.index];
@@ -1428,22 +1521,10 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         PublishLiveStatus(LiveStatusComposeInFlight, r.anyComposeInFlight() ? 1u : 0u);
         PublishLiveStatus(LiveStatusUnavailable, r.unavailable ? 1u : 0u);
         PublishLiveStatus(LiveStatusRetiring, (r.retiring[0] ? 1u : 0u) + (r.retiring[1] ? 1u : 0u));
-        if (r.log && (r.evaluations <= 3 || r.evaluations % 300 == 0))
-        {
-            std::fprintf(r.log, "NATIVE_HOST evaluations=%llu substitutions=%llu captures=%llu result=%x\n",
-                         r.evaluations, r.substitutions, r.captures, static_cast<unsigned>(result));
-            std::fprintf(r.log, "NATIVE_HOST_BY_INDEX");
-            for (unsigned i = 0; i < 8; ++i)
-                if (r.evaluationsByIndex[i] != 0)
-                    std::fprintf(r.log, " %u:%llu/%llu", i,
-                                 static_cast<unsigned long long>(r.substitutionsByIndex[i]),
-                                 static_cast<unsigned long long>(r.evaluationsByIndex[i]));
-            std::fprintf(r.log, " (substituted/evaluated) skipped_reused=%llu skipped_uncorrected=%llu\n",
-                         static_cast<unsigned long long>(r.unsubstitutedReusedMotion),
-                         static_cast<unsigned long long>(r.unsubstitutedFreshMotion));
-            ReportGeometryHost(r.log);
-            std::fflush(r.log);
-        }
+        // The periodic report is formatted by the host's background thread
+        // (ReportNativeHostLog). It used to run here, inside the frame generation
+        // callback, which is the engine's render thread: ~30 formatted lines plus
+        // a flush while holding the runtime mutex.
         r.reap();
     }
     return result;

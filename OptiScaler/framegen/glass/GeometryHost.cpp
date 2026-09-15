@@ -104,10 +104,20 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 // evaluate DLSS-G. One 1 Hz thread keeps the tick alive; the
                 // existing frame hooks stay the primary source.
                 std::thread([] {
+                    std::uint64_t reportedMs = 0;
                     for (;;)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                         RefreshGeometryHealthIfNeeded(GetTickCount64());
+                        // The module report formats ~30 lines and flushes the
+                        // log. It used to run inside the frame generation
+                        // callback, which is the engine's render thread.
+                        const auto now = GetTickCount64();
+                        if (now - reportedMs >= 2000)
+                        {
+                            reportedMs = now;
+                            ReportNativeHostLog();
+                        }
                     }
                 }).detach();
                 if (FILE* log = _wfopen((directory / L"OptiScaler.Glass.Geometry.log").c_str(), L"a"))
@@ -312,18 +322,24 @@ void ReportGeometryHost(FILE* log) noexcept
                         auto& submission = SubmissionTiming();
                         auto& capture = CaptureTiming();
                         auto& compose = ComposeTiming();
+                        auto& composeQueue = ComposeQueueTiming();
                         std::fprintf(log,
                                      "GLASS_TIMING evaluate_n=%llu evaluate_ms=%.3f evaluate_max_ms=%.3f "
-                                     "capture_n=%llu capture_max_ms=%.3f compose_n=%llu compose_max_ms=%.3f "
-                                     "submit_n=%llu submit_max_ms=%.3f\n",
+                                     "capture_n=%llu capture_ms=%.3f capture_max_ms=%.3f "
+                                     "compose_n=%llu compose_ms=%.3f compose_max_ms=%.3f "
+                                     "composeq_n=%llu composeq_ms=%.3f composeq_max_ms=%.3f "
+                                     "submit_n=%llu submit_ms=%.3f submit_max_ms=%.3f\n",
                                      countOf(evaluation), averageMs(evaluation), maximumMs(evaluation),
-                                     countOf(capture), maximumMs(capture), countOf(compose), maximumMs(compose),
-                                     countOf(submission), maximumMs(submission));
+                                     countOf(capture), averageMs(capture), maximumMs(capture), countOf(compose),
+                                     averageMs(compose), maximumMs(compose), countOf(composeQueue),
+                                     averageMs(composeQueue), maximumMs(composeQueue), countOf(submission),
+                                     averageMs(submission), maximumMs(submission));
                         std::fflush(log);
                         evaluation.reset();
                         submission.reset();
                         capture.reset();
                         compose.reset();
+                        composeQueue.reset();
                     }
                 }
                 presentCount.store(lastPresent, std::memory_order_relaxed);
