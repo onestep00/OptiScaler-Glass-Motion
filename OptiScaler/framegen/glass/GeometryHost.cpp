@@ -221,11 +221,16 @@ void ReportGeometryHost(FILE* log) noexcept
                      static_cast<unsigned long long>(packets.parentNoSelectionRange));
         std::fprintf(log,
                      "GEOMETRY_ARRAY_ORDER grouped=%llu compared=%llu permuted=%llu changed=%llu "
+                     "local=%llu local_compared=%llu local_permuted=%llu local_changed=%llu "
                      "same_address=%llu distinct_address=%llu\n",
                      static_cast<unsigned long long>(packets.arrayProbeGrouped),
                      static_cast<unsigned long long>(packets.arrayProbeCompared),
                      static_cast<unsigned long long>(packets.arrayProbePermuted),
                      static_cast<unsigned long long>(packets.arrayProbeChanged),
+                     static_cast<unsigned long long>(packets.arrayProbeLocal),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalCompared),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalPermuted),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalChanged),
                      static_cast<unsigned long long>(packets.arrayProbeSameAddress),
                      static_cast<unsigned long long>(packets.arrayProbeDistinctAddress));
         fprintf(log, "GEOMETRY_CHUNKS unknown=");

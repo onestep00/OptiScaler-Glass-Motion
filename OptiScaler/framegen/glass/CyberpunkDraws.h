@@ -45,6 +45,10 @@ struct CyberpunkDrawStatus
     // which is the condition that invalidates a packet-ordinal element key.
     std::uint64_t arrayProbeGrouped = 0;
     std::uint64_t arrayProbeCompared = 0, arrayProbePermuted = 0, arrayProbeChanged = 0;
+    // Same measurement for the packet-local instanced selection (particles and
+    // other instanced transparency) that kind 3/4 spans come from.
+    std::uint64_t arrayProbeLocal = 0;
+    std::uint64_t arrayProbeLocalCompared = 0, arrayProbeLocalPermuted = 0, arrayProbeLocalChanged = 0;
     std::uint64_t arrayProbeSameAddress = 0, arrayProbeDistinctAddress = 0;
 };
 CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept;

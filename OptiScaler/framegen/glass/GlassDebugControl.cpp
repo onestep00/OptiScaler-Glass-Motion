@@ -51,10 +51,13 @@ void writeStatus(std::ofstream& file)
          << " autostage=" << controls.autoStage << " writeback=" << controls.packedWriteBack
          << " readskip=" << controls.packedSkipRead
          << " arraymap=" << controls.arrayMapping << " pipelines=" << controls.compilePipelines
-         << " grouped=" << controls.groupedOrder << " arrayprobe=" << controls.arrayProbe << "\n";
+         << " grouped=" << controls.groupedOrder << " arrayprobe=" << controls.arrayProbe
+         << " packetlocal=" << controls.packetLocalOrder << "\n";
     const auto draws = GetCyberpunkDrawStatus();
     file << "array_order grouped=" << draws.arrayProbeGrouped << " compared=" << draws.arrayProbeCompared
          << " permuted=" << draws.arrayProbePermuted << " changed=" << draws.arrayProbeChanged
+         << " | local=" << draws.arrayProbeLocal << " local_compared=" << draws.arrayProbeLocalCompared
+         << " local_permuted=" << draws.arrayProbeLocalPermuted << " local_changed=" << draws.arrayProbeLocalChanged
          << " same_address=" << draws.arrayProbeSameAddress
          << " distinct_address=" << draws.arrayProbeDistinctAddress << "\n";
     file << "packed initialized=" << packed.initialized << " healthy=" << packed.healthy
@@ -232,6 +235,8 @@ void PollGlassDebugControl() noexcept
                 value.groupedOrder = line.substr(8) == "on";
             else if (line.rfind("arrayprobe=", 0) == 0)
                 value.arrayProbe = line.substr(11) == "on";
+            else if (line.rfind("packetlocal=", 0) == 0)
+                value.packetLocalOrder = line.substr(12) == "on";
             else
             {
                 output << "unknown=" << line << "\n";

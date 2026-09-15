@@ -51,6 +51,12 @@ struct Controls
     // in a changed position is a permutation, which is the condition under
     // which a packet ordinal stops being the element's previous-frame key.
     bool arrayProbe = false;
+    // Packet-local instanced packets (the engine's non-global selection path,
+    // used by particles and other instanced transparency) expose no source
+    // index either. When enabled, the packet ordinal is used as the element
+    // key guarded by the array's observed lifetime generation. Off by default:
+    // the order probe has to show that the packet order is stable first.
+    bool packetLocalOrder = false;
 
     bool active() const { return enabled && strength > 0; }
     float coverage() const { return std::min(strength, 100u) / 100.f; }
@@ -67,7 +73,8 @@ struct Controls
                (packedSkipRead ? (std::uint64_t(1) << 36) : 0u) |
                (compilePipelines ? (std::uint64_t(1) << 37) : 0u) |
                (groupedOrder ? (std::uint64_t(1) << 38) : 0u) |
-               (arrayProbe ? (std::uint64_t(1) << 39) : 0u);
+               (arrayProbe ? (std::uint64_t(1) << 39) : 0u) |
+               (packetLocalOrder ? (std::uint64_t(1) << 40) : 0u);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -78,7 +85,8 @@ struct Controls
                  (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
                  (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 36)) != 0,
                  (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0,
-                 (value & (std::uint64_t(1) << 38)) != 0, (value & (std::uint64_t(1) << 39)) != 0 };
+                 (value & (std::uint64_t(1) << 38)) != 0, (value & (std::uint64_t(1) << 39)) != 0,
+                 (value & (std::uint64_t(1) << 40)) != 0 };
     }
 };
 

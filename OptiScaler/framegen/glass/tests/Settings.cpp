@@ -93,8 +93,17 @@ int wmain(int argc, wchar_t** argv)
         require(GlassFg::load(), "reload array probe");
         current = GlassFg::ReadControls();
         require(current.arrayProbe && !current.groupedOrder, "array probe round trip");
+        require(!current.packetLocalOrder, "packet-local order default");
+        {
+            auto local = current;
+            local.packetLocalOrder = true;
+            require(GlassFg::save(local), "save packet-local order");
+        }
+        require(GlassFg::load() && GlassFg::ReadControls().packetLocalOrder, "packet-local order round trip");
         require(GlassFg::save({ true, 37 }) && GlassFg::load(), "restore array probe");
-        require(!GlassFg::ReadControls().arrayProbe && GlassFg::ReadControls().groupedOrder, "array probe restored");
+        require(!GlassFg::ReadControls().arrayProbe && GlassFg::ReadControls().groupedOrder &&
+                    !GlassFg::ReadControls().packetLocalOrder,
+                "array probe restored");
         CSimpleIniA ini;
         require(ini.LoadFile(path.c_str()) >= 0, "reread");
         require(std::string(ini.GetValue("Unrelated", "Keep", "")) == "preserved", "other section damaged");

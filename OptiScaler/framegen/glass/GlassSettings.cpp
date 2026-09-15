@@ -51,7 +51,8 @@ bool load()
                               ini.GetBoolValue("GlassFG", "ArrayMapping", false),
                               ini.GetBoolValue("GlassFG", "CompilePipelines", true),
                               ini.GetBoolValue("GlassFG", "GroupedOrder", true),
-                              ini.GetBoolValue("GlassFG", "ArrayProbe", false) }
+                              ini.GetBoolValue("GlassFG", "ArrayProbe", false),
+                              ini.GetBoolValue("GlassFG", "PacketLocalOrder", false) }
                        .packed(),
                    std::memory_order_relaxed);
     SetGeometryPipelineCompilation(Controls::unpack(controls.load(std::memory_order_relaxed)).compilePipelines);
@@ -82,6 +83,7 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "CompilePipelines", value.compilePipelines);
     ini.SetBoolValue("GlassFG", "GroupedOrder", value.groupedOrder);
     ini.SetBoolValue("GlassFG", "ArrayProbe", value.arrayProbe);
+    ini.SetBoolValue("GlassFG", "PacketLocalOrder", value.packetLocalOrder);
     auto temporary = path;
     temporary += L".tmp";
     if (ini.SaveFile(temporary.c_str()) < 0)
@@ -215,6 +217,14 @@ void RenderSettings()
                           "them with the previous frame for the same array. If the element set is\n"
                           "unchanged while the positions move, the packet ordinal is not a stable\n"
                           "element identity and the counter reports it.");
+    bool packetLocalOrder = value.packetLocalOrder;
+    changed |= ImGui::Checkbox("Packet-local instanced elements: ordinal identity", &packetLocalOrder);
+    value.packetLocalOrder = packetLocalOrder;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Particles and other instanced transparency use the engine's packet-local\n"
+                          "selection, which exposes no source index. Enabling this keys those elements\n"
+                          "by packet ordinal and the observed lifetime generation. Turn it on only\n"
+                          "after the order probe reports no permutation for that family.");
     if (changed)
         WriteControls(value);
     const auto milliseconds = latestMilliseconds.load(std::memory_order_relaxed);

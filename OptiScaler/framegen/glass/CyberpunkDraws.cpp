@@ -48,6 +48,8 @@ struct EngineDrawState
     std::atomic<std::uint64_t> arrayProbeCompared = 0, arrayProbePermuted = 0, arrayProbeChanged = 0;
     std::atomic<std::uint64_t> arrayProbeSameAddress = 0, arrayProbeDistinctAddress = 0;
     std::atomic<std::uint64_t> arrayProbeGrouped = 0;
+    std::atomic<std::uint64_t> arrayProbeLocal = 0, arrayProbeLocalCompared = 0, arrayProbeLocalPermuted = 0,
+                             arrayProbeLocalChanged = 0;
 };
 std::atomic<EngineDrawState*> activeDrawState = nullptr;
 thread_local Batch* currentBatch = nullptr;
@@ -154,11 +156,15 @@ bool arrayElementHash(std::uint64_t address, std::uint64_t& hash) noexcept
 void probeArrayOrder(EngineDrawState& state, const GeometryBatchSpan& record, std::uint64_t destination,
                      std::uint64_t container) noexcept
 {
-    if (!ReadControls().arrayProbe || record.orderKind != 2)
+    if (!ReadControls().arrayProbe)
+        return;
+    const bool grouped = record.orderKind == 2;
+    const bool local = record.orderKind == 3 || record.orderKind == 4;
+    if (!grouped && !local)
         return;
     (destination == container ? state.arrayProbeSameAddress : state.arrayProbeDistinctAddress)
         .fetch_add(1, std::memory_order_relaxed);
-    state.arrayProbeGrouped.fetch_add(1, std::memory_order_relaxed);
+    (grouped ? state.arrayProbeGrouped : state.arrayProbeLocal).fetch_add(1, std::memory_order_relaxed);
     if (!record.parent || record.count < 2 || record.count > kArrayProbeElements)
         return;
     const auto frame = state.tick ? *state.tick : 0;
@@ -205,12 +211,15 @@ void probeArrayOrder(EngineDrawState& state, const GeometryBatchSpan& record, st
         }
         if (sameSet)
         {
-            state.arrayProbeCompared.fetch_add(1, std::memory_order_relaxed);
+            (grouped ? state.arrayProbeCompared : state.arrayProbeLocalCompared)
+                .fetch_add(1, std::memory_order_relaxed);
             if (!sameOrder)
-                state.arrayProbePermuted.fetch_add(1, std::memory_order_relaxed);
+                (grouped ? state.arrayProbePermuted : state.arrayProbeLocalPermuted)
+                    .fetch_add(1, std::memory_order_relaxed);
         }
         else
-            state.arrayProbeChanged.fetch_add(1, std::memory_order_relaxed);
+            (grouped ? state.arrayProbeChanged : state.arrayProbeLocalChanged)
+                .fetch_add(1, std::memory_order_relaxed);
     }
     slot->proxy = record.parent.proxy;
     slot->generation = record.parent.generation;
@@ -407,7 +416,21 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                                     record.originalFirst = 0;
                                 }
                                 break;
-                            case 2: ++state->parentNoSelectionNonGlobal; break;
+                            case 2:
+                                ++state->parentNoSelectionNonGlobal;
+                                // Packet-local instanced selection: particles and
+                                // other instanced transparency. The engine keeps
+                                // the element bytes in the packet itself and
+                                // exposes no source index. Kind 3 marks the span
+                                // as a probe target; kind 4 authorizes the packet
+                                // ordinal once the order probe has shown it is
+                                // stable for this family.
+                                if (record.count > 1)
+                                {
+                                    record.orderKind = ReadControls().packetLocalOrder ? 4 : 3;
+                                    record.originalFirst = 0;
+                                }
+                                break;
                             default: ++state->parentNoSelectionRange; break;
                             }
                         }
@@ -680,6 +703,10 @@ CyberpunkDrawStatus GetCyberpunkDrawStatus() noexcept
     value.arrayProbeSameAddress = state->arrayProbeSameAddress.load();
     value.arrayProbeDistinctAddress = state->arrayProbeDistinctAddress.load();
     value.arrayProbeGrouped = state->arrayProbeGrouped.load();
+    value.arrayProbeLocal = state->arrayProbeLocal.load();
+    value.arrayProbeLocalCompared = state->arrayProbeLocalCompared.load();
+    value.arrayProbeLocalPermuted = state->arrayProbeLocalPermuted.load();
+    value.arrayProbeLocalChanged = state->arrayProbeLocalChanged.load();
     return value;
 }
 std::uint32_t ReadCyberpunkDrawFrame() noexcept

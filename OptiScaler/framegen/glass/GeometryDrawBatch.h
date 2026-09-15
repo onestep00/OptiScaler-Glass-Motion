@@ -21,7 +21,9 @@ struct GeometryBatchSpan
     // 0 = no order, 1 = engine-verified source order, 2 = grouped array whose
     // element order is taken from the packet ordinal (the grouped update path
     // repacks source elements into group order, so the ordinal is only used
-    // together with the array's observed lifetime generation).
+    // together with the array's observed lifetime generation), 3 = packet-local
+    // selection observed but not authorized (probe target), 4 = packet-local
+    // selection whose ordinal is used with the observed lifetime generation.
     std::uint8_t orderKind = 0;
     std::uint16_t originalFirst = 0;
     // Packet owner provenance. An array parent is never a child-history key.
@@ -29,7 +31,7 @@ struct GeometryBatchSpan
     bool originalIndex(std::uint32_t ordinal, std::uint32_t& result) const
     {
         result = UINT32_MAX;
-        if (!parent || orderKind == 0 || ordinal >= count ||
+        if (!parent || orderKind == 0 || orderKind == 3 || ordinal >= count ||
             ordinal > std::uint32_t(UINT16_MAX) - originalFirst)
             return false;
         result = originalFirst + ordinal; return true;
