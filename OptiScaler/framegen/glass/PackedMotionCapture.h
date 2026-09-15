@@ -68,6 +68,10 @@ struct PackedMotionCaptureStatus
     std::uint64_t historyRejectedTopology = 0, historySetFull = 0, historyArenaFull = 0;
     // Allocations that failed first and succeeded after the bounded reclaim pass.
     std::uint64_t historyArenaReclaimed = 0;
+    // Distinct page counts the arena could not serve (largest first is not
+    // guaranteed; the values identify one huge mesh versus plain exhaustion).
+    std::array<std::uint32_t, 4> historyArenaFullPages {};
+    unsigned historyArenaFullPageCount = 0;
     unsigned historyLive = 0;
 };
 

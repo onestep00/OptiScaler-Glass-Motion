@@ -255,6 +255,10 @@ void ReportGeometryHost(FILE* log) noexcept
                      static_cast<unsigned long long>(packed.historySetFull),
                      static_cast<unsigned long long>(packed.historyArenaFull),
                      static_cast<unsigned long long>(packed.historyArenaReclaimed), packed.historyLive);
+        std::fprintf(log, "GEOMETRY_ARENA_FULL sizes=");
+        for (unsigned i = 0; i < packed.historyArenaFullPageCount; ++i)
+            std::fprintf(log, "%s%u", i ? "," : "", packed.historyArenaFullPages[i]);
+        std::fprintf(log, "\n");
     }
     catch (...)
     {

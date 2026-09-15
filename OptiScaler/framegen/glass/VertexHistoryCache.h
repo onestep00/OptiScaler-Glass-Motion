@@ -138,6 +138,10 @@ class VertexHistoryCache
         std::uint64_t rejectedFrame = 0, rejectedTopology = 0, setFull = 0, arenaFull = 0, serialExhausted = 0;
         // A failed allocation that succeeded after the bounded reclaim pass.
         std::uint64_t arenaReclaimed = 0;
+        // Distinct page counts of the requests the arena could not serve. A
+        // large value means one big mesh, many equal values mean exhaustion.
+        std::array<std::uint32_t, 4> arenaFullPages {};
+        unsigned arenaFullPageCount = 0;
         unsigned lastSweepInspections = 0, maxLookupInspections = 0;
     } stats;
 
@@ -216,6 +220,11 @@ class VertexHistoryCache
             if (base == UINT32_MAX)
             {
                 ++stats.arenaFull;
+                bool known = false;
+                for (unsigned i = 0; i < stats.arenaFullPageCount; ++i)
+                    known |= stats.arenaFullPages[i] == pages;
+                if (!known && stats.arenaFullPageCount < stats.arenaFullPages.size())
+                    stats.arenaFullPages[stats.arenaFullPageCount++] = pages;
                 return {};
             }
             ++stats.arenaReclaimed;

@@ -22,7 +22,11 @@ namespace
 using Microsoft::WRL::ComPtr;
 constexpr unsigned FrameCount = 3, RecordingCount = 64, FgCommandCount = 4;
 constexpr unsigned MappingCapacity = 16384, ConstantCapacity = 4096;
-constexpr unsigned HistoryCapacity = 1u << 19;
+// Vertex-history arena. 4096 pages x 128 vertices was regularly exhausted in
+// live scenes (a single large mesh asks for a contiguous power-of-two block),
+// so the arena is twice that. The GPU cost is 2 x HistoryCapacity x 32 bytes
+// (64 MB total) and the backing store is a power-of-two buddy allocator.
+constexpr unsigned HistoryCapacity = 1u << 20;
 // The draw batch's frame field is a render-context tick that stays zero in some
 // configurations; a zero frame number made the capture reject every draw and the
 // frame generation side then had no candidate at all. Fall back to the engine
@@ -125,7 +129,7 @@ class Capture final : public GeometryDrawCaptureOwner
     ComPtr<ID3D12CommandQueue> historyQueue;
     ComPtr<ID3D12Fence> producerFence, consumerFence;
     std::array<Frame, FrameCount> frames;
-    PackedMotionMappings<> objectMappings;
+    PackedMotionMappings<4096, 4, 8192, 128> objectMappings;
     PackedMotionIdentityProvider identitySource;
     std::array<FgCommand, FgCommandCount> fgCommands;
     std::array<ObservedSignal, 256> observedSignals {};
@@ -795,6 +799,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         value.historySetFull = history.setFull;
         value.historyArenaFull = history.arenaFull;
         value.historyArenaReclaimed = history.arenaReclaimed;
+        value.historyArenaFullPages = history.arenaFullPages;
+        value.historyArenaFullPageCount = history.arenaFullPageCount;
         value.historyLive = objectMappings.liveHistories();
         return value;
     }
