@@ -683,7 +683,15 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     }
     if (r.unavailable)
         return {};
-    if (!InstallD3D12Observer(command, makeCallbacks()))
+    // Session creation runs on the engine's render thread when the frame
+    // generation lists are rebuilt, which is the focus-regain path. The three
+    // phases are timed apart so a remaining hitch can be attributed instead of
+    // guessed: observer install, packed capture construction, session GPU state.
+    const auto observerStart = std::chrono::steady_clock::now();
+    const bool observerInstalled = InstallD3D12Observer(command, makeCallbacks());
+    const auto observerMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - observerStart).count();
+    if (!observerInstalled)
     {
         r.unavailable = true;
         std::fprintf(r.log, "NATIVE_HOST ready=0 reason=observer_coverage\n");
@@ -704,7 +712,12 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         return {};
     const auto width = static_cast<std::uint32_t>(entry->descriptions[0].Width);
     const auto height = entry->descriptions[0].Height;
-    if (!InitializePackedMotionCapture(device.Get(), width, height, r.log, MakeGlassMotionIdentityProvider()))
+    const auto captureStart = std::chrono::steady_clock::now();
+    const bool captureReady =
+        InitializePackedMotionCapture(device.Get(), width, height, r.log, MakeGlassMotionIdentityProvider());
+    const auto captureMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - captureStart).count();
+    if (!captureReady)
     {
         // A different extent means the frame-generation inputs were rebuilt at
         // a new size (resolution or DLSS quality change). The capture is sized
@@ -728,6 +741,7 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         return {};
     }
     const auto shaders = Util::DllPath().parent_path() / L"Glass";
+    const auto sessionStart = std::chrono::steady_clock::now();
     if (!entry->session.initializePacked(device.Get(), entry->descriptions,
                                          (shaders / L"GlassObjectMotion.hlsl").c_str(), r.log,
                                          { AcquirePackedMotionFrame, DiscardPackedMotionRecording }))
@@ -735,6 +749,8 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         r.unavailable = true;
         return {};
     }
+    const auto sessionMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sessionStart).count();
     const auto mask = ObservedComputeMethods();
     if (!entry->session.bindFgCommand(command, mask, mask))
     {
@@ -744,8 +760,11 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     }
     r.active = entry;
     r.activeCommand.store(command, std::memory_order_release);
-    std::fprintf(r.log, "NATIVE_HOST ready=1 handle=%p command=%p methods=%x width=%llu height=%u\n", handle, command,
-                 mask, entry->descriptions[0].Width, entry->descriptions[0].Height);
+    std::fprintf(r.log,
+                 "NATIVE_HOST ready=1 handle=%p command=%p methods=%x width=%llu height=%u observer_ms=%.1f "
+                 "capture_ms=%.1f session_ms=%.1f\n",
+                 handle, command, mask, entry->descriptions[0].Width, entry->descriptions[0].Height, observerMs,
+                 captureMs, sessionMs);
     std::fflush(r.log);
     return entry;
 }
