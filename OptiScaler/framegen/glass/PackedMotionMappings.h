@@ -76,6 +76,9 @@ class PackedMotionMappings
     }
     std::uint32_t frame() const { return current; }
     unsigned reservedVertices() const { return histories.reservedVertices(); }
+    unsigned arenaPages() const { return histories.capacityPages(); }
+    unsigned arenaUsedPages() const { return histories.usedPageCount(); }
+    unsigned arenaLargestFreePages() const { return histories.largestFreePages(); }
     // N-1 stability evidence: inserted grows when the element key changes
     // between frames, hits grows when the same key reuses its history.
     const typename VertexHistoryCache<Sets, Ways, Pages, PageVertices>::Stats& historyStats() const

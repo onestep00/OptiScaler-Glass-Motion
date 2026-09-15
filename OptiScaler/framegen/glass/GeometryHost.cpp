@@ -272,17 +272,35 @@ void ReportGeometryHost(FILE* log) noexcept
         // frames, which means that element had no usable previous transform.
         std::fprintf(log,
                      "GEOMETRY_HISTORY hits=%llu inserted=%llu reclaimed=%llu rejected_topology=%llu set_full=%llu "
-                     "arena_full=%llu arena_reclaimed=%llu live=%u\n",
+                     "arena_full=%llu arena_reclaimed=%llu live=%u arena_pages=%u arena_used=%u arena_free_max=%u\n",
                      static_cast<unsigned long long>(packed.historyHits),
                      static_cast<unsigned long long>(packed.historyInserted),
                      static_cast<unsigned long long>(packed.historyReclaimed),
                      static_cast<unsigned long long>(packed.historyRejectedTopology),
                      static_cast<unsigned long long>(packed.historySetFull),
                      static_cast<unsigned long long>(packed.historyArenaFull),
-                     static_cast<unsigned long long>(packed.historyArenaReclaimed), packed.historyLive);
+                     static_cast<unsigned long long>(packed.historyArenaReclaimed), packed.historyLive,
+                     packed.historyArenaPages, packed.historyArenaUsedPages, packed.historyArenaLargestFree);
         std::fprintf(log, "GEOMETRY_ARENA_FULL sizes=");
         for (unsigned i = 0; i < packed.historyArenaFullPageCount; ++i)
             std::fprintf(log, "%s%u", i ? "," : "", packed.historyArenaFullPages[i]);
+        std::fprintf(log, "\n");
+        // Which engine mesh families the packed capture actually admitted. A
+        // visible transparent object (a glass, a railing) missing from this list
+        // was never captured, which no per-chunk rejection counter can show.
+        for (unsigned i = 0; i < packed.admittedSpanFamilyCount; ++i)
+        {
+            const auto& family = packed.admittedSpans[i];
+            std::fprintf(log, "GEOMETRY_SPAN chunk=%u mesh=%u verts=%u spans=%llu\n", family.chunk, family.mesh,
+                         family.vertices, static_cast<unsigned long long>(family.count));
+        }
+        std::fprintf(log, "GEOMETRY_SPAN_TOTAL spans=%llu evicted=%llu families=%u\n",
+                     static_cast<unsigned long long>(packed.frameSpanCount),
+                     static_cast<unsigned long long>(packed.spanFamilyEvictions),
+                     packed.admittedSpanFamilyCount);
+        std::fprintf(log, "GEOMETRY_OVERFLOW chunks=");
+        for (const auto& entry : packed.overflowChunks)
+            if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
         std::fprintf(log, "\n");
         // Presented-frame rate against the engine frame rate. A ratio near 1
         // means frame generation is not running; 2/3/4 identifies the

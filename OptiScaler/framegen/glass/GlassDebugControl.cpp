@@ -77,11 +77,26 @@ void writeStatus(std::ofstream& file)
          << " no_element_parent=" << identity.noElementParent << " no_element_order=" << identity.noElementOrder
          << " no_view_state=" << identity.noViewState << " no_view_unknown=" << identity.noViewUnknown
          << " no_view_descriptor=" << identity.noViewDescriptor << "\n";
-    file << "history hits=" << packed.historyHits << " inserted=" << packed.historyInserted
-         << " reclaimed=" << packed.historyReclaimed << " rejected_topology=" << packed.historyRejectedTopology
-         << " set_full=" << packed.historySetFull << " arena_full=" << packed.historyArenaFull
-         << " arena_reclaimed=" << packed.historyArenaReclaimed
-         << " live=" << packed.historyLive << "\n";
+       file << "history hits=" << packed.historyHits << " inserted=" << packed.historyInserted
+            << " reclaimed=" << packed.historyReclaimed << " rejected_topology=" << packed.historyRejectedTopology
+            << " set_full=" << packed.historySetFull << " arena_full=" << packed.historyArenaFull
+            << " arena_reclaimed=" << packed.historyArenaReclaimed
+            << " live=" << packed.historyLive << " arena_pages=" << packed.historyArenaPages
+            << " arena_used=" << packed.historyArenaUsedPages
+            << " arena_free_max=" << packed.historyArenaLargestFree << "\n";
+       // Captured mesh families and the chunks that lost their arena block.
+       // Both are needed to tell "never captured" from "captured but dropped".
+       for (unsigned i = 0; i < packed.admittedSpanFamilyCount; ++i)
+       {
+           const auto& family = packed.admittedSpans[i];
+           file << "span chunk=" << family.chunk << " mesh=" << family.mesh << " verts=" << family.vertices
+                << " spans=" << family.count << "\n";
+       }
+       file << "span_total spans=" << packed.frameSpanCount << " evicted=" << packed.spanFamilyEvictions << "\n";
+       file << "overflow_chunks";
+       for (const auto& entry : packed.overflowChunks)
+           if (entry.count) file << " " << entry.chunk << ":" << entry.count;
+       file << "\n";
     file << "gpu_ms=" << ReadGpuMilliseconds() << "\n";
     const auto host = ReadNativeHostStatus();
     file << "host evaluations=" << host.evaluations << " substitutions=" << host.substitutions

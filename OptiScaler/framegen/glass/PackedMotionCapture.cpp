@@ -8,6 +8,7 @@
 #include "MotionFramePair.h"
 #include "PackedMotionMappings.h"
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -143,6 +144,19 @@ class Capture final : public GeometryDrawCaptureOwner
     mutable std::mutex mutex;
     PackedMotionCaptureStatus counters;
     std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
+    std::array<PackedMotionCaptureStatus::ChunkCount, 16> overflowChunks {};
+    // Bounded family table for the packed capture. A four-probe hash window
+    // keeps the per-span cost at a few comparisons; a family that cannot be
+    // placed is counted, never silently merged into another mesh.
+    struct SpanFamily
+    {
+        std::uint32_t chunk = 0, mesh = 0, vertices = 0;
+        std::uint64_t count = 0;
+    };
+    static constexpr unsigned SpanFamilyCount = 256, SpanFamilyProbes = 8;
+    std::array<SpanFamily, SpanFamilyCount> spanFamilies {};
+    std::uint64_t spanFamilyEvictions = 0;
+    std::uint64_t frameSpanCount = 0;
     std::uint32_t configuredWidth = 0, configuredHeight = 0;
     std::uint64_t nextProducer = 0, nextConsumer = 0;
     MotionFramePair framePair;
@@ -165,6 +179,34 @@ class Capture final : public GeometryDrawCaptureOwner
         }
         smallest->chunk = chunk;
         smallest->count = 1;
+    }
+
+    void noteSpanFamily(std::uint32_t chunk, std::uint32_t mesh, std::uint32_t vertices) noexcept
+    {
+        if (!chunk || !mesh) return;
+        const auto base = unsigned(((std::uint64_t(mesh) * 0x9E3779B97F4A7C15ull) ^
+                                    (std::uint64_t(chunk) << 7)) & (SpanFamilyCount - 1));
+        SpanFamily* free = nullptr;
+        for (unsigned i = 0; i < SpanFamilyProbes; ++i)
+        {
+            auto& entry = spanFamilies[(base + i) & (SpanFamilyCount - 1)];
+            if (entry.count)
+            {
+                if (entry.chunk == chunk && entry.mesh == mesh)
+                {
+                    ++entry.count;
+                    return;
+                }
+                continue;
+            }
+            if (!free) free = &entry;
+        }
+        if (!free)
+        {
+            ++spanFamilyEvictions;
+            return;
+        }
+        *free = { chunk, mesh, vertices, 1 };
     }
 
     bool completed(ID3D12Fence* fence, std::uint64_t value)
@@ -211,7 +253,14 @@ class Capture final : public GeometryDrawCaptureOwner
         for (auto& value : frames)
             if (value.number && value.number <= completedThrough && !reusable(value))
                 completedThrough = value.number - 1;
-        return !failed && objectMappings.beginFrame(number, completedThrough);
+        if (failed || !objectMappings.beginFrame(number, completedThrough)) return false;
+        // The family table describes the frame that is being captured now; a
+        // cumulative table would be dominated by earlier scenes and would hide
+        // the object the current camera actually looks at.
+        spanFamilies = {};
+        spanFamilyEvictions = 0;
+        frameSpanCount = 0;
+        return true;
     }
     Frame* frame(std::uint32_t number)
     {
@@ -498,7 +547,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
                 const auto allocation = objectMappings.acquire(key, shape.vertices, frameNumber);
-                if (!allocation) { ++counters.historyOverflow; continue; }
+                if (!allocation)
+                {
+                    ++counters.historyOverflow;
+                    noteChunk(overflowChunks, draw.chunk);
+                    continue;
+                }
+                noteSpanFamily(draw.chunk, key.object.mesh, shape.vertices);
+                ++frameSpanCount;
                 auto& item = mapping[span.first + ordinal];
                 item.historyBase = allocation.history.base;
                 item.vertices = allocation.history.vertices;
@@ -802,6 +858,26 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         value.historyArenaFullPages = history.arenaFullPages;
         value.historyArenaFullPageCount = history.arenaFullPageCount;
         value.historyLive = objectMappings.liveHistories();
+        value.historyArenaPages = objectMappings.arenaPages();
+        value.historyArenaUsedPages = objectMappings.arenaUsedPages();
+        value.historyArenaLargestFree = objectMappings.arenaLargestFreePages();
+        value.overflowChunks = overflowChunks;
+        value.spanFamilyEvictions = spanFamilyEvictions;
+        value.frameSpanCount = frameSpanCount;
+        value.admittedSpanFamilyCount = 0;
+        {
+            // Copy the heaviest families only; the full table stays internal so
+            // the periodic line and the control response keep a fixed size.
+            std::array<SpanFamily, SpanFamilyCount> sorted = spanFamilies;
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const SpanFamily& a, const SpanFamily& b) { return a.count > b.count; });
+            for (const auto& entry : sorted)
+            {
+                if (!entry.count || value.admittedSpanFamilyCount >= value.admittedSpans.size()) break;
+                value.admittedSpans[value.admittedSpanFamilyCount++] =
+                    { entry.chunk, entry.mesh, entry.vertices, entry.count };
+            }
+        }
         return value;
     }
 
@@ -818,6 +894,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         unknownChunks = {};
         topologyChunks = {};
         missingChunks = {};
+        overflowChunks = {};
+        spanFamilies = {};
+        spanFamilyEvictions = 0;
     }
 };
 

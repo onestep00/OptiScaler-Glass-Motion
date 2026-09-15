@@ -238,5 +238,10 @@ class VertexHistoryCache
     }
     unsigned liveEntries() const { return live; }
     unsigned reservedVertices() const { return usedPages * PageVertices; }
+    unsigned capacityPages() const { return Pages; }
+    unsigned usedPageCount() const { return usedPages; }
+    // Root of the buddy tree: the largest aligned block still free. Zero means
+    // the arena cannot serve even a single page.
+    unsigned largestFreePages() const { return freeTree[1]; }
 };
 } // namespace GlassFg

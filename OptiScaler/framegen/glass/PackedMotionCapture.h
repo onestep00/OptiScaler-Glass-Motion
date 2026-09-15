@@ -73,6 +73,28 @@ struct PackedMotionCaptureStatus
     std::array<std::uint32_t, 4> historyArenaFullPages {};
     unsigned historyArenaFullPageCount = 0;
     unsigned historyLive = 0;
+    // Arena occupancy when the status was read. arenaUsedPages is the page
+    // count the live keys hold, arenaLargestFree is the biggest block the
+    // buddy allocator can still serve; the pair separates true exhaustion
+    // from fragmentation without a per-request log.
+    unsigned historyArenaPages = 0, historyArenaUsedPages = 0, historyArenaLargestFree = 0;
+    // Which engine mesh families reach the packed capture. Per-chunk rejection
+    // counters cannot answer "was this material family captured at all", which
+    // is the question a missing object (a glass, a railing) raises.
+    struct SpanCount
+    {
+        std::uint32_t chunk = 0, mesh = 0, vertices = 0;
+        std::uint64_t count = 0;
+    };
+    std::array<SpanCount, 8> admittedSpans {};
+    unsigned admittedSpanFamilyCount = 0;
+    // Families the bounded table could not hold; non-zero means the printed
+    // list is incomplete, never that the list is wrong.
+    std::uint64_t spanFamilyEvictions = 0;
+    // Elements the capture admitted in the frame the family table describes.
+    std::uint64_t frameSpanCount = 0;
+    // Chunks whose elements resolved an identity but found no arena block.
+    std::array<ChunkCount, 16> overflowChunks {};
 };
 
 struct PackedMotionProvider
