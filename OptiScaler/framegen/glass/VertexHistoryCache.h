@@ -136,6 +136,8 @@ class VertexHistoryCache
     {
         std::uint64_t hits = 0, inserted = 0, reclaimed = 0, rejectedIdentity = 0;
         std::uint64_t rejectedFrame = 0, rejectedTopology = 0, setFull = 0, arenaFull = 0, serialExhausted = 0;
+        // A failed allocation that succeeded after the bounded reclaim pass.
+        std::uint64_t arenaReclaimed = 0;
         unsigned lastSweepInspections = 0, maxLookupInspections = 0;
     } stats;
 
@@ -147,7 +149,7 @@ class VertexHistoryCache
     // Call once per admitted ordered frame. At most sweepBudget entries are
     // examined, even if the cache is full. Frame-counter wrap requires a drained
     // new owner; it cannot authorize reuse through modular arithmetic.
-    bool beginFrame(std::uint32_t frame, std::uint32_t completedThrough, unsigned sweepBudget = 64)
+    bool beginFrame(std::uint32_t frame, std::uint32_t completedThrough, unsigned sweepBudget = 256)
     {
         if (!frame || frame <= currentFrame || completedThrough < retiredFrame || completedThrough >= frame)
         { ++stats.rejectedFrame; return false; }
@@ -161,6 +163,23 @@ class VertexHistoryCache
             if (reclaimable(entry)) release(entry);
         }
         return true;
+    }
+    // Bounded reclaim pass for a request the buddy arena could not serve.
+    // beginFrame's sweep touches few entries per frame, which is far too slow
+    // when a scene turns transparent elements over quickly; a failed allocation
+    // is exactly where the extra scan pays for itself. The same reclaim rule as
+    // the per-frame sweep applies, so a recording still reading the entry is
+    // never released.
+    void sweepForSpace(unsigned budget)
+    {
+        const unsigned count = (std::min)(budget, EntryCount);
+        for (unsigned i = 0; i < count; ++i)
+        {
+            auto& entry = entries[sweepCursor];
+            sweepCursor = (sweepCursor + 1) % EntryCount;
+            if (reclaimable(entry))
+                release(entry);
+        }
     }
     VertexHistoryAllocation acquire(const VertexHistoryKey& key, std::uint32_t vertices, std::uint32_t frame)
     {
@@ -189,8 +208,18 @@ class VertexHistoryCache
         if (nextGeneration == UINT32_MAX) { ++stats.serialExhausted; return {}; }
         if (!vacant) { release(*oldest); vacant = oldest; }
         const unsigned pages = std::bit_ceil((vertices + PageVertices - 1) / PageVertices);
-        const unsigned base = reserve(pages);
-        if (base == UINT32_MAX) { ++stats.arenaFull; return {}; }
+        unsigned base = reserve(pages);
+        if (base == UINT32_MAX)
+        {
+            sweepForSpace(512);
+            base = reserve(pages);
+            if (base == UINT32_MAX)
+            {
+                ++stats.arenaFull;
+                return {};
+            }
+            ++stats.arenaReclaimed;
+        }
         vacant->key = key;
         vacant->allocation = { base, vertices, pages * PageVertices, ++nextGeneration };
         vacant->lastFrame = frame;

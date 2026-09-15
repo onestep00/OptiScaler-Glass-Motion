@@ -27,4 +27,8 @@ std::uint64_t ReadGeometryRecordingEpoch(ID3D12GraphicsCommandList* command) noe
 // One process-resident owner, registered once. The owner handles admission and
 // resource lifetime; this observer guarantees one original draw and restoration.
 bool RegisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept;
+// Clears the process-resident capture owner. Only the owner itself may call
+// this, and only when no session still holds one of its recordings: the draw
+// path loads the slot without a lock.
+bool UnregisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept;
 } // namespace GlassFg

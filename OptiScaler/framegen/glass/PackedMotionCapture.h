@@ -66,6 +66,8 @@ struct PackedMotionCaptureStatus
     // key changed (no usable previous transform for that element yet).
     std::uint64_t historyHits = 0, historyInserted = 0, historyReclaimed = 0;
     std::uint64_t historyRejectedTopology = 0, historySetFull = 0, historyArenaFull = 0;
+    // Allocations that failed first and succeeded after the bounded reclaim pass.
+    std::uint64_t historyArenaReclaimed = 0;
     unsigned historyLive = 0;
 };
 
@@ -82,6 +84,12 @@ struct PackedMotionProvider
 // persistently-mapped upload writes only; it never compiles, allocates or waits.
 bool InitializePackedMotionCapture(ID3D12Device* device, std::uint32_t width, std::uint32_t height,
                                    FILE* log = nullptr, PackedMotionIdentityProvider identities = {}) noexcept;
+// Drops the process-resident capture so a different extent can be built. The
+// caller must be the health thread and must have released every session and
+// every frame that still references the capture. Returns true when a capture
+// was unregistered (the capture stays alive until the draw path stops reading
+// the owner slot, so this must not race an active draw callback).
+bool ReleasePackedMotionCapture() noexcept;
 PackedMotionFrame AcquirePackedMotionFrame(ID3D12GraphicsCommandList* fgCommand,
                                            std::uint32_t width, std::uint32_t height,
                                            std::uint64_t fgFrame, bool reset) noexcept;

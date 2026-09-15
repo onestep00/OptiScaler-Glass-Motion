@@ -242,13 +242,14 @@ void ReportGeometryHost(FILE* log) noexcept
         // frames, which means that element had no usable previous transform.
         std::fprintf(log,
                      "GEOMETRY_HISTORY hits=%llu inserted=%llu reclaimed=%llu rejected_topology=%llu set_full=%llu "
-                     "arena_full=%llu live=%u\n",
+                     "arena_full=%llu arena_reclaimed=%llu live=%u\n",
                      static_cast<unsigned long long>(packed.historyHits),
                      static_cast<unsigned long long>(packed.historyInserted),
                      static_cast<unsigned long long>(packed.historyReclaimed),
                      static_cast<unsigned long long>(packed.historyRejectedTopology),
                      static_cast<unsigned long long>(packed.historySetFull),
-                     static_cast<unsigned long long>(packed.historyArenaFull), packed.historyLive);
+                     static_cast<unsigned long long>(packed.historyArenaFull),
+                     static_cast<unsigned long long>(packed.historyArenaReclaimed), packed.historyLive);
     }
     catch (...)
     {

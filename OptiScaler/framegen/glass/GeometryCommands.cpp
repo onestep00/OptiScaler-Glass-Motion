@@ -498,6 +498,13 @@ bool RegisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept
     GeometryDrawCaptureOwner* expected = nullptr;
     return captureOwner.compare_exchange_strong(expected, owner, std::memory_order_release) || expected == owner;
 }
+bool UnregisterGeometryDrawCapture(GeometryDrawCaptureOwner* owner) noexcept
+{
+    if (!owner)
+        return false;
+    GeometryDrawCaptureOwner* expected = owner;
+    return captureOwner.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+}
 void NotifyGeometryCaptureSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands) noexcept
 {
     if (auto* owner = captureOwner.load(std::memory_order_acquire))

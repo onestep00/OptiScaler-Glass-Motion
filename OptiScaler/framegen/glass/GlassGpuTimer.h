@@ -86,7 +86,12 @@ class GpuTimer
     // Do not time each MFG phase or include the provider's FG evaluation here.
     Ticket begin(ID3D12GraphicsCommandList* command)
     {
-        if (failed || !mapped || !command || command->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        // Both direct and compute lists can carry timestamp queries. The compose
+        // list follows the frame-generation queue type, which is direct for
+        // Streamline's DLSS-G evaluation.
+        const auto type = command ? command->GetType() : D3D12_COMMAND_LIST_TYPE_DIRECT;
+        if (failed || !mapped || !command ||
+            (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT))
             return {};
         for (unsigned i = 0; i < Capacity; ++i)
             if (!slots[i].sequence)
@@ -124,7 +129,13 @@ class GpuTimer
             relevant |= slot.command == command;
         if (!relevant)
             return true;
-        if ((queue && queue != submittedQueue) || submittedQueue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        // Timestamp queries are valid on a direct queue as well. Streamline's
+        // DLSS-G evaluation (and therefore our compose list) runs on a direct
+        // queue, so requiring a compute queue silently disabled the measurement
+        // instead of failing the correction.
+        const auto queueType = submittedQueue->GetDesc().Type;
+        if ((queue && queue != submittedQueue) ||
+            (queueType != D3D12_COMMAND_LIST_TYPE_COMPUTE && queueType != D3D12_COMMAND_LIST_TYPE_DIRECT))
         {
             failed = true;
             return false;

@@ -77,7 +77,9 @@ void writeStatus(std::ofstream& file)
     file << "history hits=" << packed.historyHits << " inserted=" << packed.historyInserted
          << " reclaimed=" << packed.historyReclaimed << " rejected_topology=" << packed.historyRejectedTopology
          << " set_full=" << packed.historySetFull << " arena_full=" << packed.historyArenaFull
+         << " arena_reclaimed=" << packed.historyArenaReclaimed
          << " live=" << packed.historyLive << "\n";
+    file << "gpu_ms=" << ReadGpuMilliseconds() << "\n";
     const auto host = ReadNativeHostStatus();
     file << "host evaluations=" << host.evaluations << " substitutions=" << host.substitutions
          << " captures=" << host.captures << " active=" << host.active << " retiring=" << host.retiring

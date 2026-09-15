@@ -69,6 +69,14 @@ struct Runtime
     FILE* log = nullptr;
     bool logAttempted = false, unavailable = false, stopped = false;
     uint64_t evaluations = 0, substitutions = 0, captures = 0;
+    // Runtime extent change: the frame-generation inputs were rebuilt at a new
+    // size. The draw capture is process-resident, so it is released and rebuilt
+    // at a quiescent point (no active or retiring session) instead of leaving
+    // the correction off for the rest of the session.
+    std::uint32_t rebuildWidth = 0, rebuildHeight = 0;
+    bool rebuildPending = false;
+    unsigned rebuildAttempts = 0;
+    Microsoft::WRL::ComPtr<ID3D12Device> rebuildDevice;
 
     void reap()
     {
@@ -106,6 +114,33 @@ struct Runtime
                 entry->session.releaseAfterGpuDrain();
                 entry.reset();
             }
+        if (rebuildPending && !active && !retiring[0] && !retiring[1] && rebuildDevice)
+        {
+            const auto previous = ReadPackedMotionCaptureStatus();
+            const auto width = rebuildWidth, height = rebuildHeight;
+            rebuildPending = false;
+            const bool released = ReleasePackedMotionCapture();
+            const bool ready = InitializePackedMotionCapture(rebuildDevice.Get(), width, height, log,
+                                                             MakeGlassMotionIdentityProvider());
+            ++rebuildAttempts;
+            if (log)
+            {
+                std::fprintf(log,
+                             "PACKED_CAPTURE extent_rebuild released=%u old=%ux%u new=%ux%u ready=%u attempt=%u\n",
+                             released ? 1u : 0u, previous.width, previous.height, width, height, ready ? 1u : 0u,
+                             rebuildAttempts);
+                std::fflush(log);
+            }
+            if (ready)
+            {
+                rebuildAttempts = 0;
+                rebuildDevice.Reset();
+            }
+            else if (rebuildAttempts < 3)
+                rebuildPending = true; // Retry on the next health pass.
+            else
+                rebuildDevice.Reset();
+        }
     }
     bool retire()
     {
@@ -568,10 +603,31 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     Microsoft::WRL::ComPtr<ID3D12Device> device;
     if (FAILED(command->GetDevice(IID_PPV_ARGS(&device))))
         return {};
-    if (!InitializePackedMotionCapture(device.Get(), static_cast<unsigned>(entry->descriptions[0].Width),
-                                       entry->descriptions[0].Height, r.log,
-                                       MakeGlassMotionIdentityProvider()))
+    const auto width = static_cast<std::uint32_t>(entry->descriptions[0].Width);
+    const auto height = entry->descriptions[0].Height;
+    if (!InitializePackedMotionCapture(device.Get(), width, height, r.log, MakeGlassMotionIdentityProvider()))
+    {
+        // A different extent means the frame-generation inputs were rebuilt at
+        // a new size (resolution or DLSS quality change). The capture is sized
+        // at runtime from those inputs, so it has to be rebuilt; defer that to
+        // the health thread, which can prove no session still references it.
+        const auto current = ReadPackedMotionCaptureStatus();
+        if (current.initialized && (current.width != width || current.height != height))
+        {
+            r.rebuildWidth = width;
+            r.rebuildHeight = height;
+            r.rebuildPending = true;
+            r.rebuildAttempts = 0;
+            r.rebuildDevice = device;
+            if (r.log)
+            {
+                std::fprintf(r.log, "PACKED_CAPTURE extent_change requested=%ux%u current=%ux%u deferred=1\n",
+                             width, height, current.width, current.height);
+                std::fflush(r.log);
+            }
+        }
         return {};
+    }
     const auto shaders = Util::DllPath().parent_path() / L"Glass";
     if (!entry->session.initializePacked(device.Get(), entry->descriptions,
                                          (shaders / L"GlassObjectMotion.hlsl").c_str(), r.log,

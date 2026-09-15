@@ -794,6 +794,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         value.historyRejectedTopology = history.rejectedTopology;
         value.historySetFull = history.setFull;
         value.historyArenaFull = history.arenaFull;
+        value.historyArenaReclaimed = history.arenaReclaimed;
         value.historyLive = objectMappings.liveHistories();
         return value;
     }
@@ -860,6 +861,23 @@ PackedMotionFrame AcquirePackedMotionFrame(ID3D12GraphicsCommandList* command,
         return capture ? capture->acquire(command, width, height, fgFrame, reset) : PackedMotionFrame {};
     }
     catch (...) { return {}; }
+}
+
+bool ReleasePackedMotionCapture() noexcept
+{
+    try
+    {
+        auto* capture = active.exchange(nullptr, std::memory_order_acq_rel);
+        if (!capture)
+            return false;
+        UnregisterGeometryDrawCapture(capture);
+        delete capture;
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 
 PackedMotionCaptureStatus ReadPackedMotionCaptureStatus() noexcept

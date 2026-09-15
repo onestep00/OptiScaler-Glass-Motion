@@ -113,6 +113,11 @@ void PublishGpuMilliseconds(double milliseconds)
         latestMilliseconds.store(milliseconds, std::memory_order_relaxed);
 }
 
+double ReadGpuMilliseconds() noexcept
+{
+    return latestMilliseconds.load(std::memory_order_relaxed);
+}
+
 void PublishRuntimeStatus(RuntimeStatus status) { runtimeStatus.store(status, std::memory_order_relaxed); }
 
 void RenderSettings()

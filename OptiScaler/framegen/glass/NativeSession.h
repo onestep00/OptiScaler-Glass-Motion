@@ -294,24 +294,38 @@ class NativeSession
             if (knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(commands[i])))
             {
                 matched = static_cast<ID3D12GraphicsCommandList*>(commands[i]);
-                if ((fgQueue && fgQueue != queue) || queue->GetDesc().Type != fgCommandType)
+                const auto queueType = queue->GetDesc().Type;
+                if (queueType != fgCommandType)
                 {
-                    // Streamline's own DLSS-G evaluation may arrive on a direct
-                    // queue; the compose list has to match that type, so log the
-                    // rejection instead of failing silently.
+                    // The compose list is created for one queue type, so a type
+                    // mismatch is a real rejection. Log it instead of failing
+                    // silently.
                     if (log)
                     {
                         std::fprintf(log,
-                                     "NATIVE_HOST unsupported_fg_queue type=%u expected=%u known=%p queue=%p\n",
-                                     static_cast<unsigned>(queue->GetDesc().Type),
-                                     static_cast<unsigned>(fgCommandType), static_cast<void*>(fgQueue),
+                                     "NATIVE_HOST fg_queue_rejected type=%u expected=%u queue=%p\n",
+                                     static_cast<unsigned>(queueType), static_cast<unsigned>(fgCommandType),
                                      static_cast<void*>(queue));
                         std::fflush(log);
                     }
                     failed = true;
                 }
-                else if (!fgQueue)
+                else if (fgQueue != queue)
                 {
+                    // The engine rebuilds its frame-generation queue when the
+                    // feature or the swap chain is recreated (resolution and
+                    // quality changes). The compose list matches the type and
+                    // the fences are device objects, so follow the engine
+                    // instead of leaving the correction permanently off.
+                    if (log)
+                    {
+                        std::fprintf(log, "NATIVE_HOST fg_queue adopt=1 old=%p new=%p type=%u\n",
+                                     static_cast<void*>(fgQueue), static_cast<void*>(queue),
+                                     static_cast<unsigned>(queueType));
+                        std::fflush(log);
+                    }
+                    if (fgQueue)
+                        fgQueue->Release();
                     fgQueue = queue;
                     fgQueue->AddRef();
                 }

@@ -102,6 +102,9 @@ inline bool GeometryPipelineCompilationEnabled() noexcept
 }
 void RenderSettings();
 void PublishGpuMilliseconds(double milliseconds);
+// Last completed asynchronous GPU sample, in milliseconds. Negative when the
+// timer has not produced a sample yet (disabled or waiting).
+double ReadGpuMilliseconds() noexcept;
 // Settings-panel view of the live FG integration. The host publishes a few
 // relaxed counters per evaluation; the panel reads them without a lock, and the
 // compose fence pair is the direct evidence that our own GPU work finished.
