@@ -80,6 +80,12 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 const bool objects = ready && InitializeCyberpunkObjects(GetModuleHandleW(nullptr));
                 const bool draws = objects && InitializeCyberpunkDraws(GetModuleHandleW(nullptr));
                 const bool commands = ready && StartGeometryCommands(device);
+                // The native state observer was installed lazily inside the first
+                // frame generation evaluation, which put its Detours transaction
+                // (thread enumeration plus suspend) on the engine render thread at
+                // focus regain. Device creation runs before the render thread pool
+                // exists and no frame is being presented, so it is installed here.
+                const bool observerReady = commands && PreinstallNativeObserver(device);
                 // The target-view registry supplies the product view identity and
                 // must not depend on the diagnostic experiment switch.
                 const bool views = commands && StartGeometryViews(device);

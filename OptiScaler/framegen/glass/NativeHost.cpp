@@ -576,6 +576,33 @@ D3D12Callbacks makeCallbacks()
     return value;
 }
 
+// The state observer is a Detours transaction that suspends every thread in the
+// process. Installing it inside the first frame generation evaluation put the
+// whole transaction on the engine render thread at the moment the game regains
+// focus (observer_ms=134.9 in the 05:46 session). Every command list of the
+// same device exposes the same vtable targets, and the install path proves that
+// by comparing a second list and both queue types before it attaches, so the
+// transaction runs once at device creation instead and the render thread only
+// re-validates the identity of the list it was handed.
+std::atomic<double> observerPreinstallMs { 0.0 };
+
+bool preinstallNativeObserver(ID3D12Device* device) noexcept
+{
+    try
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const bool installed = PreinstallD3D12Observer(device, makeCallbacks());
+        observerPreinstallMs.store(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
+            std::memory_order_relaxed);
+        return installed;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                const Inputs& inputs, Controls controls)
 {
@@ -694,7 +721,8 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     if (!observerInstalled)
     {
         r.unavailable = true;
-        std::fprintf(r.log, "NATIVE_HOST ready=0 reason=observer_coverage\n");
+        std::fprintf(r.log, "NATIVE_HOST ready=0 reason=observer_coverage mismatch_slot=%d\n",
+                     MismatchD3D12ObserverSlot(command));
         std::fflush(r.log);
         return {};
     }
@@ -762,13 +790,18 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     r.activeCommand.store(command, std::memory_order_release);
     std::fprintf(r.log,
                  "NATIVE_HOST ready=1 handle=%p command=%p methods=%x width=%llu height=%u observer_ms=%.1f "
-                 "capture_ms=%.1f session_ms=%.1f\n",
+                 "capture_ms=%.1f session_ms=%.1f preinstall_ms=%.1f\n",
                  handle, command, mask, entry->descriptions[0].Width, entry->descriptions[0].Height, observerMs,
-                 captureMs, sessionMs);
+                 captureMs, sessionMs, observerPreinstallMs.load(std::memory_order_relaxed));
     std::fflush(r.log);
     return entry;
 }
 } // namespace
+
+bool PreinstallNativeObserver(ID3D12Device* device) noexcept
+{
+    return preinstallNativeObserver(device);
+}
 
 bool NativeCaptureSubmissionReady() noexcept
 {

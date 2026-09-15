@@ -48,6 +48,11 @@ void ReportNativeHostLog() noexcept;
 // session creation happens inside the frame generation callback when the engine
 // rebuilds its lists (game regains focus), where the HLSL compile measured 153ms.
 void WarmPackedShaderOnce() noexcept;
+// Installs the process-resident D3D12 state observer at device creation. The
+// observer is a Detours transaction that suspends every game thread; running it
+// there keeps it off the render thread, where it measured 134.9ms inside the
+// first frame generation evaluation (the focus-regain path, 2026-09-16 05:46).
+bool PreinstallNativeObserver(ID3D12Device* device) noexcept;
 
 // Game-side Streamline handoff, independent of OptiScaler's own frame generation
 // setting. The host passes the motion/depth/hudless tags the engine submits for

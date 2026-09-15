@@ -29,6 +29,15 @@ struct D3D12Callbacks
 bool InstallD3D12Observer(ID3D12GraphicsCommandList* actualFgCommand, const D3D12Callbacks& callbacks);
 bool MatchesD3D12Observer(ID3D12GraphicsCommandList* command);
 uint32_t ObservedComputeMethods();
+// Installs the same process-lifetime observer before any frame generation list
+// exists, from a probe command list of the pending device. The transaction
+// suspends every thread in the process, so running it at device creation keeps
+// it off the render thread that evaluates frame generation. The install path
+// verifies that every command list of the device shares the same targets.
+bool PreinstallD3D12Observer(ID3D12Device* device, const D3D12Callbacks& callbacks);
+// Diagnostics only: -1 = matches, -2 = observer not installed, otherwise the
+// first vtable slot whose target differs from the recorded one.
+int MismatchD3D12ObserverSlot(ID3D12GraphicsCommandList* command);
 
 class InternalD3D12Scope
 {

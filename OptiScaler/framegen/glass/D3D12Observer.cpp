@@ -6,6 +6,7 @@
 #include <tlhelp32.h>
 #include <wrl/client.h>
 #include <array>
+#include <mutex>
 
 namespace GlassFg
 {
@@ -18,6 +19,7 @@ thread_local unsigned internalDepth = 0;
 uint32_t methods = 0;
 bool attempted = false, installed = false;
 std::array<void*, 85> commandTargets {};
+std::mutex installMutex;
 
 struct Call
 {
@@ -254,7 +256,7 @@ bool MatchesD3D12Observer(Command* command)
     return true;
 }
 
-bool InstallD3D12Observer(Command* command, const D3D12Callbacks& supplied)
+static bool installLocked(Command* command, const D3D12Callbacks& supplied)
 {
     if (attempted)
         return installed && MatchesD3D12Observer(command);
@@ -358,5 +360,59 @@ bool InstallD3D12Observer(Command* command, const D3D12Callbacks& supplied)
     }
     installed = DetourTransactionCommit() == NO_ERROR;
     return installed;
+}
+
+bool InstallD3D12Observer(Command* command, const D3D12Callbacks& supplied)
+{
+    std::lock_guard<std::mutex> lock(installMutex);
+    return installLocked(command, supplied);
+}
+
+bool PreinstallD3D12Observer(ID3D12Device* device, const D3D12Callbacks& supplied)
+{
+    if (device == nullptr)
+        return false;
+    std::lock_guard<std::mutex> lock(installMutex);
+    if (attempted)
+        return installed;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<Command> probe;
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                         IID_PPV_ARGS(&probe))) ||
+        FAILED(probe->Close()))
+        return false;
+    return installLocked(probe.Get(), supplied);
+}
+
+int MismatchD3D12ObserverSlot(Command* command)
+{
+    if (!installed || !command)
+        return -2;
+    auto table = *reinterpret_cast<void***>(command);
+    for (unsigned i = 0; i < 60; ++i)
+        if (commandTargets[i] && commandTargets[i] != table[i])
+            return static_cast<int>(i);
+    ComPtr<ID3D12GraphicsCommandList4> c4;
+    const auto r4 = command->QueryInterface(IID_PPV_ARGS(&c4));
+    if (SUCCEEDED(r4))
+    {
+        if (!(methods & ComputeRecording::StateObject) || static_cast<Command*>(c4.Get()) != command ||
+            (*reinterpret_cast<void***>(c4.Get()))[75] != commandTargets[75])
+            return 75;
+    }
+    else if (r4 != E_NOINTERFACE || (methods & ComputeRecording::StateObject))
+        return 75;
+    ComPtr<ID3D12GraphicsCommandList10> c10;
+    const auto r10 = command->QueryInterface(IID_PPV_ARGS(&c10));
+    if (SUCCEEDED(r10))
+    {
+        if (!(methods & ComputeRecording::Program) || static_cast<Command*>(c10.Get()) != command ||
+            (*reinterpret_cast<void***>(c10.Get()))[84] != commandTargets[84])
+            return 84;
+    }
+    else if (r10 != E_NOINTERFACE || (methods & ComputeRecording::Program))
+        return 84;
+    return -1;
 }
 } // namespace GlassFg
