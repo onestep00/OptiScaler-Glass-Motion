@@ -466,13 +466,35 @@ D3D12Callbacks makeCallbacks()
                             std::fflush(r.log);
                         }
                     }
-                    // Fallback: without a known producer queue the compose has to
-                    // run here, with the cross-queue wait that implies.
+                    // Fallback: the producer queue is unknown or its submission
+                    // was already consumed, so the producer fence cannot be
+                    // proven to belong to another queue. Waiting on a value this
+                    // queue only reaches later stops the GPU until the driver
+                    // reset, which is the one unbounded wait this hook could add
+                    // to the engine's own submission. The compose is queued here
+                    // only when the producer already completed, and the skipped
+                    // frames are counted instead.
                     if (!queued && waited && !selfWait)
                     {
-                        TimingScope queue(ComposeQueueTiming());
-                        q->Wait(fence, value);
-                        queued = e.session.executePending(q);
+                        const auto producerCompleted = fence != nullptr ? fence->GetCompletedValue() : 0;
+                        if (fence != nullptr && producerCompleted >= value)
+                        {
+                            TimingScope queue(ComposeQueueTiming());
+                            queued = e.session.executePending(q);
+                        }
+                        else
+                        {
+                            static std::atomic<unsigned> unproven { 0 };
+                            if (r.log != nullptr && unproven.fetch_add(1, std::memory_order_relaxed) < 8)
+                            {
+                                std::fprintf(r.log,
+                                             "TRACE_WAIT_UNPROVEN producer=%llu completed=%llu queue=%p\n",
+                                             static_cast<unsigned long long>(value),
+                                             static_cast<unsigned long long>(producerCompleted),
+                                             static_cast<void*>(q));
+                                std::fflush(r.log);
+                            }
+                        }
                     }
                     // The marker now describes the queued compose on the GPU, not
                     // the CPU window, so it is written only when one was queued.
