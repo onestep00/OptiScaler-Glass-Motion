@@ -122,6 +122,16 @@ struct PreparedInputs
     // both are swapped when the table holds them.
     const char* motionAlias = "MotionVectors";
     const char* depthAlias = "Depth";
+    // Documented DLSS-G transparency-layer inputs. The provider asks for these
+    // keys on every evaluation (the parameter trace records
+    // DLSS.TransparencyLayerMvecs and DLSS.TransparencyLayerOpacity with null
+    // pointers) and the game leaves them empty. Answering them with the packed
+    // coverage and the composed motion declares the transparent surface as its
+    // own layer, so the content behind it stops carrying the region.
+    ID3D12Resource* layerMvecs = nullptr;
+    ID3D12Resource* layerOpacity = nullptr;
+    const char* layerMvecsKey = "DLSS.TransparencyLayerMvecs";
+    const char* layerOpacityKey = "DLSS.TransparencyLayerOpacity";
 };
 
 // Keep this scope strictly around the native FG call. The shared parameter

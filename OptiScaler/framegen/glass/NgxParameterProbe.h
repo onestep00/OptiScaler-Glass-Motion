@@ -46,12 +46,17 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     // table's own pointers. The provider copies input pointers out of the table
     // on some evaluations and reuses that copy on the others, so a Set/restore
     // around the call reaches only the evaluations that copy.
-    void supply(ID3D12Resource* motion, ID3D12Resource* depth, const char* motionKey, const char* depthKey) noexcept
+    void supply(ID3D12Resource* motion, ID3D12Resource* depth, const char* motionKey, const char* depthKey,
+                ID3D12Resource* layerMvecs = nullptr, ID3D12Resource* layerOpacity = nullptr) noexcept
     {
         supplyMotion = motion;
         supplyDepth = depth;
         supplyMotionKey = motionKey;
         supplyDepthKey = depthKey;
+        supplyLayerMvecs = layerMvecs;
+        supplyLayerOpacity = layerOpacity;
+        watchLayerMvecs = layerMvecs;
+        watchLayerOpacity = layerOpacity;
     }
 
     // Keys the provider touched during the call that just returned, plus the
@@ -75,7 +80,9 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
                 const auto pointer = keys[i].lastPointer.load(std::memory_order_relaxed);
                 const char* match = "other";
                 if (pointer != 0 && (reinterpret_cast<ID3D12Resource*>(pointer) == watchMotion ||
-                                     reinterpret_cast<ID3D12Resource*>(pointer) == watchDepth))
+                                     reinterpret_cast<ID3D12Resource*>(pointer) == watchDepth ||
+                                     reinterpret_cast<ID3D12Resource*>(pointer) == watchLayerMvecs ||
+                                     reinterpret_cast<ID3D12Resource*>(pointer) == watchLayerOpacity))
                     match = "composed";
                 else if (pointer != 0 && (reinterpret_cast<ID3D12Resource*>(pointer) == watchEngineMotion ||
                                           reinterpret_cast<ID3D12Resource*>(pointer) == watchEngineDepth))
@@ -240,6 +247,13 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     {
         if (name == nullptr)
             return nullptr;
+        // The transparency layer is the provider's own slot for surfaces that
+        // are blended into the colour buffer. It is queried every evaluation and
+        // the game leaves it empty, so answering it never fights the engine.
+        if (supplyLayerMvecs != nullptr && std::strcmp(name, "DLSS.TransparencyLayerMvecs") == 0)
+            return supplyLayerMvecs;
+        if (supplyLayerOpacity != nullptr && std::strcmp(name, "DLSS.TransparencyLayerOpacity") == 0)
+            return supplyLayerOpacity;
         if (supplyMotion != nullptr && keyMatches(name, supplyMotionKey, "MotionVectors", "DLSSG.MVecs"))
             return supplyMotion;
         if (supplyDepth != nullptr && keyMatches(name, supplyDepthKey, "Depth", "DLSSG.Depth"))
@@ -333,10 +347,14 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     mutable FILE* sinkLog = nullptr;
     mutable ID3D12Resource* supplyMotion = nullptr;
     mutable ID3D12Resource* supplyDepth = nullptr;
+    mutable ID3D12Resource* supplyLayerMvecs = nullptr;
+    mutable ID3D12Resource* supplyLayerOpacity = nullptr;
     mutable const char* supplyMotionKey = nullptr;
     mutable const char* supplyDepthKey = nullptr;
     mutable ID3D12Resource* watchMotion = nullptr;
     mutable ID3D12Resource* watchDepth = nullptr;
+    mutable ID3D12Resource* watchLayerMvecs = nullptr;
+    mutable ID3D12Resource* watchLayerOpacity = nullptr;
     mutable ID3D12Resource* watchEngineMotion = nullptr;
     mutable ID3D12Resource* watchEngineDepth = nullptr;
 };

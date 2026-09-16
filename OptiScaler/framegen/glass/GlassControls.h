@@ -64,6 +64,11 @@ struct Controls
     bool packedSupply = false;
 
     bool active() const { return enabled && strength > 0; }
+    // Supply the documented DLSS-G transparency-layer inputs (the composed
+    // motion and the packed coverage as opacity) so the generator treats the
+    // transparent surface as its own layer instead of letting the content
+    // behind it drive the region.
+    bool packedLayer = false;
     float coverage() const { return std::min(strength, 100u) / 100.f; }
     uint64_t packed() const
     {

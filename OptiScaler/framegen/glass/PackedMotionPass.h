@@ -104,7 +104,14 @@ class PackedMotionPass
             // These evaluations read the table under the provider's own names
             // (the parameter trace records MotionVectors/Depth there), so the
             // swap has to replace those keys, not the DLSSG.* aliases.
-            return { inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput(), "MotionVectors", "Depth" };
+            return { inputs.motion,
+                     inputs.depth,
+                     gpu.motionOutput(),
+                     gpu.depthOutput(),
+                     "MotionVectors",
+                     "Depth",
+                     controls.packedLayer ? gpu.motionOutput() : nullptr,
+                     controls.packedLayer ? gpu.selectionOutput() : nullptr };
         }
         if (inputs.index == 1)
         {
@@ -213,8 +220,14 @@ class PackedMotionPass
             invalidateHistory();
             return {};
         }
-        return { inputs.motion,          inputs.depth,      gpu.motionOutput(),
-                 gpu.depthOutput(), inputs.motionKey, inputs.depthKey };
+        return { inputs.motion,
+                 inputs.depth,
+                 gpu.motionOutput(),
+                 gpu.depthOutput(),
+                 inputs.motionKey,
+                 inputs.depthKey,
+                 controls.packedLayer ? gpu.motionOutput() : nullptr,
+                 controls.packedLayer ? gpu.selectionOutput() : nullptr };
     }
     std::uint64_t renderedDispatches() const { return dispatches; }
     // Session teardown: a compose prepared for a retired FG command must not be

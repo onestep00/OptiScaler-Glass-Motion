@@ -1498,7 +1498,8 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             probe.bind(parameters, r.log, inputs.index, inputs.count, inputs.frame, prepared.motion, prepared.depth,
                        inputs.motion, inputs.depth);
             if (controls.packedSupply)
-                probe.supply(prepared.motion, prepared.depth, inputs.motionKey, inputs.depthKey);
+                probe.supply(prepared.motion, prepared.depth, inputs.motionKey, inputs.depthKey,
+                             prepared.layerMvecs, prepared.layerOpacity);
             else
                 probe.supply(nullptr, nullptr, nullptr, nullptr);
             static std::atomic<unsigned> probeBinds { 0 };
