@@ -147,9 +147,28 @@ class PackedMotionPass
             reuseDepth = inputs.depth;
             reuseValid = true;
         }
-        else if (batchReady && value == command && inputs.index == nextIndex && inputs.index <= inputs.count &&
-                 inputs.sameRenderedFrame(batch))
-            ++nextIndex;
+        else if (batchReady && inputs.sameRenderedFrame(batch))
+        {
+            // The provider evaluates one rendered frame several times: the
+            // generated-frame slots and one evaluation per back-buffer list.
+            // Every one of them has to read the corrected texture. The first
+            // evaluation of the frame already queued the compose, so a repeat
+            // only extends the batch. Invalidating it instead sends the engine's
+            // own motion vectors to the provider, and the frames generated from
+            // that evaluation keep the artifact (observed as
+            // "skipped_reused" climbing while index 3 was evaluated three times
+            // per frame).
+            static std::atomic<unsigned> repeats { 0 };
+            if (auto* log = gpu.logHandle())
+            {
+                if (repeats.fetch_add(1, std::memory_order_relaxed) < 4)
+                {
+                    std::fprintf(log, "PACKED_SUBSTITUTE repeat index=%u next=%u\n", inputs.index, nextIndex);
+                    std::fflush(log);
+                }
+            }
+            nextIndex = inputs.index + 1;
+        }
         else
         {
             invalidateHistory();
