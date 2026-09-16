@@ -52,7 +52,7 @@ void writeStatus(std::ofstream& file)
          << " readskip=" << controls.packedSkipRead
          << " arraymap=" << controls.arrayMapping << " pipelines=" << controls.compilePipelines
          << " grouped=" << controls.groupedOrder << " arrayprobe=" << controls.arrayProbe
-         << " packetlocal=" << controls.packetLocalOrder << "\n";
+         << " packetlocal=" << controls.packetLocalOrder << " supply=" << controls.packedSupply << "\n";
     const auto draws = GetCyberpunkDrawStatus();
     file << "array_order grouped=" << draws.arrayProbeGrouped << " compared=" << draws.arrayProbeCompared
          << " permuted=" << draws.arrayProbePermuted << " changed=" << draws.arrayProbeChanged
@@ -242,6 +242,8 @@ void PollGlassDebugControl() noexcept
                 value.packedSkipRead = line.substr(9) == "on";
             else if (line.rfind("trace=", 0) == 0)
                 value.trace = line.substr(6) == "on";
+            else if (line.rfind("supply=", 0) == 0)
+                value.packedSupply = line.substr(7) == "on";
             else if (line.rfind("autostage=", 0) == 0)
                 value.autoStage = line.substr(10) == "on";
             else if (line.rfind("compute=", 0) == 0)

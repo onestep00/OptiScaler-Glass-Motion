@@ -42,6 +42,18 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
         watchEngineDepth = engineDepth;
     }
 
+    // Answer the motion and depth keys with the composed textures instead of the
+    // table's own pointers. The provider copies input pointers out of the table
+    // on some evaluations and reuses that copy on the others, so a Set/restore
+    // around the call reaches only the evaluations that copy.
+    void supply(ID3D12Resource* motion, ID3D12Resource* depth, const char* motionKey, const char* depthKey) noexcept
+    {
+        supplyMotion = motion;
+        supplyDepth = depth;
+        supplyMotionKey = motionKey;
+        supplyDepthKey = depthKey;
+    }
+
     // Keys the provider touched during the call that just returned, plus the
     // resource match for each. Bounded: one line per evaluation only while the
     // caller still wants them.
@@ -193,6 +205,11 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     NVSDK_NGX_Result Get(const char* name, ID3D12Resource** value) const override
     {
         const auto result = target ? target->Get(name, value) : NVSDK_NGX_Result_FAIL_InvalidParameter;
+        if (value != nullptr && result == NVSDK_NGX_Result_Success)
+        {
+            if (auto* replacement = substitute(name))
+                *value = replacement;
+        }
         note(name, 6, result, result == NVSDK_NGX_Result_Success && value
                                    ? reinterpret_cast<unsigned long long>(*value)
                                    : 0ull);
@@ -201,6 +218,11 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     NVSDK_NGX_Result Get(const char* name, void** value) const override
     {
         const auto result = target ? target->Get(name, value) : NVSDK_NGX_Result_FAIL_InvalidParameter;
+        if (value != nullptr && result == NVSDK_NGX_Result_Success)
+        {
+            if (auto* replacement = substitute(name))
+                *value = replacement;
+        }
         note(name, 7, result, result == NVSDK_NGX_Result_Success && value
                                    ? reinterpret_cast<unsigned long long>(*value)
                                    : 0ull);
@@ -214,6 +236,23 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     }
 
   private:
+    ID3D12Resource* substitute(const char* name) const noexcept
+    {
+        if (name == nullptr)
+            return nullptr;
+        if (supplyMotion != nullptr && keyMatches(name, supplyMotionKey, "MotionVectors", "DLSSG.MVecs"))
+            return supplyMotion;
+        if (supplyDepth != nullptr && keyMatches(name, supplyDepthKey, "Depth", "DLSSG.Depth"))
+            return supplyDepth;
+        return nullptr;
+    }
+
+    static bool keyMatches(const char* name, const char* primary, const char* first, const char* second) noexcept
+    {
+        return (primary != nullptr && std::strcmp(name, primary) == 0) || std::strcmp(name, first) == 0 ||
+               std::strcmp(name, second) == 0;
+    }
+
     struct KeyEntry
     {
         std::atomic<const char*> name { nullptr };
@@ -292,6 +331,10 @@ class NgxParameterProbe final : public NVSDK_NGX_Parameter
     mutable unsigned long long callFrame = 0;
     mutable NVSDK_NGX_Parameter* target = nullptr;
     mutable FILE* sinkLog = nullptr;
+    mutable ID3D12Resource* supplyMotion = nullptr;
+    mutable ID3D12Resource* supplyDepth = nullptr;
+    mutable const char* supplyMotionKey = nullptr;
+    mutable const char* supplyDepthKey = nullptr;
     mutable ID3D12Resource* watchMotion = nullptr;
     mutable ID3D12Resource* watchDepth = nullptr;
     mutable ID3D12Resource* watchEngineMotion = nullptr;

@@ -1389,29 +1389,43 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                 // Driver-level block: Streamline's frame generation plugin hands
                 // the two textures straight to the NGX core, so no tag state and
                 // no Streamline frame token exist. The DLSS-G input convention
-                // delivers both in COPY_DEST, and the module's own frame counter
-                // keys the packed capture for this frame.
-                if (inputs.motionKey != nullptr && std::strcmp(inputs.motionKey, "DLSSG.MVecs") != 0)
+                // delivers both in COPY_DEST. This is the block that reads the
+                // parameter table (the tagged engine evaluations read nothing),
+                // so the correction has to be prepared here as well.
+                if (inputs.motionKey != nullptr)
                 {
                     states[0] = D3D12_RESOURCE_STATE_COPY_DEST;
                     states[2] = D3D12_RESOURCE_STATE_COPY_DEST;
-                    // The packed capture numbers its frames with the engine's
-                    // render frame (the draw packets), so the driver path has to
-                    // use that same counter. A private sequence would never match
-                    // and the capture would report acquire_no_candidate.
-                    const auto commandsFrame = GetGeometryCommandStats().lastFrame;
-                    const auto healthFrame = ReadGeometryHealth().frame;
-                    const auto engineFrame = commandsFrame != 0 ? commandsFrame : healthFrame;
-                    inputs.frame = engineFrame != 0 ? engineFrame : ++driverFrameCounter;
-                    static std::atomic<unsigned> driverPrepared { 0 };
-                    if (r.log && driverPrepared.fetch_add(1, std::memory_order_relaxed) < 4)
+                    if (std::strcmp(inputs.motionKey, "DLSSG.MVecs") != 0)
                     {
-                        std::fprintf(r.log, "GLASS_FLOW driver_prepare frame=%llu\n",
-                                     static_cast<unsigned long long>(inputs.frame));
-                        std::fprintf(r.log, "GLASS_FLOW session_log=%p host_log=%p initialized=%u\n",
-                                     static_cast<void*>(entry->session.logFileHandle()), static_cast<void*>(r.log),
-                                     entry->session.initializedForDiagnostics() ? 1u : 0u);
-                        std::fflush(r.log);
+                        // The packed capture numbers its frames with the engine's
+                        // render frame (the draw packets), so the driver path has to
+                        // use that same counter. A private sequence would never match
+                        // and the capture would report acquire_no_candidate.
+                        const auto commandsFrame = GetGeometryCommandStats().lastFrame;
+                        const auto healthFrame = ReadGeometryHealth().frame;
+                        const auto engineFrame = commandsFrame != 0 ? commandsFrame : healthFrame;
+                        inputs.frame = engineFrame != 0 ? engineFrame : ++driverFrameCounter;
+                        static std::atomic<unsigned> driverPrepared { 0 };
+                        if (r.log && driverPrepared.fetch_add(1, std::memory_order_relaxed) < 4)
+                        {
+                            std::fprintf(r.log, "GLASS_FLOW driver_prepare frame=%llu\n",
+                                         static_cast<unsigned long long>(inputs.frame));
+                            std::fprintf(r.log, "GLASS_FLOW session_log=%p host_log=%p initialized=%u\n",
+                                         static_cast<void*>(entry->session.logFileHandle()), static_cast<void*>(r.log),
+                                         entry->session.initializedForDiagnostics() ? 1u : 0u);
+                            std::fflush(r.log);
+                        }
+                    }
+                    else
+                    {
+                        // The table carries both naming conventions and the
+                        // provider reads its own: the parameter trace shows
+                        // MotionVectors/Depth on exactly these token-less
+                        // evaluations. Replacing DLSSG.MVecs only would leave the
+                        // key the provider reads pointing at the engine texture.
+                        inputs.motionKey = "MotionVectors";
+                        inputs.depthKey = "Depth";
                     }
                     prepared = entry->session.prepare(command, inputs, states, controls, true);
                 }
@@ -1478,16 +1492,36 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         // actually reads (and whether the motion/depth pointers it gets are the
         // substituted textures) are recorded instead of assumed. Only while the
         // trace switch is on; the normal path passes the original pointer.
-        if (controls.trace && r.log != nullptr)
+        if (controls.trace || controls.packedSupply)
         {
             auto& probe = NgxParameterProbeInstance();
             probe.bind(parameters, r.log, inputs.index, inputs.count, inputs.frame, prepared.motion, prepared.depth,
                        inputs.motion, inputs.depth);
+            if (controls.packedSupply)
+                probe.supply(prepared.motion, prepared.depth, inputs.motionKey, inputs.depthKey);
+            else
+                probe.supply(nullptr, nullptr, nullptr, nullptr);
+            static std::atomic<unsigned> probeBinds { 0 };
+            if (r.log != nullptr && probeBinds.fetch_add(1, std::memory_order_relaxed) < 6)
+            {
+                wchar_t providerPath[MAX_PATH] {};
+                HMODULE owner = nullptr;
+                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       reinterpret_cast<LPCWSTR>(original), &owner) &&
+                    owner != nullptr)
+                    GetModuleFileNameW(owner, providerPath, MAX_PATH);
+                std::fprintf(r.log, "GLASS_PARAM_BIND provider=%ls function=%p applied=%u supply=%u index=%u frame=%llu\n",
+                             providerPath, reinterpret_cast<void*>(original), applied ? 1u : 0u,
+                             controls.packedSupply ? 1u : 0u, inputs.index,
+                             static_cast<unsigned long long>(inputs.frame));
+                std::fflush(r.log);
+            }
             result = original(command, handle, &probe, callback);
             static std::atomic<unsigned> probeCalls { 0 };
-            if (probeCalls.fetch_add(1, std::memory_order_relaxed) < 60)
+            if (controls.trace && probeCalls.fetch_add(1, std::memory_order_relaxed) < 60)
                 probe.finish(r.log);
-            if (r.evaluations % 600 == 0)
+            if (controls.trace && r.evaluations % 600 == 0)
                 probe.report(r.log);
         }
         else

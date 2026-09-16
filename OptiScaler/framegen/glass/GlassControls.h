@@ -57,6 +57,11 @@ struct Controls
     // key guarded by the array's observed lifetime generation. Off by default:
     // the order probe has to show that the packet order is stable first.
     bool packetLocalOrder = false;
+    // Supply the composed motion and depth through the parameter table the
+    // provider reads, instead of swapping the table entries around the call.
+    // The provider copies input pointers on some evaluations and reuses that
+    // copy on the others, so the read-time answer is what reaches generation.
+    bool packedSupply = false;
 
     bool active() const { return enabled && strength > 0; }
     float coverage() const { return std::min(strength, 100u) / 100.f; }
@@ -74,7 +79,8 @@ struct Controls
                (compilePipelines ? (std::uint64_t(1) << 37) : 0u) |
                (groupedOrder ? (std::uint64_t(1) << 38) : 0u) |
                (arrayProbe ? (std::uint64_t(1) << 39) : 0u) |
-               (packetLocalOrder ? (std::uint64_t(1) << 40) : 0u);
+               (packetLocalOrder ? (std::uint64_t(1) << 40) : 0u) |
+               (packedSupply ? (std::uint64_t(1) << 41) : 0u);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -86,7 +92,7 @@ struct Controls
                  (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 36)) != 0,
                  (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0,
                  (value & (std::uint64_t(1) << 38)) != 0, (value & (std::uint64_t(1) << 39)) != 0,
-                 (value & (std::uint64_t(1) << 40)) != 0 };
+                 (value & (std::uint64_t(1) << 40)) != 0, (value & (std::uint64_t(1) << 41)) != 0 };
     }
 };
 

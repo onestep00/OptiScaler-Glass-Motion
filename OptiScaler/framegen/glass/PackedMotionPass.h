@@ -11,6 +11,12 @@ class PackedMotionPass
     PackedMotionFrame packed {};
     ID3D12GraphicsCommandList* command = nullptr;
     unsigned nextIndex = 0;
+    // Evaluations of the frame that carry no Streamline token: the provider's
+    // own driver-level block reads the parameter table there (GLASS_PARAM_CALL
+    // shows MotionVectors/Depth reads only on those). They reuse the batch of
+    // the frame they follow; the bound stops a stalled token from extending
+    // that reuse indefinitely.
+    unsigned untaggedReuse = 0;
     std::uint64_t dispatches = 0;
     bool initialized = false, batchReady = false;
     // A substituted input is only meaningful when the compose that writes it is
@@ -54,6 +60,7 @@ class PackedMotionPass
     {
         batchReady = false;
         nextIndex = 0;
+        untaggedReuse = 0;
         packed = {};
         command = nullptr;
     }
@@ -67,6 +74,37 @@ class PackedMotionPass
         {
             invalidateHistory();
             return {};
+        }
+        // Evaluations without a Streamline frame token. The provider's own
+        // driver-level block is the one that reads the parameter table (the
+        // parameter trace records MotionVectors/Depth reads only there), and it
+        // runs after the tagged evaluations of the frame it belongs to. The
+        // composed texture still holds that frame's correction, so the batch is
+        // extended instead of dropped. The bound stops a stalled token from
+        // extending that reuse indefinitely.
+        if (inputs.frame == UINT64_MAX)
+        {
+            if (!batchReady || untaggedReuse >= 4)
+            {
+                invalidateHistory();
+                return {};
+            }
+            ++untaggedReuse;
+            static std::atomic<unsigned> untagged { 0 };
+            if (auto* untaggedLog = gpu.logHandle())
+            {
+                if (untagged.fetch_add(1, std::memory_order_relaxed) < 4)
+                {
+                    std::fprintf(untaggedLog, "PACKED_SUBSTITUTE untagged index=%u next=%u frame=%u\n", inputs.index,
+                                 nextIndex, packed.frame);
+                    std::fflush(untaggedLog);
+                }
+            }
+            nextIndex = inputs.index + 1;
+            // These evaluations read the table under the provider's own names
+            // (the parameter trace records MotionVectors/Depth there), so the
+            // swap has to replace those keys, not the DLSSG.* aliases.
+            return { inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput(), "MotionVectors", "Depth" };
         }
         if (inputs.index == 1)
         {
@@ -141,6 +179,7 @@ class PackedMotionPass
             packed = frame;
             command = value;
             nextIndex = 2;
+            untaggedReuse = 0;
             batchReady = true;
             reuseFrame = frame;
             reuseMotion = inputs.motion;

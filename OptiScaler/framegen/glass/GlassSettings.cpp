@@ -52,7 +52,8 @@ bool load()
                               ini.GetBoolValue("GlassFG", "CompilePipelines", true),
                               ini.GetBoolValue("GlassFG", "GroupedOrder", true),
                               ini.GetBoolValue("GlassFG", "ArrayProbe", false),
-                              ini.GetBoolValue("GlassFG", "PacketLocalOrder", false) }
+                              ini.GetBoolValue("GlassFG", "PacketLocalOrder", false),
+                              ini.GetBoolValue("GlassFG", "PackedSupply", false) }
                        .packed(),
                    std::memory_order_relaxed);
     SetGeometryPipelineCompilation(Controls::unpack(controls.load(std::memory_order_relaxed)).compilePipelines);
@@ -78,6 +79,7 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "AutoStage", value.autoStage);
     ini.SetBoolValue("GlassFG", "PackedCompute", value.packedCompute);
     ini.SetBoolValue("GlassFG", "PackedWriteBack", value.packedWriteBack);
+    ini.SetBoolValue("GlassFG", "PackedSupply", value.packedSupply);
     ini.SetBoolValue("GlassFG", "PackedSkipRead", value.packedSkipRead);
     ini.SetBoolValue("GlassFG", "ArrayMapping", value.arrayMapping);
     ini.SetBoolValue("GlassFG", "CompilePipelines", value.compilePipelines);
@@ -190,6 +192,13 @@ void RenderSettings()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Copies the composed motion and depth back into the engine's own\n"
                           "FG inputs instead of substituting foreign resources.");
+    bool packedSupply = value.packedSupply;
+    changed |= ImGui::Checkbox("Answer FG input reads with the correction", &packedSupply);
+    value.packedSupply = packedSupply;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Returns the composed motion and depth for every read of those keys.\n"
+                          "The provider copies input pointers on some evaluations and reuses them\n"
+                          "on the rest, so a swap around a single call reaches only some frames.");
     bool packedSkipRead = value.packedSkipRead;
     changed |= ImGui::Checkbox("Diagnostic: skip packed record read", &packedSkipRead);
     value.packedSkipRead = packedSkipRead;
