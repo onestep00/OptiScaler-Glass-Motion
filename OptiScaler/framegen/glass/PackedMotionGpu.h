@@ -118,16 +118,24 @@ class PackedMotionGpu
     std::uint64_t dumpComposeValue = 0;
     // Context the pending dump's readback copies were recorded into.
     unsigned dumpComposeContext = 0;
-    // Diagnostic bisect switch: record the engine's own motion/depth and the
-    // packed object records as well. Those copies are the ones under suspicion
-    // for stalling the compose, so they can be excluded without touching the
-    // composed outputs.
-// The dump records the engine's own motion/depth for the same frame as well, so
-// the correction can be compared pixel by pixel instead of only inspected.
-static constexpr bool kDumpEngineInputs = true;
+    // Same-frame copies of the engine's own motion and depth. Off: those copies
+    // transition resources the frame generation path owns from this module's
+    // list, which is the remaining unproven hazard, and a dump that stalls its
+    // compose stalls the whole engine queue with it. The composed motion, the
+    // depth, the counters and the packed records still describe what this
+    // module produced. Turn it on only for an offline before/after comparison.
+    static constexpr bool kDumpEngineInputs = false;
     UINT64 dumpValue = 0;
     unsigned dumpSerial = 0, dumpFrame = 0;
     bool dumpPending = false;
+    // Steady-clock stamp of the compose that carries the pending dump. A dump
+    // whose compose never completes is abandoned instead of being retried for
+    // the rest of the session.
+    std::atomic<std::uint64_t> dumpPendingSinceMs { 0 };
+    // Health-thread-only attempt counter for the readback allocation. The
+    // buffers are over 100MB, so a request that can never be prepared has to
+    // give up instead of allocating on every health tick.
+    unsigned dumpPrepareAttempts = 0;
     std::atomic<unsigned> dumpRequests { 0 };
     std::filesystem::path dumpFolder;
     FILE* logFile = nullptr;
@@ -537,7 +545,30 @@ static constexpr bool kDumpEngineInputs = true;
     // Live channel: dump one frame's composed motion and depth as PPM images
     // plus a text sample grid. Diagnostic only: one copy of each texture and a
     // blocking map on the health thread, nothing on the normal path.
-    void requestDump() noexcept { dumpRequests.fetch_add(1, std::memory_order_relaxed); }
+    void requestDump() noexcept
+    {
+        // This runs on the frame generation evaluation thread, so it only
+        // counts the request. The readback buffers are allocated by serviceDump
+        // on the health thread: the same allocation measured 30.1ms when it ran
+        // inside the compose record of the 08:38 session.
+        dumpRequests.fetch_add(1, std::memory_order_release);
+    }
+
+    static std::uint64_t steadyNowMs() noexcept
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+    }
+
+    bool readbackReady() const noexcept
+    {
+        bool ready = readback[0] != nullptr && readback[1] != nullptr && readback[2] != nullptr &&
+                     readback[5] != nullptr && dumpFence != nullptr;
+        if (kDumpEngineInputs)
+            ready = ready && readback[3] != nullptr && readback[4] != nullptr;
+        return ready;
+    }
 
     void dumpSubmitted(ID3D12CommandQueue* queue) noexcept
     {
@@ -553,12 +584,42 @@ static constexpr bool kDumpEngineInputs = true;
 
     bool serviceDump() noexcept
     {
-        if (!dumpPending || !readback[0] || !readback[1])
+        if (!dumpPending)
+        {
+            // A counted request is prepared here, on the health thread that owns
+            // this call, and only then becomes consumable by the next compose
+            // record. The render thread never creates a committed resource.
+            if (dumpRequests.load(std::memory_order_acquire) != 0 && !readbackReady())
+            {
+                if (dumpPrepareAttempts < 4)
+                {
+                    ++dumpPrepareAttempts;
+                    prepareReadback();
+                    if (readbackReady())
+                        dumpPrepareAttempts = 0;
+                }
+                else
+                {
+                    // The request cannot be served in this session. Drop it so
+                    // the live channel stops waiting and the frame path stops
+                    // sizing its copies for a dump that will never be read.
+                    dumpRequests.store(0, std::memory_order_release);
+                    dumpPrepareAttempts = 0;
+                    static std::atomic<unsigned> unavailable { 0 };
+                    if (logFile && unavailable.fetch_add(1, std::memory_order_relaxed) < 4)
+                    {
+                        std::fprintf(logFile, "PACKED_DUMP aborted reason=readback_unavailable\n");
+                        std::fflush(logFile);
+                    }
+                }
+            }
             return false;
-        // The readback copies are recorded into the compose list, and the
-        // compose list can run on the producer queue, so the completion proof is
-        // the compose fence - the frame generation queue's own signal does not
-        // cover those copies.
+        }
+        if (!readback[0] || !readback[1])
+            return false;
+        // The readback copies are recorded into the compose list, so the
+        // completion proof is the compose fence of the context that carried
+        // them; the frame generation queue's own signal does not cover them.
         auto& dumpContext = composeContexts[dumpComposeContext < kComposeContexts ? dumpComposeContext : 0];
         ID3D12Fence* completion = dumpContext.fence != nullptr ? dumpContext.fence : dumpFence;
         if (completion == nullptr)
@@ -566,6 +627,27 @@ static constexpr bool kDumpEngineInputs = true;
         const auto completed = completion->GetCompletedValue();
         if (completed == UINT64_MAX || (dumpComposeValue != 0 && completed < dumpComposeValue))
         {
+            // Abandon a dump whose compose never completes. Keeping it pending
+            // records another copy set into every later compose and leaves the
+            // live channel waiting for a frame it will never read.
+            const auto since = dumpPendingSinceMs.load(std::memory_order_acquire);
+            if (since != 0 && steadyNowMs() - since > 10000)
+            {
+                static std::atomic<unsigned> abandoned { 0 };
+                if (logFile && abandoned.fetch_add(1, std::memory_order_relaxed) < 8)
+                {
+                    std::fprintf(logFile,
+                                 "PACKED_DUMP aborted reason=compose_timeout serial=%u frame=%u completed=%llu "
+                                 "need=%llu\n",
+                                 dumpSerial, dumpFrame, static_cast<unsigned long long>(completed),
+                                 static_cast<unsigned long long>(dumpComposeValue));
+                    std::fflush(logFile);
+                }
+                dumpPending = false;
+                dumpComposeValue = 0;
+                dumpPendingSinceMs.store(0, std::memory_order_release);
+                return false;
+            }
             // Bounded attribution: separates "our GPU work never completed" from
             // "the health thread never reached this call".
             static std::atomic<unsigned> waits { 0 };
@@ -580,13 +662,20 @@ static constexpr bool kDumpEngineInputs = true;
         }
         void* data[6] {};
         for (unsigned i = 0; i < 6; ++i)
+        {
+            if (!readback[i])
+                continue;
             if (FAILED(readback[i]->Map(0, nullptr, &data[i])) || !data[i])
             {
                 for (unsigned j = 0; j < i; ++j)
-                    readback[j]->Unmap(0, nullptr);
+                    if (readback[j])
+                        readback[j]->Unmap(0, nullptr);
                 dumpPending = false;
+                dumpComposeValue = 0;
+                dumpPendingSinceMs.store(0, std::memory_order_release);
                 return false;
             }
+        }
         const auto folder = dumpFolder.empty() ? std::filesystem::path(L"Glass") : dumpFolder;
         std::error_code error;
         std::filesystem::create_directories(folder, error);
@@ -613,7 +702,8 @@ static constexpr bool kDumpEngineInputs = true;
                      static_cast<const std::byte*>(data[2]), static_cast<const std::byte*>(data[3]),
                      static_cast<const std::byte*>(data[4]));
         for (unsigned i = 0; i < 6; ++i)
-            readback[i]->Unmap(0, nullptr);
+            if (readback[i])
+                readback[i]->Unmap(0, nullptr);
         if (logFile)
         {
             std::fprintf(logFile, "PACKED_DUMP written serial=%u frame=%u path=%ls\n", dumpSerial, dumpFrame,
@@ -622,6 +712,7 @@ static constexpr bool kDumpEngineInputs = true;
         }
         dumpPending = false;
         dumpComposeValue = 0;
+        dumpPendingSinceMs.store(0, std::memory_order_release);
         return true;
     }
 
@@ -847,7 +938,7 @@ static constexpr bool kDumpEngineInputs = true;
 
     bool prepareReadback()
     {
-        if (readback[0] && readback[1] && readback[2] && readback[3] && readback[4] && readback[5])
+        if (readbackReady())
             return true;
         ID3D12Resource* targets[] { motion, depth };
         for (unsigned i = 0; i < 2; ++i)
@@ -896,9 +987,11 @@ static constexpr bool kDumpEngineInputs = true;
                 return false;
             readback[2] = created;
         }
-        // The original FG inputs share the owned textures' descriptions, so
-        // the same footprint and size serve the comparison readbacks.
-        for (unsigned i = 3; i < 5; ++i)
+        // The original FG inputs share the owned textures' descriptions, so the
+        // same footprint and size serve the comparison readbacks. They are
+        // allocated only for the offline before/after comparison; the default
+        // dump leaves the engine's own textures untouched.
+        for (unsigned i = 3; kDumpEngineInputs && i < 5; ++i)
         {
             if (readback[i])
                 continue;
@@ -1079,8 +1172,8 @@ static constexpr bool kDumpEngineInputs = true;
         FILE* file = _wfopen(path.c_str(), L"wb");
         if (!file)
             return;
-        std::fprintf(file, "serial=%u frame=%u size=%ux%u engine_covered_pixels=%u\n", dumpSerial, dumpFrame, width,
-                     height, packedCovered);
+        std::fprintf(file, "serial=%u frame=%u size=%ux%u engine_covered_pixels=%u engine_inputs=%u\n", dumpSerial,
+                     dumpFrame, width, height, packedCovered, originalMotionData && originalDepthData ? 1u : 0u);
         if (counterData)
         {
             const auto* value = reinterpret_cast<const unsigned*>(counterData);
@@ -1103,15 +1196,21 @@ static constexpr bool kDumpEngineInputs = true;
                 const auto x = (gx * width) / 16, y = (gy * height) / 9;
                 const auto* row = reinterpret_cast<const unsigned short*>(readbackRow(motionData, 0, y));
                 const auto* depthRow = reinterpret_cast<const float*>(readbackRow(depthData, 1, y));
-                const auto* originalRow =
-                    reinterpret_cast<const unsigned short*>(readbackRow(originalMotionData, 3, y));
-                const auto* originalDepthRow =
-                    reinterpret_cast<const float*>(readbackRow(originalDepthData, 4, y));
-                std::fprintf(file,
-                             "x=%u y=%u mv=(%.6f,%.6f) original_mv=(%.6f,%.6f) depth=%.6f original_depth=%.6f\n", x, y,
-                             halfToFloat(row[x * 4 + 0]), halfToFloat(row[x * 4 + 1]),
-                             halfToFloat(originalRow[x * 4 + 0]), halfToFloat(originalRow[x * 4 + 1]), depthRow[x],
-                             originalDepthRow[x]);
+                if (originalMotionData && originalDepthData)
+                {
+                    const auto* originalRow =
+                        reinterpret_cast<const unsigned short*>(readbackRow(originalMotionData, 3, y));
+                    const auto* originalDepthRow =
+                        reinterpret_cast<const float*>(readbackRow(originalDepthData, 4, y));
+                    std::fprintf(file,
+                                 "x=%u y=%u mv=(%.6f,%.6f) original_mv=(%.6f,%.6f) depth=%.6f original_depth=%.6f\n",
+                                 x, y, halfToFloat(row[x * 4 + 0]), halfToFloat(row[x * 4 + 1]),
+                                 halfToFloat(originalRow[x * 4 + 0]), halfToFloat(originalRow[x * 4 + 1]), depthRow[x],
+                                 originalDepthRow[x]);
+                }
+                else
+                    std::fprintf(file, "x=%u y=%u mv=(%.6f,%.6f) depth=%.6f\n", x, y, halfToFloat(row[x * 4 + 0]),
+                                 halfToFloat(row[x * 4 + 1]), depthRow[x]);
             }
         }
         std::fclose(file);
@@ -1297,7 +1396,12 @@ static constexpr bool kDumpEngineInputs = true;
                          controls.packedCompute ? 1u : 0u, copyRows);
             std::fflush(logFile);
         }
-        if (!dumpPending && dumpRequests.load(std::memory_order_relaxed) && prepareReadback())
+        // A request is honoured only on a drained pipeline: the readback
+        // buffers already exist (allocated by the health thread), and no
+        // earlier compose is still executing. A request that cannot start
+        // stays counted and is picked up by a later compose instead of being
+        // recorded into a compose that is already in flight.
+        if (!dumpPending && dumpRequests.load(std::memory_order_acquire) && readbackReady() && composeReady())
         {
             transition(command, motion, outputMotionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
             transition(command, depth, outputDepthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1323,40 +1427,43 @@ static constexpr bool kDumpEngineInputs = true;
             counterState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             // Same-frame originals for a direct before/after comparison. The
             // engine's own textures are only read here, and the transition uses
-            // the state Streamline reported for the frame generation boundary;
-            // this is the copy under suspicion for the stalled dump, so it can
-            // be switched off to bisect without touching anything else.
+            // the state Streamline reported for the frame generation boundary.
+            // Those copies are the ones that can make the compose wait on
+            // resources the frame generation path owns, so the switch defaults
+            // to off and the composed motion, depth, counters and packed
+            // records are dumped on their own.
             if (kDumpEngineInputs)
             {
-            if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-                transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-                transition(command, originalDepth, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            ID3D12Resource* originals[] { originalMotion, originalDepth };
-            for (unsigned i = 0; i < 2; ++i)
-            {
-                D3D12_TEXTURE_COPY_LOCATION source {}, target {};
-                source.pResource = originals[i];
-                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                target.pResource = readback[3 + i];
-                target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                target.PlacedFootprint = readbackFootprint[3 + i];
-                command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+                if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                    transition(command, originalMotion, motionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                    transition(command, originalDepth, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                ID3D12Resource* originals[] { originalMotion, originalDepth };
+                for (unsigned i = 0; i < 2; ++i)
+                {
+                    D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+                    source.pResource = originals[i];
+                    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    target.pResource = readback[3 + i];
+                    target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    target.PlacedFootprint = readbackFootprint[3 + i];
+                    command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+                }
+                if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                    transition(command, originalMotion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionState);
+                if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                    transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
             }
-            if (motionState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-                transition(command, originalMotion, D3D12_RESOURCE_STATE_COPY_SOURCE, motionState);
-            if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
-                transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
             // Engine coverage: the packed object records themselves.
             transition(command, packed.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                        D3D12_RESOURCE_STATE_COPY_SOURCE);
             command->CopyBufferRegion(readback[5], 0, packed.resource, 0, readbackBytes[5]);
             transition(command, packed.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            }
             dumpFrame = packed.frame;
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;
+            dumpPendingSinceMs.store(steadyNowMs(), std::memory_order_release);
         }
         // The compose wrote the outputs as UAVs. Flush those writes explicitly
         // before the state transitions back: a transition out of
@@ -1415,6 +1522,9 @@ static constexpr bool kDumpEngineInputs = true;
         if (dumpFence) dumpFence->Release();
         dumpFence = nullptr;
         dumpPending = false;
+        dumpPendingSinceMs.store(0, std::memory_order_release);
+        dumpRequests.store(0, std::memory_order_relaxed);
+        dumpPrepareAttempts = 0;
         for (auto& context : composeContexts)
         {
             if (context.allocator) context.allocator->Release();

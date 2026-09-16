@@ -365,8 +365,15 @@ D3D12Callbacks makeCallbacks()
             NotifyGeometryCaptureBeforeSubmit(q, count, lists);
         }
         TimingScope compose(ComposeTiming());
-        // The compose reads the packed raster written on the producer queue.
-        // Establish that dependency before the batch that carries the FG call.
+        // The one rule this hook follows after the 2026-09-16 08:38 freeze: it
+        // never adds a wait to an engine queue. A captured producer queue can
+        // be destroyed by a session rebuild, and a wait whose value that queue
+        // only reaches later stops the GPU until the engine watchdog kills the
+        // process. Measured in that session: the compose fence stayed at zero
+        // for 140 seconds while the frame generation queue waited on it. The
+        // compose is queued on the frame generation queue itself, in submission
+        // order ahead of the batch that consumes it, which is the ordering
+        // every earlier verified session used.
         r.each([&](Entry& e)
         {
             if (!q || !e.command)
@@ -396,110 +403,43 @@ D3D12Callbacks makeCallbacks()
                     std::uint64_t value = 0;
                     void* producerQueue = nullptr;
                     const bool waited = e.session.takeProducerWait(fence, value, producerQueue);
-                    if (!waited)
-                    {
-                        // Matched the frame generation batch but the session had
-                        // no producer dependency to hand over, which leaves the
-                        // compose unqueued without any other trace.
-                        static std::atomic<unsigned> noWait { 0 };
-                        if (r.log != nullptr && noWait.fetch_add(1, std::memory_order_relaxed) < 4)
-                        {
-                            std::fprintf(r.log, "TRACE_PRENOWAIT command=%p queue=%p\n",
-                                         static_cast<void*>(candidate), static_cast<void*>(q));
-                            std::fflush(r.log);
-                        }
-                    }
-                    auto* objectQueue = static_cast<ID3D12CommandQueue*>(producerQueue);
-                    // A wait for a value this same queue will signal later never
-                    // completes: the GPU stops there and the driver resets it.
-                    const bool selfWait = waited && producerQueue != nullptr && producerQueue == q;
-                    // The compose reads the packed records and the engine's own
-                    // motion/depth textures. Reading them from the frame
-                    // generation queue is what reset the device in every session
-                    // that ran the dispatch (nvlddmkm 153 a few seconds later,
-                    // even at a single composed row), so it is submitted on the
-                    // producer queue that owns those resources instead. This
-                    // queue only waits on the compose fence.
                     bool queued = false;
-                    if (waited && !selfWait && objectQueue != nullptr)
                     {
-                        {
-                            // Driver submission of the compose: attributed
-                            // separately from the rest of the compose scope so a
-                            // block can be told apart from a descheduled thread.
-                            TimingScope queue(ComposeQueueTiming());
-                            queued = e.session.executePending(objectQueue);
-                            if (queued)
-                                if (auto* composeFence = e.session.composeFence())
-                                    q->Wait(composeFence, e.session.packedComposeSubmitted());
-                        }
-                        if (queued)
-                        {
-                            if (r.log && ReadControls().trace && TraceWanted())
-                            {
-                                std::fprintf(r.log, "TRACE_WAIT_FENCE producer=%llu completed=%llu objectQueue=%p queue=%p\n",
-                                             static_cast<unsigned long long>(value),
-                                             static_cast<unsigned long long>(fence->GetCompletedValue()), objectQueue, q);
-                                std::fflush(r.log);
-                            }
-                        }
-                    }
-                    else if (selfWait)
-                    {
-                        // The packed raster was produced by an earlier submission
-                        // on this same queue, so a compose queued here is already
-                        // ordered after it. Waiting on that fence would deadlock
-                        // (this queue signals it later), and skipping the compose
-                        // left the FG evaluating an input that was never written.
-                        // Queue the compose in order instead.
-                        {
-                            TimingScope queue(ComposeQueueTiming());
-                            queued = e.session.executePending(q);
-                        }
-                        if (r.log && ReadControls().trace && TraceWanted())
-                        {
-                            std::fprintf(r.log,
-                                         "TRACE_WAIT_SKIP producer=%llu completed=%llu queue=%p submitted=%u\n",
-                                         static_cast<unsigned long long>(value),
-                                         static_cast<unsigned long long>(fence->GetCompletedValue()), q,
-                                         queued ? 1u : 0u);
-                            std::fflush(r.log);
-                        }
-                    }
-                    // Fallback: the producer queue is unknown or its submission
-                    // was already consumed, so the producer fence cannot be
-                    // proven to belong to another queue. Waiting on a value this
-                    // queue only reaches later stops the GPU until the driver
-                    // reset, which is the one unbounded wait this hook could add
-                    // to the engine's own submission. The compose is queued here
-                    // only when the producer already completed, and the skipped
-                    // frames are counted instead.
-                    if (!queued && waited && !selfWait)
-                    {
-                        const auto producerCompleted = fence != nullptr ? fence->GetCompletedValue() : 0;
-                        if (fence != nullptr && producerCompleted >= value)
-                        {
-                            TimingScope queue(ComposeQueueTiming());
-                            queued = e.session.executePending(q);
-                        }
-                        else
-                        {
-                            static std::atomic<unsigned> unproven { 0 };
-                            if (r.log != nullptr && unproven.fetch_add(1, std::memory_order_relaxed) < 8)
-                            {
-                                std::fprintf(r.log,
-                                             "TRACE_WAIT_UNPROVEN producer=%llu completed=%llu queue=%p\n",
-                                             static_cast<unsigned long long>(value),
-                                             static_cast<unsigned long long>(producerCompleted),
-                                             static_cast<void*>(q));
-                                std::fflush(r.log);
-                            }
-                        }
+                        // Driver submission of the compose: attributed
+                        // separately from the rest of the compose scope so a
+                        // block can be told apart from a descheduled thread.
+                        TimingScope queue(ComposeQueueTiming());
+                        queued = e.session.executePending(q);
                     }
                     // The marker now describes the queued compose on the GPU, not
                     // the CPU window, so it is written only when one was queued.
                     if (queued)
                         raiseComposeMarker(waited ? value : 0);
+                    if (r.log != nullptr)
+                    {
+                        // Bounded attribution: the producer queue and its fence
+                        // are read for the record only. They are never submitted
+                        // to and never waited on, so a stale handle cannot stall
+                        // the engine's own submission.
+                        static std::atomic<unsigned> attribution { 0 };
+                        if (attribution.fetch_add(1, std::memory_order_relaxed) < 8)
+                        {
+                            std::fprintf(r.log,
+                                         "TRACE_WAIT_UNUSED waited=%u producer=%llu completed=%llu producerQueue=%p "
+                                         "queue=%p submitted=%u\n",
+                                         waited ? 1u : 0u, static_cast<unsigned long long>(value),
+                                         static_cast<unsigned long long>(fence != nullptr ? fence->GetCompletedValue() : 0),
+                                         producerQueue, static_cast<void*>(q), queued ? 1u : 0u);
+                            std::fflush(r.log);
+                        }
+                        else if (ReadControls().trace && TraceWanted())
+                        {
+                            std::fprintf(r.log, "TRACE_WAIT_SKIP producer=%llu queue=%p submitted=%u\n",
+                                         static_cast<unsigned long long>(value), static_cast<void*>(q),
+                                         queued ? 1u : 0u);
+                            std::fflush(r.log);
+                        }
+                    }
                     break;
                 }
             }
