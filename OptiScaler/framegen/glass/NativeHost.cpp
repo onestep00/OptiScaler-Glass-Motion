@@ -10,6 +10,7 @@
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
 #include "NvngxDlssgBridge.h"
+#include "NgxParameterProbe.h"
 #include "GeometryHealth.h"
 #include "GlassHostTiming.h"
 #include "GeometryCommands.h"
@@ -1473,7 +1474,24 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     {
         ScopedInputs<NVSDK_NGX_Parameter> substitute(parameters, prepared);
         applied = substitute.applied();
-        result = original(command, handle, parameters, callback);
+        // Live diagnostic: hand the provider a forwarding wrapper so the keys it
+        // actually reads (and whether the motion/depth pointers it gets are the
+        // substituted textures) are recorded instead of assumed. Only while the
+        // trace switch is on; the normal path passes the original pointer.
+        if (controls.trace && r.log != nullptr)
+        {
+            auto& probe = NgxParameterProbeInstance();
+            probe.bind(parameters, r.log, inputs.index, inputs.count, inputs.frame, prepared.motion, prepared.depth,
+                       inputs.motion, inputs.depth);
+            result = original(command, handle, &probe, callback);
+            static std::atomic<unsigned> probeCalls { 0 };
+            if (probeCalls.fetch_add(1, std::memory_order_relaxed) < 60)
+                probe.finish(r.log);
+            if (r.evaluations % 600 == 0)
+                probe.report(r.log);
+        }
+        else
+            result = original(command, handle, parameters, callback);
     }
     catch (...)
     {
