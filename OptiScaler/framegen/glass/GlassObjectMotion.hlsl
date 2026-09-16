@@ -85,15 +85,16 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     uint motionX = (packed.y >> 3) & 0x7ffu;
     uint motionY = ((packed.x >> 24) | (packed.y << 8)) & 0x7ffu;
     float2 objectPixels = float2(signed11(motionX), signed11(motionY)) * 0.125;
-    // MotionScale is the provider's texel->pixel factor (DLSSG.MvecScaleX/Y),
-    // 2560x1440 in the live path: pixels = texel * MotionScale. The engine
-    // stores normalized motion here (dump 2026-09-16: |original| <= 0.0161
-    // while a pixel-space frame would show tens of pixels on any moving
-    // content), and packed records are captured in pixels, so the texel value
-    // is pixels / MotionScale. The earlier expression multiplied by
-    // MotionScale and divided by Size, which cancelled to pixels and left
-    // every covered value ~2560x above the engine's own range.
-    float2 objectMotion = objectPixels / MotionScale;
+    // The engine feeds normalized motion: its own MV.Scale parameter equals the
+    // render extent (2560x1440 in the live path), so pixels = texel * extent and
+    // the injected texel is pixels / extent. MotionScale is the provider's
+    // declaration and is 1 in the Streamline driver path even though the texture
+    // stays normalized there; dividing by 1 left every covered value 2560x above
+    // the engine's range (dump 2026-09-16 11:38: covered |mv| median 905px vs
+    // engine 0.48px). Only trust the declared scale when it is a real
+    // texel->pixel factor (> 1.5), otherwise convert with the render extent.
+    float2 mvUnit = any(MotionScale > 1.5) ? MotionScale : float2(Size);
+    float2 objectMotion = objectPixels / mvUnit;
     float opacity = float((packed.x >> 16) & 0xffu) / 255.0;
     bool edge = EdgeWidth != 0 && objectBoundary(pixel, id);
     // The visible boundary always takes the object's own motion. Inside it a
@@ -113,13 +114,17 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     }
 
     originalMotion.xy = lerp(originalMotion.xy, objectMotion, weight);
-    if (edge)
-    {
-        uint depthKey = packed.y >> 14;
-        bool reverseDepth = (packed.x & 0x8000u) != 0;
-        uint depthBits = reverseDepth ? depthKey : 0x3ffffu - depthKey;
-        originalDepth = float(depthBits) / 262143.0;
-    }
+    // Motion and depth have to describe the same surface. The engine writes no
+    // depth for the transparent pass, so the depth under a corrected motion
+    // still belongs to the content behind the object; a generator that checks
+    // one against the other keeps the background flow for that region. Both are
+    // blended with the same weight, so the strength option still decides how
+    // much of a transmissive pixel keeps the content behind it.
+    uint depthKey = packed.y >> 14;
+    bool reverseDepth = (packed.x & 0x8000u) != 0;
+    uint depthBits = reverseDepth ? depthKey : 0x3ffffu - depthKey;
+    float objectDepth = float(depthBits) / 262143.0;
+    originalDepth = lerp(originalDepth, objectDepth, weight);
     Motion[pixel] = originalMotion;
     Depth[pixel] = originalDepth;
     Selection[pixel] = edge ? 1.0 : weight;
