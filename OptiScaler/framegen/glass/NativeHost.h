@@ -34,6 +34,13 @@ struct NativeHostStatus
     // the "transparent object attached to the background" behaviour.
     std::uint64_t evaluationsByIndex[8] {};
     std::uint64_t substitutionsByIndex[8] {};
+    // Path 0 carries the DLSS-G parameter names, path 1 the MotionVectors/Depth
+    // alias shared with the upscaler and Ray Reconstruction. Only path 0 can be
+    // the frame generator, so these separate "correction ran" from "correction
+    // ran on the call the generator consumes".
+    std::uint64_t evaluationsByPath[2] {};
+    std::uint64_t substitutionsByPath[2] {};
+    std::uint64_t preparedByPath[2] {};
     // Skips that were harmless (the motion texture was already corrected) and
     // skips that left a frame with the engine's original motion vectors.
     std::uint64_t unsubstitutedReusedMotion = 0, unsubstitutedFreshMotion = 0;

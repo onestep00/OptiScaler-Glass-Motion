@@ -110,6 +110,9 @@ void writeStatus(std::ofstream& file)
             file << " " << i << ":" << host.substitutionsByIndex[i] << "/" << host.evaluationsByIndex[i];
     file << " (substituted/evaluated) skipped_reused=" << host.unsubstitutedReusedMotion
          << " skipped_uncorrected=" << host.unsubstitutedFreshMotion << "\n";
+    file << "host_by_path dlssg=" << host.substitutionsByPath[0] << "/" << host.evaluationsByPath[0]
+         << " alias=" << host.substitutionsByPath[1] << "/" << host.evaluationsByPath[1]
+         << " prepared=" << host.preparedByPath[0] << "/" << host.preparedByPath[1] << "\n";
     file << "plugin loaded=" << (GlassPluginLoaded() ? 1 : 0) << "\n";
     const auto mapping = ReadArrayMappingStats();
     file << "arraymap entries=" << mapping.entries << " published=" << mapping.published

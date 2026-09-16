@@ -132,6 +132,26 @@ struct PreparedInputs
     ID3D12Resource* layerOpacity = nullptr;
     const char* layerMvecsKey = "DLSS.TransparencyLayerMvecs";
     const char* layerOpacityKey = "DLSS.TransparencyLayerOpacity";
+
+    // Positional aggregate initialization broke twice already (a new field in
+    // the middle silently re-bound the resource pointers to the key strings).
+    // The two producers fill exactly these eight fields.
+    static PreparedInputs make(ID3D12Resource* originalMotion, ID3D12Resource* originalDepth,
+                               ID3D12Resource* motion, ID3D12Resource* depth, const char* motionKey,
+                               const char* depthKey, ID3D12Resource* layerMvecs,
+                               ID3D12Resource* layerOpacity) noexcept
+    {
+        PreparedInputs value;
+        value.originalMotion = originalMotion;
+        value.originalDepth = originalDepth;
+        value.motion = motion;
+        value.depth = depth;
+        value.motionKey = motionKey;
+        value.depthKey = depthKey;
+        value.layerMvecs = layerMvecs;
+        value.layerOpacity = layerOpacity;
+        return value;
+    }
 };
 
 // Keep this scope strictly around the native FG call. The shared parameter

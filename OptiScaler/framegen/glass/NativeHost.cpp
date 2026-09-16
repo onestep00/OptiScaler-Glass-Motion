@@ -94,6 +94,12 @@ struct Runtime
     // real frame, 1..n are the generated ones; a missing substitution on any of
     // them means that frame kept the engine's original motion vectors.
     uint64_t evaluationsByIndex[8] {}, substitutionsByIndex[8] {};
+    // Which of the two evaluation paths in the hook produced the counts above.
+    // Path 0 carries the DLSS-G names, path 1 is the MotionVectors/Depth alias
+    // that the upscaler and Ray Reconstruction use too. Only path 0 can feed the
+    // frame generator, so a correction that never lands there explains a display
+    // that does not change. Order: evaluations/substitutions/prepared.
+    uint64_t evaluationsByPath[2] {}, substitutionsByPath[2] {}, preparedByPath[2] {};
     // A skipped substitution is only harmless when the motion texture it would
     // have written was already corrected by an earlier evaluation of the same
     // engine frame (the host evaluates one frame once per back buffer). A skip
@@ -1149,6 +1155,12 @@ NativeHostStatus ReadNativeHostStatus() noexcept
     }
     status.unsubstitutedReusedMotion = r.unsubstitutedReusedMotion;
     status.unsubstitutedFreshMotion = r.unsubstitutedFreshMotion;
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        status.evaluationsByPath[i] = r.evaluationsByPath[i];
+        status.substitutionsByPath[i] = r.substitutionsByPath[i];
+        status.preparedByPath[i] = r.preparedByPath[i];
+    }
     status.active = r.active ? 1u : 0u;
     status.retiring = (r.retiring[0] ? 1u : 0u) + (r.retiring[1] ? 1u : 0u);
     status.stopped = r.stopped ? 1u : 0u;
@@ -1187,6 +1199,13 @@ void ReportNativeHostLog() noexcept
         std::fprintf(log, " (substituted/evaluated) skipped_reused=%llu skipped_uncorrected=%llu\n",
                      static_cast<unsigned long long>(status.unsubstitutedReusedMotion),
                      static_cast<unsigned long long>(status.unsubstitutedFreshMotion));
+        std::fprintf(log, "NATIVE_HOST_BY_PATH dlssg=%llu/%llu alias=%llu/%llu prepared=%llu/%llu\n",
+                     static_cast<unsigned long long>(status.substitutionsByPath[0]),
+                     static_cast<unsigned long long>(status.evaluationsByPath[0]),
+                     static_cast<unsigned long long>(status.substitutionsByPath[1]),
+                     static_cast<unsigned long long>(status.evaluationsByPath[1]),
+                     static_cast<unsigned long long>(status.preparedByPath[0]),
+                     static_cast<unsigned long long>(status.preparedByPath[1]));
         ReportGeometryHost(log);
         std::fflush(log);
     }
@@ -1327,6 +1346,10 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     Inputs inputs;
     std::shared_ptr<Entry> entry;
     PreparedInputs prepared;
+    // 0 = DLSS-G parameter names, 1 = MotionVectors/Depth alias. Declared outside
+    // the read block because the trace, the counters and the report all use it
+    // after the block closes.
+    unsigned pathIndex = 0;
     auto controls = ReadControls();
     if (controls.autoStage)
     {
@@ -1335,7 +1358,15 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     }
     if (Inputs::read(parameters, inputs))
     {
-        if (inputs.motionKey != nullptr && std::strcmp(inputs.motionKey, "DLSSG.MVecs") != 0)
+        // Path 0: the evaluation carries the DLSS-G names (DLSSG.MVecs/Depth and
+        // the frame indices), so it is the frame generator. Path 1: only
+        // MotionVectors/Depth are named, which is also how the upscaler and Ray
+        // Reconstruction read their inputs. Both reach this hook because it
+        // wraps the NGX provider export, so they have to be counted apart: the
+        // parameter trace cannot tell which feature read a shared key.
+        const bool dlssgPath = inputs.motionKey == nullptr || std::strcmp(inputs.motionKey, "DLSSG.MVecs") == 0;
+        pathIndex = dlssgPath ? 0u : 1u;
+        if (!dlssgPath)
         {
             // The driver-level block (Streamline's frame generation plugin
             // through _nvngx.dll) names only the two textures. The motion-vector
@@ -1368,6 +1399,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             ++entry->evaluations;
             if (inputs.index < 8)
                 ++r.evaluationsByIndex[inputs.index];
+            ++r.evaluationsByPath[pathIndex];
             D3D12_RESOURCE_STATES states[3] {};
             ID3D12Resource* resources[] = { inputs.motion, inputs.color, inputs.depth };
             InternalD3D12Scope ownCalls;
@@ -1494,16 +1526,19 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         // trace switch is on; the normal path passes the original pointer.
         if (controls.trace || controls.packedSupply)
         {
-            auto& probe = NgxParameterProbeInstance();
+            auto& probe = NgxParameterProbeInstance(pathIndex);
             probe.bind(parameters, r.log, inputs.index, inputs.count, inputs.frame, prepared.motion, prepared.depth,
-                       inputs.motion, inputs.depth);
+                       inputs.motion, inputs.depth, pathIndex);
             if (controls.packedSupply)
                 probe.supply(prepared.motion, prepared.depth, inputs.motionKey, inputs.depthKey,
                              prepared.layerMvecs, prepared.layerOpacity);
             else
                 probe.supply(nullptr, nullptr, nullptr, nullptr);
-            static std::atomic<unsigned> probeBinds { 0 };
-            if (r.log != nullptr && probeBinds.fetch_add(1, std::memory_order_relaxed) < 6)
+            // Per path, so the generator path records its own provider module even
+            // when the alias path was bound first.
+            static std::atomic<unsigned> probeBinds[2] { 0, 0 };
+            const unsigned bindSlot = pathIndex == 0 ? 0u : 1u;
+            if (r.log != nullptr && probeBinds[bindSlot].fetch_add(1, std::memory_order_relaxed) < 4)
             {
                 wchar_t providerPath[MAX_PATH] {};
                 HMODULE owner = nullptr;
@@ -1512,16 +1547,28 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                                        reinterpret_cast<LPCWSTR>(original), &owner) &&
                     owner != nullptr)
                     GetModuleFileNameW(owner, providerPath, MAX_PATH);
-                std::fprintf(r.log, "GLASS_PARAM_BIND provider=%ls function=%p applied=%u supply=%u index=%u frame=%llu\n",
-                             providerPath, reinterpret_cast<void*>(original), applied ? 1u : 0u,
+                std::fprintf(r.log,
+                             "GLASS_PARAM_BIND path=%s provider=%ls function=%p applied=%u supply=%u index=%u frame=%llu\n",
+                             pathIndex == 0 ? "dlssg" : "alias", providerPath, reinterpret_cast<void*>(original),
+                             applied ? 1u : 0u,
                              controls.packedSupply ? 1u : 0u, inputs.index,
                              static_cast<unsigned long long>(inputs.frame));
                 std::fflush(r.log);
             }
             result = original(command, handle, &probe, callback);
-            static std::atomic<unsigned> probeCalls { 0 };
-            if (controls.trace && probeCalls.fetch_add(1, std::memory_order_relaxed) < 60)
-                probe.finish(r.log);
+            // Per-call key lists for the generator path only: the upscaler and
+            // Ray Reconstruction go through the same hook and would flood the
+            // log with their own reads. Path 1 is reported once on demand.
+            static std::atomic<unsigned> probeCalls { 0 }, aliasProbeCalls { 0 };
+            if (controls.trace)
+            {
+                const auto call = pathIndex == 0 ? probeCalls.fetch_add(1, std::memory_order_relaxed)
+                                                 : aliasProbeCalls.fetch_add(1, std::memory_order_relaxed);
+                const bool early = call < 24;
+                const bool sparse = call < 2000 && (call % 200) == 0;
+                if (r.log != nullptr && (early || sparse))
+                    probe.finish(r.log);
+            }
             if (controls.trace && r.evaluations % 600 == 0)
                 probe.report(r.log);
         }
@@ -1547,6 +1594,10 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         r.substitutions += applied;
         if (applied && inputs.index < 8)
             ++r.substitutionsByIndex[inputs.index];
+        if (applied)
+            ++r.substitutionsByPath[pathIndex];
+        if (prepared.motion != nullptr)
+            ++r.preparedByPath[pathIndex];
         if (applied)
         {
             r.correctedMotion[r.correctedMotionNext++ & 3] = inputs.motion;

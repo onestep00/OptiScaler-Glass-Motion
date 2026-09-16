@@ -387,7 +387,10 @@ class NativeSession
                     // quality changes). The compose list matches the type and
                     // the fences are device objects, so follow the engine
                     // instead of leaving the correction permanently off.
-                    if (log)
+                    // The engine alternates two queues every frame, so this is
+                    // bounded: the log reached 68k duplicate pairs in one session.
+                    static std::atomic<unsigned> queueAdoptions { 0 };
+                    if (log && queueAdoptions.fetch_add(1, std::memory_order_relaxed) < 8)
                     {
                         std::fprintf(log, "NATIVE_HOST fg_queue adopt=1 old=%p new=%p type=%u\n",
                                      static_cast<void*>(fgQueue), static_cast<void*>(queue),
