@@ -244,6 +244,20 @@ class VertexHistoryCache
         return vacant->allocation;
     }
     unsigned liveEntries() const { return live; }
+    // Diagnostics for a full arena. These three numbers separate the two
+    // possible causes: a retirement watermark that never advances (entries stay
+    // unreclaimable although nothing reads them) and a working set that the
+    // two-frame N-1 preservation window keeps pinned at the capacity limit.
+    std::uint32_t frameNumber() const { return currentFrame; }
+    std::uint32_t retiredFrameNumber() const { return retiredFrame; }
+    unsigned pinnedForPreviousFrame() const
+    {
+        unsigned pinned = 0;
+        for (const auto& entry : entries)
+            if (entry.allocation && currentFrame && entry.lastFrame >= currentFrame - 1)
+                ++pinned;
+        return pinned;
+    }
     unsigned reservedVertices() const { return usedPages * PageVertices; }
     unsigned capacityPages() const { return Pages; }
     unsigned usedPageCount() const { return usedPages; }

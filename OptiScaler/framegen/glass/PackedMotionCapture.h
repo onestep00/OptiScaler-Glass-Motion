@@ -78,6 +78,12 @@ struct PackedMotionCaptureStatus
     // buddy allocator can still serve; the pair separates true exhaustion
     // from fragmentation without a per-request log.
     unsigned historyArenaPages = 0, historyArenaUsedPages = 0, historyArenaLargestFree = 0;
+    // Reclamation window when the status was read. historyPinnedEntries counts
+    // entries the two-frame N-1 rule still protects; if that count is close to
+    // historyLive the arena is short of capacity, and if historyRetiredFrame
+    // trails historyFrame the watermark is the reason nothing is reclaimed.
+    std::uint32_t historyFrame = 0, historyRetiredFrame = 0;
+    unsigned historyPinnedEntries = 0;
     // Which engine mesh families reach the packed capture. Per-chunk rejection
     // counters cannot answer "was this material family captured at all", which
     // is the question a missing object (a glass, a railing) raises.

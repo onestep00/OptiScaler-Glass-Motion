@@ -118,13 +118,13 @@ class PackedMotionGpu
     std::uint64_t dumpComposeValue = 0;
     // Context the pending dump's readback copies were recorded into.
     unsigned dumpComposeContext = 0;
-    // Same-frame copies of the engine's own motion and depth. Off: those copies
-    // transition resources the frame generation path owns from this module's
-    // list, which is the remaining unproven hazard, and a dump that stalls its
-    // compose stalls the whole engine queue with it. The composed motion, the
-    // depth, the counters and the packed records still describe what this
-    // module produced. Turn it on only for an offline before/after comparison.
-    static constexpr bool kDumpEngineInputs = false;
+    // Same-frame copies of the engine's own motion and depth, so one dump holds
+    // both sides of the correction and the pixels can be compared directly.
+    // On: verified with the compose running on the frame generation queue,
+    // where the transition of the engine's own textures is the same one the
+    // main copy already performs every frame. The copy happens only while a
+    // dump is pending, never on the normal path.
+    static constexpr bool kDumpEngineInputs = true;
     UINT64 dumpValue = 0;
     unsigned dumpSerial = 0, dumpFrame = 0;
     bool dumpPending = false;

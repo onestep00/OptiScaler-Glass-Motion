@@ -86,5 +86,8 @@ class PackedMotionMappings
         return histories.stats;
     }
     unsigned liveHistories() const { return histories.liveEntries(); }
+    std::uint32_t historyFrame() const { return histories.frameNumber(); }
+    std::uint32_t historyRetiredFrame() const { return histories.retiredFrameNumber(); }
+    unsigned historyPinnedEntries() const { return histories.pinnedForPreviousFrame(); }
 };
 } // namespace GlassFg

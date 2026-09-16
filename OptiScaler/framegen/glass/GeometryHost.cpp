@@ -272,7 +272,8 @@ void ReportGeometryHost(FILE* log) noexcept
         // frames, which means that element had no usable previous transform.
         std::fprintf(log,
                      "GEOMETRY_HISTORY hits=%llu inserted=%llu reclaimed=%llu rejected_topology=%llu set_full=%llu "
-                     "arena_full=%llu arena_reclaimed=%llu live=%u arena_pages=%u arena_used=%u arena_free_max=%u\n",
+                     "arena_full=%llu arena_reclaimed=%llu live=%u arena_pages=%u arena_used=%u arena_free_max=%u "
+                     "frame=%u retired=%u pinned=%u\n",
                      static_cast<unsigned long long>(packed.historyHits),
                      static_cast<unsigned long long>(packed.historyInserted),
                      static_cast<unsigned long long>(packed.historyReclaimed),
@@ -280,7 +281,8 @@ void ReportGeometryHost(FILE* log) noexcept
                      static_cast<unsigned long long>(packed.historySetFull),
                      static_cast<unsigned long long>(packed.historyArenaFull),
                      static_cast<unsigned long long>(packed.historyArenaReclaimed), packed.historyLive,
-                     packed.historyArenaPages, packed.historyArenaUsedPages, packed.historyArenaLargestFree);
+                     packed.historyArenaPages, packed.historyArenaUsedPages, packed.historyArenaLargestFree,
+                     packed.historyFrame, packed.historyRetiredFrame, packed.historyPinnedEntries);
         std::fprintf(log, "GEOMETRY_ARENA_FULL sizes=");
         for (unsigned i = 0; i < packed.historyArenaFullPageCount; ++i)
             std::fprintf(log, "%s%u", i ? "," : "", packed.historyArenaFullPages[i]);
