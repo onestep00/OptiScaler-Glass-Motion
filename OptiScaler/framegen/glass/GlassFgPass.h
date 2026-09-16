@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace GlassFg
 {
@@ -115,6 +116,12 @@ struct PreparedInputs
     ID3D12Resource* depth = nullptr;
     const char* motionKey = "DLSSG.MVecs";
     const char* depthKey = "DLSSG.Depth";
+    // The same textures are published under the provider's own names too (the
+    // parameter trace records MotionVectors/Depth reads). Whichever name the
+    // consumer reads during the evaluation has to see the corrected texture, so
+    // both are swapped when the table holds them.
+    const char* motionAlias = "MotionVectors";
+    const char* depthAlias = "Depth";
 };
 
 // Keep this scope strictly around the native FG call. The shared parameter
@@ -123,30 +130,60 @@ template <class Parameters> class ScopedInputs
 {
     Parameters* params = nullptr;
     PreparedInputs pair {};
+    // Names that were actually swapped, so the restore is exact and a name the
+    // table does not publish is never created.
+    const char* motionNames[2] { nullptr, nullptr };
+    const char* depthNames[2] { nullptr, nullptr };
+    unsigned motionCount = 0, depthCount = 0;
+
+    static bool same(const char* left, const char* right) noexcept
+    {
+        return left != nullptr && right != nullptr && std::strcmp(left, right) == 0;
+    }
+    static bool holds(Parameters* parameters, const char* name, ID3D12Resource* original) noexcept
+    {
+        ID3D12Resource* current = nullptr;
+        return parameters != nullptr && name != nullptr && original != nullptr &&
+               parameters->Get(name, &current) == 1 && current == original;
+    }
+    void swap(Parameters* parameters, const char* name, ID3D12Resource* original, ID3D12Resource* replacement,
+              const char* (&names)[2], unsigned& count) noexcept
+    {
+        if (name == nullptr || original == nullptr || replacement == nullptr)
+            return;
+        for (unsigned i = 0; i < count; ++i)
+            if (same(names[i], name))
+                return;
+        if (!holds(parameters, name, original))
+            return;
+        parameters->Set(name, replacement);
+        names[count++] = name;
+    }
 
   public:
     ScopedInputs(Parameters* parameters, const PreparedInputs& prepared)
     {
-        ID3D12Resource* motion = nullptr;
-        ID3D12Resource* depth = nullptr;
-        if (!parameters || !prepared.originalMotion || !prepared.originalDepth || !prepared.motion || !prepared.depth ||
-            parameters->Get(prepared.motionKey, &motion) != 1 || parameters->Get(prepared.depthKey, &depth) != 1 ||
-            motion != prepared.originalMotion || depth != prepared.originalDepth)
+        if (!parameters || !prepared.originalMotion || !prepared.originalDepth || !prepared.motion || !prepared.depth)
+            return;
+        swap(parameters, prepared.motionKey, prepared.originalMotion, prepared.motion, motionNames, motionCount);
+        swap(parameters, prepared.depthKey, prepared.originalDepth, prepared.depth, depthNames, depthCount);
+        swap(parameters, prepared.motionAlias, prepared.originalMotion, prepared.motion, motionNames, motionCount);
+        swap(parameters, prepared.depthAlias, prepared.originalDepth, prepared.depth, depthNames, depthCount);
+        if (motionCount == 0 && depthCount == 0)
             return;
         params = parameters;
         pair = prepared;
-        params->Set(pair.motionKey, pair.motion);
-        params->Set(pair.depthKey, pair.depth);
     }
     ScopedInputs(const ScopedInputs&) = delete;
     ScopedInputs& operator=(const ScopedInputs&) = delete;
     ~ScopedInputs()
     {
-        if (params)
-        {
-            params->Set(pair.motionKey, pair.originalMotion);
-            params->Set(pair.depthKey, pair.originalDepth);
-        }
+        if (!params)
+            return;
+        for (unsigned i = 0; i < motionCount; ++i)
+            params->Set(motionNames[i], pair.originalMotion);
+        for (unsigned i = 0; i < depthCount; ++i)
+            params->Set(depthNames[i], pair.originalDepth);
     }
     bool applied() const { return params != nullptr; }
 };
