@@ -85,15 +85,15 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     uint motionX = (packed.y >> 3) & 0x7ffu;
     uint motionY = ((packed.x >> 24) | (packed.y << 8)) & 0x7ffu;
     float2 objectPixels = float2(signed11(motionX), signed11(motionY)) * 0.125;
-    // The FG input texture holds the engine's own motion in normalized units,
-    // not pixels: the 2026-09-16 pan dumps measured engine values of
-    // (-0.008636,-0.003626) where the object moved (-32.875,-4.625) pixels,
-    // i.e. pixels / size on both axes (2560x1440). Packed records are captured
-    // in pixels, so divide by the extent and apply the provider's mvec scale
-    // (DLSSG.MvecScaleX/Y, 1.0 in the live path). Writing pixels made every
-    // covered value ~2500x larger than the engine's, so the frame generator
-    // could not use the substitution as motion at all.
-    float2 objectMotion = objectPixels * MotionScale / float2(Size);
+    // MotionScale is the provider's texel->pixel factor (DLSSG.MvecScaleX/Y),
+    // 2560x1440 in the live path: pixels = texel * MotionScale. The engine
+    // stores normalized motion here (dump 2026-09-16: |original| <= 0.0161
+    // while a pixel-space frame would show tens of pixels on any moving
+    // content), and packed records are captured in pixels, so the texel value
+    // is pixels / MotionScale. The earlier expression multiplied by
+    // MotionScale and divided by Size, which cancelled to pixels and left
+    // every covered value ~2560x above the engine's own range.
+    float2 objectMotion = objectPixels / MotionScale;
     float opacity = float((packed.x >> 16) & 0xffu) / 255.0;
     bool edge = EdgeWidth != 0 && objectBoundary(pixel, id);
     // The visible boundary always takes the object's own motion. Inside it a
