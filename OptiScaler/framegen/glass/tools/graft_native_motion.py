@@ -18,13 +18,15 @@ of a world position are recorded as unsupported with the reason.
 Twin selection is factory-consistent. A target whose vertex factories
 (all-cache-techniques.json) include a skinned one (MeshSkinned, MeshExtSkinned,
 Garment*, SingleBone, SkinnedVehicle, DestructibleSkinned, LightBlockers) never
-takes its root graft from a twin whose previous graph is root-only (class 1:
-MotionMatrix, camera rows and vertex attributes only). Such a twin matches when
-the target's current position collapses to a rigid path; its previous graph
-would supply the proxy root transform instead of per-vertex deformation. Twins
-reading skinning inputs/t10 (class 2) or preskinned t9/b3 history (class 4) stay
-eligible; if none validates, the root status is factory_mismatch and only the
-camera-only variant is written.
+takes its root graft from a twin of another vertex factory whose previous graph
+is root-only (class 1: MotionMatrix, camera rows and vertex attributes only).
+Such a twin matches when the target's current position collapses to a rigid
+path; its previous graph would supply the proxy root transform instead of
+per-vertex deformation. A twin sharing a vertex factory with the target is the
+engine's own velocity route for that factory and stays eligible even when it is
+root-only, as do twins reading skinning inputs/t10 (class 2) or preskinned t9/b3
+history (class 4). If none validates, the root status is factory_mismatch and
+only the camera-only variant is written.
 """
 from pathlib import Path
 from collections import Counter,defaultdict
@@ -646,9 +648,11 @@ def main():
         candidates=sorted(r['native_candidates'],key=lambda n:min(x['dependencies']['instructions'] for x in n['previous']))
         families=sorted(factories.get(r['sha256'],()))
         if not families:raise ValueError(r['sha256']+' has no technique in all-cache-techniques.json')
-        # Factory-consistent twins (module docstring): a skinned target refuses root-only twins.
+        # Factory-consistent twins (module docstring): a skinned target refuses
+        # root-only twins of another vertex factory.
         skinned=any('Skinned' in f for f in families)
-        twins=[n for n in candidates if not skinned or previous_class(n)!=1]
+        twins=[n for n in candidates if not skinned or previous_class(n)!=1
+               or not factories.get(n['sha256'],set()).isdisjoint(families)]
         def attempt(build,path,candidates):
             errors=[]
             for n in candidates:
@@ -664,8 +668,8 @@ def main():
                       specializations=n.get('specializations',{}),**info)
         elif len(twins)<len(candidates):
             row=dict(sha256=r['sha256'],families=families,status='factory_mismatch',errors=[
-                f'{len(candidates)-len(twins)} native twin(s) with a root-only previous graph (no skinning input, '
-                't10 or preskinned t9/b3) refused for a skinned vertex factory']+errors)
+                f'{len(candidates)-len(twins)} native twin(s) of another vertex factory with a root-only previous graph '
+                '(no skinning input, t10 or preskinned t9/b3) refused for a skinned vertex factory']+errors)
         else:row=dict(sha256=r['sha256'],families=families,status='unsupported',errors=errors)
         # Camera-only variant: prefer the root graft's own native candidate.
         if n:candidates=[n]+[c for c in candidates if c is not n]

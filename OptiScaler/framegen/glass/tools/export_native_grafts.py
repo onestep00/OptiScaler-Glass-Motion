@@ -15,8 +15,9 @@ own current world position; it reads no b7 row. It is exported when
 camera_status is "validated" and its camera verification row has all checks
 true, beside its root graft or alone:
   - a matched shader whose root graft is not exported (status "unsupported",
-    or "factory_mismatch": a skinned-factory target whose root-only twins
-    graft_native_motion.py refused and whose other twins did not validate);
+    or "factory_mismatch": a skinned-factory target whose root-only twins of
+    another vertex factory graft_native_motion.py refused and whose other
+    twins did not validate);
   - a generic_camera shader (no native current-position twin: the canonical
     native previous view-projection multiply on its own world position).
 A camera-only record's supply_class is the target's own current position class
