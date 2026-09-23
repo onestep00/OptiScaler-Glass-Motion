@@ -128,6 +128,22 @@ struct DeferredLog
     }
 };
 
+// Blocking-acquisition diagnostic, measured only while the trace control is on
+// (off by default): prepare calls that waited for the capture mutex, their
+// total wait and the longest wait since the last report, in QPC ticks. Only a
+// contended acquisition with trace on reads the clock.
+std::atomic<std::uint64_t> lockWaits { 0 }, lockWaitTicks { 0 }, lockWaitMaxTicks { 0 };
+void noteLockWait(std::uint64_t ticks) noexcept
+{
+    lockWaits.fetch_add(1, std::memory_order_relaxed);
+    lockWaitTicks.fetch_add(ticks, std::memory_order_relaxed);
+    auto longest = lockWaitMaxTicks.load(std::memory_order_relaxed);
+    while (ticks > longest &&
+           lockWaitMaxTicks.compare_exchange_weak(longest, ticks, std::memory_order_relaxed) == false)
+    {
+    }
+}
+
 class Capture final : public GeometryDrawCaptureOwner
 {
     struct Recording { ID3D12GraphicsCommandList* command = nullptr; std::uint64_t epoch = 0; };
@@ -1028,6 +1044,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         // Draw-level refusal met under the mutex; GateStageCount when none.
         unsigned refusal = GateStageCount;
         std::uint64_t historyMisses = 0, epoch = 0;
+        bool traceWaits = false;
         // Draw-wide inputs of the locked phase, read once the draw has an
         // element to admit.
         MaterialCaptureConstants constants {};
@@ -1044,6 +1061,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             // all.
             std::uint32_t farCutoffBits = 0;
             const auto controls = ReadControls();
+            traceWaits = controls.trace;
             const auto farCutoffMeters = controls.farCutoffMeters();
             if (farCutoffMeters > 0.f)
                 std::memcpy(&farCutoffBits, &farCutoffMeters, sizeof(farCutoffBits));
@@ -1075,7 +1093,16 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     // uncorrected from frame to frame.
                     if (gate)
                         GateNote(GatePrepareLockWait);
-                    lock.lock();
+                    if (traceWaits)
+                    {
+                        LARGE_INTEGER begin {}, end {};
+                        QueryPerformanceCounter(&begin);
+                        lock.lock();
+                        QueryPerformanceCounter(&end);
+                        noteLockWait(std::uint64_t(end.QuadPart - begin.QuadPart));
+                    }
+                    else
+                        lock.lock();
                 }
                 if (!opened)
                 {
@@ -1938,6 +1965,20 @@ PackedMotionCaptureStatus ReadPackedMotionCaptureStatus() noexcept
         return capture ? capture->status() : PackedMotionCaptureStatus {};
     }
     catch (...) { return {}; }
+}
+
+PackedMotionLockWaits ReadPackedMotionLockWaits() noexcept
+{
+    static const std::uint64_t frequency = []
+    {
+        LARGE_INTEGER value {};
+        return QueryPerformanceFrequency(&value) && value.QuadPart > 0 ? std::uint64_t(value.QuadPart) : 0;
+    }();
+    const auto microseconds = [](std::uint64_t ticks)
+    { return frequency ? ticks / frequency * 1000000 + ticks % frequency * 1000000 / frequency : 0; };
+    return { lockWaits.load(std::memory_order_relaxed),
+             microseconds(lockWaitTicks.load(std::memory_order_relaxed)),
+             microseconds(lockWaitMaxTicks.exchange(0, std::memory_order_relaxed)) };
 }
 
 void ResetPackedMotionCounters() noexcept

@@ -180,6 +180,14 @@ PackedMotionFrame AcquirePackedMotionFrame(ID3D12GraphicsCommandList* fgCommand,
 PackedMotionFrame AcquirePackedMotionFrameForSecondConsumer(std::uint32_t width, std::uint32_t height,
                                                             std::uint64_t engineFrame) noexcept;
 PackedMotionCaptureStatus ReadPackedMotionCaptureStatus() noexcept;
+// prepare's waits for the capture mutex, timed only while the trace control is
+// on: waits and their total since start, and the longest since the previous
+// call, which resets it (the 2 s module report). Microseconds.
+struct PackedMotionLockWaits
+{
+    std::uint64_t waits = 0, totalMicroseconds = 0, maxMicroseconds = 0;
+};
+PackedMotionLockWaits ReadPackedMotionLockWaits() noexcept;
 // Zeroes the diagnostic counters without touching resources or frames.
 void ResetPackedMotionCounters() noexcept;
 // Pointer identity only, including a destroyed COM object's former identity.

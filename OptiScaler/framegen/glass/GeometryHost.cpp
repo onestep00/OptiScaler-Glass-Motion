@@ -268,6 +268,16 @@ void ReportGeometryHost(FILE* log) noexcept
                 packed.unknownOwnerSpan, packed.unknownResolve, packed.unknownOwnerMismatch,
                 packed.unknownFieldMismatch, packed.unknownNoArrayGeneration, packed.rasterRejected,
                 packed.shapeRejected, packed.viewportRejected);
+        // Recording-thread waits for the capture mutex (trace control only):
+        // total since start, longest since the previous report.
+        if (ReadControls().trace)
+        {
+            const auto waits = ReadPackedMotionLockWaits();
+            fprintf(log, "GEOMETRY_CAPTURE_LOCK waits=%llu wait_us=%llu max_wait_us=%llu\n",
+                    static_cast<unsigned long long>(waits.waits),
+                    static_cast<unsigned long long>(waits.totalMicroseconds),
+                    static_cast<unsigned long long>(waits.maxMicroseconds));
+        }
         // Why ReadCyberpunkMeshShape refused a draw. Everything above is filed
         // under shape_rejected, which cannot say whether the draw lost its
         // flush correlation or the mesh chunk itself was unreadable.
