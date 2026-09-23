@@ -1,10 +1,10 @@
 # 투명 객체 MV 적용 계획
 
 - 작성일: 2026-09-13
-- 갱신일: 2026-09-13
-- 상태: 진행 중, 1단계 불투명 물체의 전체 원본 MV 생성 경로 역추적
-- 적용 여부: 작업 순서에 적용. 전체 투명 객체의 새 MV 게임 적용은 미완료
-- 폐기 여부: 아니오
+- 갱신일: 2026-09-23
+- 상태: 진행 중. 1단계의 공급 경로 결론을 제품에 통합했다. 이전 위치는 엔진 MotionMatrix 공급(root graft)과 원본 이전 카메라 곱(camera-only graft)에서 얻고, 모듈 정점 이력은 기본 off 진단 폴백이다. 현황은 문서 끝 "2026-09-23 통합"
+- 적용 여부: 제품 `glass-motion`의 FG 경로에 적용(커밋 `f1b91138e`~`592de369b`, 소스 기본값은 보정 off). 전체 투명 물체 커버리지(C12)·C13·공식 OptiScaler 이식은 미완료
+- 폐기 여부: 아니오. 단 16행의 내부 가중치와 81행의 `w*objectMV + (1-w)*originalMV` 합성은 2026-09-17 이진 덮어쓰기(경계와 임계값 이상 내부만 물체 MV·depth)로 대체됐다(`research/objective.md:87`)
 - 범위: Cyberpunk 2077의 HUD 외 모든 화면 내 투명 객체와 원본 불투명 MV 경로, OptiScaler/기존 MFG unlock 연동
 
 ## 사용자가 요청한 작업
@@ -196,3 +196,44 @@ TDR 원인은 새 GPU 작업과 FG 입력 교체를 분리해서 판정한다. `
 - 도구는 수집/분석/요약을 일괄 처리한다. 전체 결과는 파일, 사용자 출력은 결론과 미확인 항목으로 제한한다.
 - 계획 변경은 이유와 사용자 요구에 미치는 영향을 이 문서에 기록한다. 단순한 성공 사례로 범위를 축소하지 않는다.
 - 근거 없는 완료 예상 시간은 제시하지 않는다. 다음 확인 지점과 실제 완료/남은 경로를 보고한다.
+
+## 2026-09-23 통합
+
+이 절은 2026-09-23 통합 시점의 완료·잔여 목록이다. 위 기록은 수정하지 않았다. 수치의 근거는 워크스페이스 `research/ACTIVE.md`("통합 빌드 게임 검증 (2026-09-23 16:36~)" 절이 들어간 판의 줄 번호)와 제품 [README.md](README.md) "Verification results"다. 결정 근거는 워크스페이스 `docs/glass-engine-supply-integration.md`에 있다.
+
+### 완료
+
+1. 공급 경로(C2). 이전 위치를 모듈 정점 이력 대신 엔진 공급에서 얻는다.
+   - root graft: 원본 velocity VS의 이전 위치 계산을 투명 VS에 이식하고 엔진 MotionMatrix(b7 rows 24..26)를 읽는다(`f1b91138e`, `ca5b22fcb`).
+   - 선언 훅: `dxgi.dll` process attach에 내장하고 RED4ext 프로브는 삭제했다(`f07b40c28`, `592de369b`). 통합 빌드에서 `DECL hook=1 seen=7728 matched=250 rejected=0 status=installed`를 확인했다. 선언 데이터는 플러그인이 라이브 검증한 2018쌍 파일(`827bf29b`)이고, 배포 때 RED4ext 플러그인은 백업으로 옮겼다(`research/ACTIVE.md:126-127`).
+   - 배열·다중 인스턴스 draw: camera-only 변형(`8ad300854`). 트윈 없는 VS 445개 중 391개도 camera-only 레코드를 받는다(`d01e62d67`, `research/ACTIVE.md:107`).
+   - 정점 이력은 `VertexHistoryFallback` 기본 off 진단 폴백이다.
+2. 1단계 배열 질문의 답(29행 "배열 원소별 원본 MV"). 엔진은 일반 배열 원소에 원소별 이전 변환을 갖지 않는다. 원소 MV는 카메라 전용 velocity-init 패스에서 온다. root graft를 배열에 적용하면 정지 장면에서 81px 오차가 났다(`research/ACTIVE.md:77`). 따라서 camera-only가 엔진 규약이다.
+3. 전달 규칙. 경계와 임계값 이상 내부만 물체 MV·depth로 덮어쓰고, 겹치면 최근접 표면을 쓴다(64비트 UMax 레코드). 엔진 depth가 더 가까우면 엔진 값을 유지한다(`32e3ad691`, `c6b772b3e`). jitter는 모드 0, 게인 100으로 고정했다. 구세대 표면·영역 보정과 강도 혼합 경로는 삭제했다(`db4945922`).
+4. 정점 팩토리 규칙. skinned 팩토리 대상은 다른 팩토리의 root 전용 트윈에서 root graft를 받지 않는다(`680525741`, `2bef442ff`). 오프라인 결과는 root 226, `factory_mismatch` 14, 미지원 10이다(`glass-native-material-v1/native-grafted/index.json`). `GraftClassMask` 기본값 3은 시험 후 철회했다. `0c5bb34e`에서 NPC 머리카락·안경(skinned class 2)이 전달 약 77px 대 엔진 약 3.5px였고, 기본값 1(`580b24ad`) 재실행에서 그 영역이 사라졌다(`research/ACTIVE.md:128`).
+5. 아레나 분리. graft draw는 정점 이력 아레나 블록 없이 identity-only 매핑을 쓴다(`a6712d09b`).
+6. 게임 검증(4단계 일부, `research/ACTIVE.md`):
+   - 정지·이동·송소미 천장 고속 회전(50-51행)
+   - 유리잔 테이블 전량 치환과 불투명 가림 잔차 감소(78-79행)
+   - 천장 저속·고속 회전(86-87행)
+   - 이동+회전 구간(101-103행)
+   - 일반 camera-only 적용 후 정지 잔차(112행)
+   - 실제 DLSS-G 출력 `fgdump`로 식별한 생성 프레임 A-B-A-B 2회(95행 메자닌 유리 난간, 113행 난간·퀘스트 아이콘): mod off의 배경 부착·이중 윤곽이 mod on에서 사라졌다.
+7. FG off 대조(`research/ACTIVE.md:117-120`, DLL `9364be81`, pid 3188). 프로필 `FrameGeneration=Off` 후 재시작했다. 호스트 평가 0, packed 미초기화, 데스크톱 캡처(`glass-live-tools/scene-20260923f/fgoff-burst/fgoff-pan.mp4`)의 연속 프레임 69%가 동일했다. 즉 생성 프레임이 없고 모듈은 아무것도 하지 않았다. 종료 후 `restore`로 `FrameGeneration=DLSS` 복원을 확인했다.
+8. 검토(C20): 통합 계획 5건과 `f1b91138e` 코드 5건(FAIL 수정, `research/ACTIVE.md:42`), `8ad300854` 3건 PASS(77행), `c6b772b3e` FAIL 1건 반영(86행), `d01e62d67` 2건 PASS(112행).
+9. 통합 빌드 게임 검증(`research/ACTIVE.md:124-130`): 검토 5건 PASS. 배포 INI의 진단 `OpaqueProbe`를 false로 되돌렸다(`packed_pixels` 약 110k, `occluded=0`). 남은 미치환 VS 14개 중 13개는 투명 인벤토리 밖이다. compose GPU `gpu_ms` 0.128(mask 1).
+
+### 남은 것
+
+1. skinned(class 2) 투명 draw의 이전 위치. 기본 비활성이므로 NPC 머리카락·안경은 엔진 값을 유지한다. 추론: 투명 pass에 velocity pass의 이전 스키닝 공급(이전 `INSTANCE_SKINNING_DATA` 오프셋, 이전 t10 본)이 없다(`research/ACTIVE.md:128`). factory 규칙으로 고친 6px 안경 결함의 전용 재확인과 아레나 분리의 `history_bypassed` 확인도 기록이 없다(`research/ACTIVE.md:134`).
+2. 사용자 검증 절차 전체(`research/ACTIVE.md:62`). 아직 한 번도 완전히 수행하지 않았다. 2026-09-19 난간·유리판 개별 회전 보고와 회전 중 퀘스트 아이콘 주변 아티팩트도 이 절차에서 확인한다.
+3. 커버리지(C12, 2·3단계):
+   - 트윈 없는 VS 54개 미지원(`research/ACTIVE.md:107`)
+   - preskinned(t9/b3) root 공급 없음(garment 10개는 camera-only)
+   - 투명 인벤토리 밖 VS: 세션7 8개(`research/ACTIVE.md:122`), 통합 빌드 13개와 generic 미지원 스크린스페이스 입자 1개(`research/ACTIVE.md:129`)
+   - 차량 유리·입자·연기·홀로그램·액체·파괴·절차적 변형은 게임 결과 없음. 대응표는 [SupportMatrix.md](SupportMatrix.md).
+4. 큰 이동(C11). 레코드는 ±128px까지만 기록한다. 고속 360°(128px/frame)에서는 치환 픽셀 대부분이 엔진 값으로 돌아갔다(`research/ACTIVE.md:87`).
+5. 불투명 probe 동등성 T3(`research/native-supply-integration-plan.md:90`).
+6. C13(1ms). 통합 빌드의 compose GPU는 `gpu_ms` 0.128(mask 1)이다(`research/ACTIVE.md:130`). CPU 훅 비용은 2026-09-19 측정(3.62ms/frame, `research/requirements-and-evidence-20260923.md` §3) 뒤 다시 재지 않았다. 진단 off CPU+GPU 합계(P6 통과 기준)는 미측정이다.
+7. 공식 최신 OptiScaler 이식과 RR→NR→SR→FG 검토. 마지막 단계다(`research/objective.md:27`).
+8. 구세대 코드·문서 정리: `Experiment*`, `plugins/`, `GlassPluginHost`, 이전 단계 문서(`research/ACTIVE.md:27`, `136`).

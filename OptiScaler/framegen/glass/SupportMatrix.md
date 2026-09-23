@@ -1,149 +1,127 @@
-# Support matrix and current limitations
+# Support matrix by vertex factory and material family
 
 - Created: 2026-09-14
-- Status: correction runs live on the real DLSS-G queue (2026-09-15 21:5x); the engine group hooks publish the array element mapping live (2026-09-17 19:5x); particles/cloth/destruction stay unsupported
-- Scope: every non-HUD transparent family named in the objective, the implemented evidence for each, and the items that are still unsupported
-- Note: `Compatibility.md` is the 2026-09-11 evidence record and still says the capture owner is unimplemented. Read this file for the current state.
+- Updated: 2026-09-23
+- Status: shader-level coverage of the transparent VS inventory by the graft catalog, plus the in-game observations recorded in the workspace `research/ACTIVE.md`. A validated record means the grafted VS passed the offline checks; it is not in-game quality evidence unless a result is cited.
+- Applied: catalog `GGRAFT02` with 641 records, `index.bin` SHA-256 `52e45006ddb8ce809619a73c59a1876192044171cc756617175127fa3c211265`, for builds from `592de369b`. Default `GraftClassMask` 1: class 2 records are off unless enabled (`research/ACTIVE.md:128`).
+- Deprecated: no. This replaces the 2026-09-14…17 matrix (vertex history, grouped-array mapping and the plugin owner scan); that version is in git history.
+- Scope: transparent vertex shaders of the base shader cache: 250 with a native velocity-VS twin and 445 without. HUD excluded.
 
-## Live verification, 2026-09-15 (build 6DBB83E5 / 912461F5 sessions)
+## How a draw is covered
 
-| Item | Measured value |
-| --- | --- |
-| Correction applied per FG evaluation | `substitutions=10656` of `evaluations=21488` in one session; `active=1`, `retiring=0` |
-| Compose GPU time on the real (direct) FG queue | `gpu_ms=0.172032` (design target 1 ms) |
-| Same-frame A/B of the FG motion input | `changed_pixels 42845 (1.16%)`, `changed_inside_object_coverage 42845`, `changed_outside 0` |
-| Objects visible in that frame | cups, railing, windows, sunglasses, world icon - boundary pixels carry object motion (`glass-dumps-20260915-1634-align/align-1.png`) |
-| Grouped array element order | `grouped=1,375,262`, `compared=112,279`, `permuted=0`, `changed=6`, `same_address` on every span |
-| Vertex-history arena | `arena_full` 10.5% of history hits before the reclaim pass, 0.48% after; `arena_reclaimed` counts recovered allocations |
-| Hook robustness | engine functions are resolved by audited instruction-layout signatures; a rebuilt FG queue is adopted, a changed FG input extent rebuilds the capture |
+The route is decided per pipeline from the SHA-256 of its original VS, and per draw from its instance layout. See [README.md](README.md#2-capture-the-graft-catalog).
 
-## Live verification, 2026-09-17 (build D5D07C77, session 19:47)
-
-The 19:25 session rejected the engine layout (`capabilities=71`, `reason=Engine layout is unsupported or ambiguous`) and never installed the object, draw or group hooks. That was a contract error, not a build regression: the cross-check asked for `GroupedUpdate+0x246`, which is the container handoff, while the element append is `GroupedUpdate+0x1e0` (= `0x9c19e8`). The contract was corrected to `0x1e0`, and the resolver then passed 12/12 unique profiles and 17/17 cross checks (`RESOLVE OK`).
-
-| Item | Measured value (build D5D07C77) |
-| --- | --- |
-| Health capabilities | `capabilities=255` on every sample, i.e. Started+Compiler+CreationHooks+EngineLayout+ObjectHooks+DrawHooks+CommandHooks+GroupHooks; the previous session on the same install reported 71 |
-| Health reason | `Inputs observed; object MV capture is not connected` - the packed capture needs an active DLSS-G frame, which this session did not have |
-| Grouped update hooks | `groups calls=330,374 staged=1,719 published=1,721 aborted=0 append_calls=8,595 in_range=8,198 outside=0 dropped=398 sample_calls=139 sample_cycles=7,366 sample_max_cycles=240` |
-| `outside=0` with `dropped=398` | the span check uses the real header count, so no append was misread as foreign; 398 appends landed past the 64-element recording cap, i.e. the scene contains grouped arrays longer than the published table keeps |
-| Published mapping | `arraymap entries=256 published=256 replaced=1,465 lookups=0 hits=0 range_hits=0 misses=0 out_of_range=0 evictions=1,075`; `mapprobe_publish` lists live `proxy@outputStart+count` rows |
-| Why the lookups are zero | the FG generator was not evaluated in this session (`host_by_path dlssg=0/0 alias=0/2,264`, `packed initialized=0 admitted=0`), so no packed draw reached the identity path. The mapping is published and ready; the consumer counters need a session with Frame Generation on |
-
-## Required behaviour and where it is implemented
-
-| Requirement | Implementation | Evidence |
+| Route | Previous clip | When |
 | --- | --- | --- |
-| Object motion per transparent pixel | `PackedMotionCapture` admits a draw, the material PS is rewritten to write an 8-byte packed record (depth key, motion, opacity, object id) into a packed target | `PackedUavPreservation` fixture, `packed_material_gpu=1` |
-| Boundary uses the object's motion | `ApplyObjectMotion`: `edge ? 1.0 : saturate(opacity * InteriorStrength)` | `PACKED_MOTION_GPU_OK exact_inner_edge=1` |
-| Interior uses material transmittance with a user strength | same shader, `InteriorStrength` from the settings | `weighted_interior=1`, UI slider |
-| Nearest surface wins on overlap | the rewrite uses `dx.op.atomicBinOp.i64` opcode 7 (unsigned max) on a depth-ordered 64-bit key, so the nearest surface keeps the record | `PackedMotionShader.h` packed store; `packed_material_gpu=1 nearest_layer_exact=1` in `build_geometry_shader.ps1` |
-| Real object motion, not image estimation | keys come from engine proxy/mesh/slot/generation, view identity, array lifetime and original element index | `GlassMotionIdentity.cpp`, `PackedMotionCapture` rejection reasons |
-| Same-frame original vs final comparison | `dump` writes composed and original MV/Depth as PPM plus paired samples | `PACKED_MOTION_DUMP_OK files=5`, `dump-1.txt` samples |
-| Settings and status | the window shows edge width, interior strength, dispatch/substitute/trace/writeback toggles, GPU ms, hook/join/capture/replacement counters, the coarse skip reasons, the N-1 history reuse counters, the identity reject split, the FG boundary misses and the array-mapping counters (published/hits/misses/out_of_range/evictions); the same values also come through the file channel `status`. The `arraymap` switch is retired and only stored (controls bit 34) | `GlassSettings.cpp`, `SETTINGS_OK`, `glass-ctl.ps1 -Command status` |
-| ~1 ms budget | live compose GPU time `gpu_ms=0.172032` on the real DLSS-G queue; offline 0.2473 ms per 2560x1440 frame (copies included), 0.4167 ms with dump counters | `glass-ctl.ps1 status`, `PACKED_MOTION_SCALE` |
-| MO2/version.dll/DLSS-NR/MFG compatibility | mounted as the MO2 Root `dxgi.dll`; no driver-address or version pinning; MFG unlock untouched | deployment record `glass-module-deploy-20260914*` |
+| Root graft | engine MotionMatrix (b7 rows 24..26), filled by the engine for declared materials | VS has a validated root graft, single-instance draw, supply class admitted by `GraftClassMask` |
+| Camera variant of a root graft | native previous view-projection × the VS's current world position | the same pipeline drawn as an array, grouped span or multi-instance draw |
+| Camera-only record | same camera-only form | VS without a native twin, a twin refused by the factory rule, or a twin whose root graft did not validate |
+| Not covered | engine MV and depth kept | no record (`GRAFT missing`), class not admitted (`class_disabled`), or packed rewrite rejected (`rejected`) |
 
-## Transparency families
+Supply class is bit 0 root-only, bit 1 skinned (t10 bones), bit 2 preskinned (t9/b3). The catalog has class 1 and class 2 records only. The default mask 1 admits the 374 class 1 records (82 root grafts, 24 twin camera-only, 268 generic camera-only). The 267 class 2 records are off by default. A default of 3 was tried on DLL `0c5bb34e` and withdrawn: skinned NPC hair and glasses delivered about 77 px where the engine had about 3.5 px (`research/ACTIVE.md:128`).
 
-| Family | Object motion source | Current state | Evidence / next check |
+## Coverage by vertex factory
+
+Counts are unique VS per factory. "c1" and "c2" give the supply class. Sources: `glass-native-material-v1/native-grafted/index.json` (fields `status`, `camera_status`, `families`, `camera_errors`) joined with the exported `artifacts/glass-grafts/Glass/grafts/index.bin` (supply class, root/camera outputs). They were cross-checked against the per-family totals reported for commits `d01e62d67` (generic camera-only) and `2bef442ff` (factory rule). Twin rows carry one factory each. Eight unsupported generic VS list 2 to 5 factories and are counted under each, so the unsupported column sums to 76 for 54 VS.
+
+| Vertex factory | Root graft (+ camera variant) | Camera-only: twin refused or root not validated | Camera-only: no twin | Unsupported | Unsupported reasons |
+| --- | --- | --- | --- | --- | --- |
+| MeshStatic | 50 c1 | 0 | 54 c1 | 17 | no `SV_Position` 4, multiple stores to one output 4, two-stage projection 3, vertex collapse reads current VP 3, no current VP rows 2, other non-VP clip 1 |
+| MeshStaticVehicle | 19 c1 | 0 | 17 c1 | 9 | no `SV_Position` 4, two-stage projection 3, multiple stores 2 |
+| MeshSkinned | 42 c2 | 5 c1 (factory) | 3 c1, 25 c2 | 9 | no `SV_Position` 4, two-stage projection 3, multiple stores 2 |
+| MeshExtSkinned | 1 c1, 35 c2 | 5 c1 (factory) | 3 c1, 21 c2 | 9 | no `SV_Position` 4, two-stage projection 3, multiple stores 2 |
+| MeshSkinnedVehicle | 22 c2 | 3 c1 (factory) | 2 c1, 17 c2 | 9 | no `SV_Position` 4, two-stage projection 3, multiple stores 2 |
+| MeshSkinnedSingleBone | 9 c2 | 1 c1 (factory) | 3 c2 | 0 | |
+| MeshSkinnedLightBlockers | 1 c2 | 0 | 0 | 0 | |
+| MeshExtSkinnedLightBlockers | 1 c2 | 0 | 0 | 0 | |
+| GarmentMeshSkinned | 1 c1, 17 c2 | 5 c1 (root not validated) | 3 c1, 26 c2 | 1 | two-stage projection (`flat_fog_masked`) |
+| GarmentMeshExtSkinned | 1 c1, 17 c2 | 5 c1 (root not validated) | 3 c1, 27 c2 | 1 | two-stage projection (`flat_fog_masked`) |
+| GarmentMeshSkinnedLightBlockers | 0 | 0 | 2 c1, 2 c2 | 0 | |
+| GarmentMeshExtSkinnedLightBlockers | 0 | 0 | 2 c1, 2 c2 | 0 | |
+| MeshDestructible | 2 c1 | 0 | 9 c1 | 0 | |
+| MeshDestructibleSkinned | 1 c1 | 0 | 1 c1 | 0 | |
+| MeshProcedural | 0 | 0 | 9 c1 | 4 | multiple stores 3 (`cyberparticles`), no current VP rows 1 |
+| MeshSpeedTree | 0 | 0 | 1 c1 | 0 | |
+| MeshProxy, MeshWindowProxy | 1 c1 each | 0 | 0 | 0 | |
+| Debug | 2 c1 | 0 | 0 | 0 | |
+| Decal | 0 | 0 | 1 c1 | 0 | |
+| DrawBuffer | 3 c1 | 0 | 2 c1 (`ui_panel`, `ui_text_element`) | 0 | |
+| Fullscreen | 0 | 0 | 0 | 2 | screen space: clip from the b1[48] viewport terms only |
+| ParticleBilboard | 0 | 0 | 29 c1 | 2 | non-VP clip (`blackwall_horizon_cover`) |
+| ParticleScreen | 0 | 0 | 1 c1 | 13 | screen space 9, non-VP clip 4 |
+| ParticleBeam, ParticleFacingBeam | 0 | 0 | 13 c1 each | 0 | |
+| ParticleFacingTrail, ParticleTrail, ParticleSphereAligned | 0 | 0 | 16 c1 each | 0 | |
+| ParticleMotionBlur | 0 | 0 | 17 c1 | 0 | |
+| ParticleParallel | 0 | 0 | 20 c1 | 0 | |
+| ParticleVerticalFixed | 0 | 0 | 15 c1 | 0 | |
+| **Total (unique VS)** | **226** (82 c1, 144 c2) | **24** (c1) | **391** (268 c1, 123 c2) | **54** | screen space 11, two-stage projection 17, no `SV_Position` 6, multiple stores 7, collapse on current VP 3, no current VP rows 3, other non-VP clip 7 |
+
+Notes on the columns:
+
+- Factory rule (`factory_mismatch`, 14 VS): a skinned-factory target refuses a twin of another factory whose previous graph is root-only. All 14 are `cloak`, `cloak_v2`, `optical_camouflage` and `cloak_*_forward` materials. Before the rule, 18 skinned or garment targets took root grafts from MeshStatic twins; NPC glasses then showed 6 px of wrong motion with a still camera (`research/ACTIVE.md:114`). Four of the 18 keep a root graft from a same-factory twin: three `hair_hideable` VS (`175cf87d`, `17a6c38a`, `78de9939`) and `c079a2ca` (MeshDestructibleSkinned, twin `361e9c9b`) (`native-grafted/index.json` fields `status`, `native_sha256`).
+- Root not validated (10 VS, GarmentMeshSkinned 5 and GarmentMeshExtSkinned 5, also `cloak`/`optical_camouflage` materials): all fail with `missing native resource contract`; the missing pair is the preskinned t9 SRV and b3 constant buffer (`native-grafted/index.json` field `errors`, `EngineMotionSupply.md:639-640`). Their camera variants validate.
+- The 8 multi-factory unsupported VS come from `all-transparent-vs` .ll files (`native-grafted/index.json` field `source`). Their factories are read from `scope-shader-catalog.json` (`tools/graft_native_motion.py:749-752`); they are `glass_scope` variants and are not in the base technique catalog. Six have no `SV_Position` output and two have multiple stores to one output component.
+
+## Coverage by material family
+
+Material names come from `glass-native-material-v1/all-cache-techniques.json` (transparency-route techniques of each VS). A VS used by several materials counts in each row, so the rows overlap. "Camera-only" includes both camera-only columns above.
+
+| Material family | VS | Root graft | Camera-only | Unsupported |
+| --- | --- | --- | --- | --- |
+| `glass` | 26 | 11 (2 c1, 9 c2) | 15 (2 c1, 13 c2) | 0 |
+| `glass_onesided` | 13 | 11 (2 c1, 9 c2) | 2 c2 | 0 |
+| `glass_flat_twosided` | 13 | 11 (2 c1, 9 c2) | 2 c2 | 0 |
+| `glass_blendable`, `glass_spread`, `glass_window_rain` | 10 | 6 (3 c1, 3 c2) | 4 (1 c1, 3 c2) | 0 |
+| `frosted_glass`, `frosted_glass_curtain`, `frosted_glass_transition` | 17 | 15 (4 c1, 11 c2) | 2 c2 | 0 |
+| `ver_mov_glass` | 3 | 2 c1 | 1 c1 | 0 |
+| `alphablend_glass` | 13 | 3 (1 c1, 2 c2) | 9 c1 | 1 (screen space) |
+| `vehicle_glass*` | 16 | 8 (4 c1, 4 c2) | 8 (4 c1, 4 c2) | 0 |
+| `glass_scope` | 10 (+8 uncatalogued) | 0 | 0 | 10 two-stage projection; the 8 uncatalogued: no `SV_Position` 6, multiple stores 2 |
+| `transparent_liquid`, `transparent_liquid_notxaa` | 35 | 14 (4 c1, 10 c2) | 19 c1 | 2 (screen space) |
+| `fillable_fluid_vertex`, `fluid_mov`, `ice_fluid_mov`, `sq021_glass_fluid` | 7 | 2 c1 | 5 (3 c1, 2 c2) | 0 |
+| `global_water_patch`, `water_plane` | 4 | 1 c1 | 3 c1 | 0 |
+| `hologram*`, `holo_*`, `simple_hologram`, `holographic_waterfall` | 59 | 9 (4 c1, 5 c2) | 50 (23 c1, 27 c2) | 0 |
+| `particles_*`, `presimulated_particles`, `particle_noise3d`, `beam_particles` | 41 | 10 (4 c1, 6 c2) | 30 (25 c1, 5 c2) | 1 (screen space) |
+| `cyberparticles_*` | 12 | 0 | 5 c1 | 7 (multiple stores 5, no current VP rows 2) |
+| `simple_fog`, `fog_laser`, `scan_fog`, `braindance_fog` | 31 | 8 (3 c1, 5 c2) | 21 (17 c1, 4 c2) | 2 (non-VP clip 1, no current VP rows 1) |
+| `flat_fog_masked`, `flat_fog_masked_notxaa` | 7 | 0 | 0 | 7 (two-stage projection) |
+| decals (`decal*`, `mesh_decal*`, `simple_emissive_decals`) | 17 | 2 c1 | 14 (11 c1, 3 c2) | 1 (screen space) |
+| world UI (`ui_panel`, `ui_text_element`, `ui_default_*`) | 2 | 0 | 2 c1 | 0 |
+| `cloak*`, `optical_camouflage` | 62 | 36 (9 c1, 27 c2) | 26 (24 c1, 2 c2) | 0 |
+| `hair*`, `eye_shadow*`, `blackwall_blendable_eye_wet` | 38 | 34 (12 c1, 22 c2) | 4 c2 | 0 |
+| screen effects (`screen_*`, `*screen_glitch`, `world_to_screen_glitch`, `cybermask*`) | 56 | 12 (4 c1, 8 c2) | 41 (28 c1, 13 c2) | 3 (screen space) |
+
+## Observed in game
+
+All results are from 2026-09-23 and come from the workspace `research/ACTIVE.md`. The README table gives the raw-data paths.
+
+| Object | Route | Result | Source |
 | --- | --- | --- | --- |
-| Individual glass objects (cups, bottles, railings, windows) | proxy + mesh + slot generation + depth-target view | Implemented and verified live: cup/railing/window/sunglass/icon outlines carry object motion, nothing outside coverage changes | `glass-dumps-20260915-1634-align/align-1.png`, `changed_outside 0` |
-| The same objects inside an array (repeated cups) | the above plus array lifetime and original element index | Implemented: grouped packets use the element list the engine hooks publish and fall back to the packet ordinal guarded by the array's observed lifetime generation | `GEOMETRY_IDENTITY element_mapped/element_unmapped`, `GEOMETRY_PACKED_SPLIT unknown_resolve` |
-| Grouped array updates (`ownerFlags & 0x2000`) | the render packet repacks the group's selected elements in engine selection order (`0x1e8778` reads the 16-bit source list at record `+0x18` and appends `proxy+0x108[index*48]` through `0x9c19e8`) | Implemented in the module's own hooks: the update entry records `(source - proxy[0x108]) / 0x30` for each append and publishes `(proxy, outputStart, member[])`; the identity path looks that up first and counts `element_mapped`/`element_unmapped`. Live 2026-09-17 (D5D07C77): `staged=1,719 published=1,721 aborted=0 in_range=8,198 outside=0 dropped=398`, `arraymap entries=256 published=256`, `lookups=0` because the FG generator was not evaluated in that session | `GEOMETRY_GROUPS`, `glass-ctl.ps1 -Command status`, `glass-native-material-v1/group-original-1e8778.txt` |
-| Liquid inside a glass | the container material's own draw | Implemented if its material produces a packed variant | `GEOMETRY_COMPILER` / `GEOMETRY_PACKED_ERROR` |
-| Sunglasses and other skinned attachments | the attachment proxy transform; previous skinning reuses the original bone input | Implemented for rigid attachments; skinned detail unverified | packed variant presence per chunk |
-| Particles, smoke, ribbons | particle element state | Not implemented. Their transparent techniques are in the rewrite set (`particle` 4162, `hologram` 1488, `distortion` 1366, `trail` 678 entries in `all-transparent-material-techniques.json`), but their instanced draws have no engine-exposed element order, so they are rejected at the element-index gate. The current bar scene has `no_element_index=0`; the accumulated log shows up to 2,650,452, so the rejection is real in particle scenes | open task `particle-original-history` |
-| Holograms, world icons, decals | their own material draws | Implemented if the material produces a packed variant | `GEOMETRY_CHUNKS missing=` |
-| Vehicle glass | vehicle proxy and destruction state | Not verified | chunk histogram after driving |
-| Garments, cloth deformation | original garment deformation input | Not implemented | `custom-deformation-input-review.json` |
-| Destruction, procedural deformation | original deformation input | Not implemented | same |
-| HUD | excluded by design | n/a | – |
+| Glass/cup table (instanced arrays) | camera variant | before the camera variant: 0 substitutions; after: all array draws (`array_draws=51,718`); still: delivered p50 0.28 px vs engine 0.33 px; moving: 67 vs 67 px | ACTIVE.md:52, 78 |
+| Mezzanine glass railing, far background | twin grafts (`9754c134`, before the generic camera-only records) | generated frames A-B-A-B: mod off smears the glass pattern over the truss and doubles pillar edges; mod on keeps them in place and sharp | ACTIVE.md:95 |
+| Quest icon "!" (DrawBuffer `ui_panel`), with railing slats and a lamp | icon: camera-only record (no twin); slats and lamp: not recorded per object | generated frames A-B-A-B (`9364be81`): mod off doubles the icon and smears or doubles slats and lamp; mod on keeps all three single and sharp | ACTIVE.md:113 |
+| Glass family, decals, railing panes after the generic camera-only grafts | camera-only | `GRAFT camera_only=183`; substituted area 127k → 508k px; still residual 0.04–0.08 px, >1 px ≤0.7% | ACTIVE.md:112 |
+| Songbird ceiling and chandelier | twin grafts | fast rotation up to 127 px/frame (`585b8df5`): residual mean 0.08–0.25 px; slow rotation 18–25 px/frame (`b9cf9e82`): 0.06–0.13 px | ACTIVE.md:51, 87 |
+| NPC eyewear, hair and head attachments | root graft from a MeshStatic twin (before the factory rule); skinned class 2 root graft (mask 3) | 6–82 px wrong motion (`585b8df5`); 6 px (`9364be81`); ≈77 px vs engine ≈3.5 px with mask 3 (`0c5bb34e`); region gone with mask 1 (`580b24ad`, `class_disabled=348~367`) | ACTIVE.md:53, 114, 128 |
+| Glass in front of opaque characters | any, with the occlusion test | NPC pixels in front of glass keep the engine value; residual mean 0.8–4.4 → 0.3–1.1 px | ACTIVE.md:79 |
 
-## Which code gate decides each family
+Remaining misses: in the session-7 reclassification (`9364be81`), 8 of 16 VS had class 2 grafts blocked by mask 1 and 8 were outside the transparent inventory (`research/ACTIVE.md:122`). In the integration build (mask 1), 14 VS stayed unsubstituted: 13 outside the transparent inventory (blended decal 11, debugdraw 1, unclassified 1) and one screen-space particle (`42531526`) without generic support; no further graft candidates (`research/ACTIVE.md:129`).
 
-Coverage is decided per draw, not per scene: a transparent object receives object motion when its pipeline produces a packed variant and its draw resolves an identity. The gates are fixed in code, so a family is covered wherever it is drawn once those gates pass.
+## Runtime limits that apply to every family
 
-Pipeline gates (`GeometryPipeline.cpp` / `DxilVertexHistory.cpp`), per pixel shader:
+- Motion beyond ±128 px per frame is not recorded (11-bit, 1/8 px). The pixel keeps the engine value. A fast 360° pan at 128 px/frame fell back for most substituted pixels (`research/ACTIVE.md:87`).
+- Camera-only records carry camera motion only: independently moving array elements, camera-facing rotation of billboards and particles, and icon anchor motion are not included. This is the engine's own convention for those draws (`research/ACTIVE.md:77`, `108`).
+- Coverage-only PS variants record opacity 0. Their interior keeps the engine value unless the threshold is 0; only the boundary takes the object's motion.
+- An opaque surface nearer than the record keeps the engine value (occlusion test).
+- `SkipFartherThanMeters` (default 0) and `ComposeRows` (default 240, must cover the render height) can exclude pixels by configuration.
 
-| Gate | Effect |
-| --- | --- |
-| root signature conversion fails, or reserved capture registers collide | no packed variant |
-| render-target count > 8, multisampling, geometry/hull/domain stages, stream output, non-triangle topology | no packed variant |
-| material capture with a writable depth/stencil target | no packed variant |
-| material blend unknown and blending disabled | no packed variant |
-| shader model < 6.6 or no 64-bit shader ops (packed), no ROV (non-vertex-only) | no packed variant |
-| rewriter rejections: branch-local final colour store, depth/stencil exports, multiple returns, side effects, missing required output | no packed variant |
+## Not covered and why
 
-Identity gates (`GlassMotionIdentity.cpp`), per draw:
-
-| Gate | Counter | Effect |
-| --- | --- | --- |
-| owner proxy/slot missing | `no_owner` | element unresolved, no object motion |
-| depth target, else first colour target, not resolvable | `no_view` (`no_view_state` / `no_view_unknown` / `no_view_descriptor`) | element unresolved |
-| object lifetime serial missing | `no_lifetime` | element unresolved |
-| span.count > 1 without the engine's original order and without a published array mapping | `no_element_index` | element unresolved |
-
-Consequences per family: single glass, railings, windows, liquid, holograms, world icons, decals and vehicle glass only need the pipeline gates, so they are covered wherever their pixel shader passes. Repeated arrays additionally need the element index, which the engine's original order or the plugin mapping provides. Particles, smoke and ribbons are the family where the element-index gate fails today: their instanced draws have no original order and no published mapping, so they are rejected as `no_element_index` regardless of which scene shows them. Garments, cloth, destruction and procedural deformation pass both gates but their deformed vertices' previous-frame input is not connected to the vertex-history path, so their motion correctness is unverified.
-
-## Current limitations
-
-0. Offline full-population rewriter acceptance (2026-09-14, shader-level only): 680 of 688 transparent
-   vertex shaders pass the vertex-history rewrite in both layouts (the other 8 are pixel shaders with a
-   different shader model, not vertex candidates). Of 3592 unique transparent-route VS/PS pairs, 3212
-   (89.4%) pass the production `packed-inplace-mapped` rewrite and validation; 380 are rejected:
-   `Required material output missing` 209, `Branch-local final color store unsupported` 109,
-   `Pixel depth/stencil exports require separate coverage validation` 62. Rejections cluster in
-   `renderstage_distortion` 260, `renderstage_hair_alpha_accum` 62 and `renderstage_hologram_depth` 24.
-   Evidence: `glass-decompile/rewrite-scan/`, `glass-decompile/pair-scan/`.
-   The 380 rejects have 99 unique pixel shaders: 89 carry SV_Target0, four carry SV_Target2+, six have no
-   output signature at all (50 pairs). By pair, 330 have a colour output and 50 are empty pixel shaders.
-   `Required material output missing` 209 = colour 151 + empty 50 + target2+ 8; the 109 branch-local
-   rejects are all `renderstage_distortion`; the 62 depth/stencil rejects are all
-   `renderstage_hair_alpha_accum`. Evidence: `glass-decompile/reject-classification/`.
-   This is shader acceptance, not identity resolution or live FG quality.
-   With the coverage-only retry that shipped in `EA3956DC`, all 3592 pairs are accepted: 3212 keep the
-   interior transmittance blend and 380 become coverage-only variants (boundary keeps the object's
-   motion and depth, interior keeps the engine's own motion). The 380 fallbacks are exactly the set
-   above. Evidence: `glass-decompile/pair-scan/pair-scan-summary.json`.
-1. Grouped-array element order comes from the module's own engine hooks (`0x1e8778` entry, `0x9c19e8` append), which publish `(proxy, outputStart, member[])` for arrays up to 64 elements. Appends past 64 keep the engine's own motion and are counted as `append_dropped`; they no longer abort the update (`outside=0`, `aborted=0` in the 2026-09-17 session). The older plugin owner scan (`plugin=load`) publishes the same keys from the same append site, so it must not run next to the engine hooks: both would hook `0x9c19e8` and write one table. Use one route or the other.
-2. Pixel shaders whose final colour store sits in a branch are rejected by the rewriter; the rejection now logs the actual exit shape so the next session can classify it (`GEOMETRY_PACKED_ERROR`).
-3. Materials without a packed pipeline variant are counted per draw chunk (`GEOMETRY_CHUNKS missing=`); the families behind the histogram are not yet enumerated.
-4. The 2026-09-14 driver reset is not attributed yet. `probe` (dispatch only) and `apply` (input replacement) plus `trace=on` separate the two causes in one session.
-5. `GlassMotion.dll` still reports `stage_seen=0`; families that need native declaration supply are not covered.
-6. Live DLSS-G 2x/4x comparison, camera motion, object motion, static-object-with-moving-background, overlap, and spawn/despawn verification are pending.
-7. The array element mapping is published live (2026-09-17: `published=1,721`, `entries=256`) but has still not been consumed in a live session. `lookups=0` because both 19:25 and 19:47 sessions ran without a DLSS-G evaluation (`host_by_path dlssg=0/0`), so no packed draw reached `LookupArrayMapping`. The consumer counters (`element_mapped`/`element_unmapped`, `hits`/`range_hits`/`range_ambiguous`) need a session with Frame Generation on.
-8. Plugin and module replacement require the game to be closed; the plugin auto-loads from the armed `plugin=load` request in the deploy folder. Unloading a loaded plugin in a live session is no longer used (it crashed twice before the vectored-handler removal and the in-flight drain were added, and the workflow is dropped).
-9. Identity `no_view` rejects are split into `no_view_state`, `no_view_unknown` (render pass, bundle, more than 8 targets) and `no_view_descriptor`, but no fix for any branch is implemented yet.
-10. The 18:36 session crashed inside the plugin probe when `proxy+0x70` was dereferenced as the group owner. Probes now validate readability first and the vectored handler is off by default; any future probe must keep that rule.
-11. The `EngineArrayElementMapping` switch (controls bit 34, INI key `EngineArrayElementMapping`, control request `arraymap=`) is retired as of 2026-09-17. The engine hooks publish and `GlassMotionIdentity` consumes without it, so the key is parsed and stored for compatibility and nothing else. The 2026-09-17 session ran with `arraymap=0` and the mapping still published.
-12. Live session 2026-09-14 19:43 (PID 50872, dxgi `7653DF77`): the module was healthy with
-    `packed_ready=192`/`packed_rejected=23`, but `GEOMETRY_PARENT no_selection=73` left
-    `pipeline_ready=0`, `object_capture=0` and `admitted=0`, `acquire_no_candidate=80`, `plugin loaded=0`.
-    No draw was replaced, so no correction could be applied in that session. Earlier sessions reached
-    `admitted=1012806` and `fg_frames=169`, but `host substitutions` stayed 0.
-13. `OptiScaler.Glass.log` across 50 sessions: the pre-packed path substituted up to 1,573,140 FG inputs.
-    In the packed sessions (27-47) `admitted` reached 1,012,806 and `fg_frames` 169, but `substitutions`
-    stayed 0; only session 28 recorded one `Object MV inputs are reaching FG`. The packed FG input
-    replacement has therefore never run in a live session. Sessions with `pipeline_ready=0` are short
-    (`compiled` around 192) and look like menu/loading states, so the 19:43 snapshot must not be read as a
-    world-scene admission failure.
-
-## How to collect the pending evidence in one session
-
-```
-glass-live-tools\glass-ctl.ps1 -Command status
-glass-live-tools\glass-ladder.ps1 -Stage map     # plugin load + arraymap publish/lookup checks
-glass-live-tools\glass-ladder.ps1 -Stage gpu     # rows=1 -> writeback -> 240 -> 1440
-glass-live-tools\glass-crash-report.ps1          # plugin log, module plugin lines, crash and GPU events
-```
-
-Read `dump-N.txt` for `dispatched/packed/edge/interior` pixels and the paired `mv` / `original_mv` samples, `GEOMETRY_HISTORY` for N-1 reuse, `GEOMETRY_CHUNKS missing=` for uncovered families, and the last `TRACE_*` line if the process disappears.
-
-## Deployment state
-
-| Artifact | Hash | Note |
-| --- | --- | --- |
-| `dxgi.dll` (resident module), 2026-09-17 19:46 | `D5D07C77` | layout cross-check fix (`GroupedUpdate+0x1e0`); deployed to the MO2 Root layer and the game layer with `glass-deploy-verify.ps1` `built=root=game`, `DIAG_CONTRACT_OK missing=0`; installed the object, draw and group hooks (`capabilities=255`) |
-| `dxgi.dll` (resident module), 2026-09-14 | `7653DF77` | historical. Replaced only while the game is closed; compose copies are limited to the dispatched rows |
-| `Glass\glass-plugin.dll` | `5F84A6DA` | loaded on demand through the file channel (auto-load request armed); replacement requires the game to be closed (hot reload dropped) |
+| Gap | Size | Reason | Source |
+| --- | --- | --- | --- |
+| Generic VS without a camera-only graft | 54 VS | clip not a per-vertex VP multiply of a world position: screen space, two-stage projection, no `SV_Position`, multiple stores, collapse on current VP, other | `native-grafted/index.json` `generic_camera.errors`; `research/ACTIVE.md:107` |
+| Preskinned root supply (t9/b3) | 10 garment VS | no validated preskinned graft; camera-only instead | `native-grafted/index.json` `status=unsupported` |
+| Non-inventory VS seen in game | 8 VS | decal highlights, terrain, wireframe, UI depth composition, uncatalogued | `research/ACTIVE.md:122` |
+| Per-element motion of arrays | all array draws | the engine keeps no per-element previous transform | `research/ACTIVE.md:77`; `EngineMotionSupply.md:547-554` |
+| Skinned (class 2) records | 267 records, off by default | [INFERENCE, ACTIVE.md:128] the transparent pass lacks the velocity pass's previous skinning supply (previous `INSTANCE_SKINNING_DATA` offset, previous t10 bones) | `research/ACTIVE.md:128` |
+| Not yet observed in game | vehicle glass, particles, smoke, holograms, liquids, destruction, procedural deformation | records exist for most; no in-game result | `research/requirements-and-evidence-20260923.md` §5 |

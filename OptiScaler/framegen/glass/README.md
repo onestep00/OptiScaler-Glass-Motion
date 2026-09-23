@@ -1,265 +1,250 @@
-# Experimental transparent-surface motion correction
+# Glass: engine-supplied motion for transparent surfaces in DLSS Frame Generation
 
 - Created: 2026-09-10
-- Updated: 2026-09-12
-- Status: experimental; deployed native host, controls and actual moving-frame input substitution verified; paired 4x replay still shows glass ghosting, not visually accepted
-- Deployment: process 62764 loaded the 2026-09-12 stream-PSO acquisition build 6ca25d2 from MO2 Root; loaded `dxgi.dll` SHA-256 is `997b5465fe872d65a816d206bbd57c8bffb1d61166a83f829ba3f61dad068204`. The later blended-only catalog source is not deployed. Last verified correction remains the b59aa86 static-world algorithm, locally enabled at strength 100
+- Updated: 2026-09-23
+- Status: product path. The previous-frame position of a transparent draw comes from the engine: its MotionMatrix supply through a root graft, or its previous camera through a camera-only graft. Module vertex history is an off-by-default diagnostic fallback. In-game results cover only the scenes in [Verification results](#verification-results). Full coverage (C12) and the 1 ms budget (C13) are not met.
+- Applied: `glass-motion` branch of this fork, deployed as `dxgi.dll` through MO2. Source defaults keep the correction off.
 - Deprecated: no
-- Scope: all Cyberpunk 2077 in-world transparency, excluding HUD; native D3D12 FG, recorded 2x/4x conventions
+- Scope: in-world transparent surfaces of Cyberpunk 2077, HUD excluded. Only the DLSS-G (FG) evaluation receives substituted motion and depth. DLSS-SR, Ray Reconstruction and ray-traced passes read the unchanged engine textures.
 - Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
 
-This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props` once. The existing menu has one include and one render call. The common Streamline plugin hook has one include and two integration calls for tag metadata. The native FG Evaluate branch now calls `NativeHost`; native creation/release/shutdown provide lifecycle notifications. ASI/MFG unlock behavior remains upstream-owned. Correction defaults off and requires the two HLSL assets beside the DLL in `Glass/`.
+The conditions C1–C22 are defined in the workspace file `research/objective.md`. The resume point and raw-evidence index is the workspace file `research/ACTIVE.md`. Line numbers cited below refer to the revision of that file that contains the section "통합 빌드 게임 검증 (2026-09-23 16:36~)". Related documents:
 
-[EngineGeometry.md](EngineGeometry.md) records the broader geometry scope and latest engine-input evidence. Cups/railings are test samples. Vehicle glass, eyewear, moving world icons, holograms, skinning, deformation and particles remain in scope. A cache-wide inventory now contains 146 candidate material families, 3,746 named transparency techniques, 592 unique vertex shaders and 938 unique pixel shaders. It is an offline coverage inventory, not a list of completed runtime support. Verified rigid history and the newly correlated skinning-buffer binding have not yet been connected to the production correction.
+- [EngineMotionSupply.md](EngineMotionSupply.md): evidence for the engine supply (MotionMatrix evaluator, declaration hook, grafts, array convention).
+- [SupportMatrix.md](SupportMatrix.md): coverage by vertex factory and material family.
+- Workspace `docs/glass-engine-supply-integration.md`: decision record for camera-only arrays, the opaque occlusion test and the vertex-factory rule.
+- [CompletionPlan.md](CompletionPlan.md): the plan and its 2026-09-23 status.
 
-[The shader-history implementation](tests/GeometryShaders.md) reuses actual original VS positions and material coverage. Independent GPU checks preserve original color/position outputs, object masks through batch reordering, and perspective-correct motion with frame/generation rejection. A bounded compiler worker and public PSO/root creation observer also pass the GPU checks. The upstream device hook now starts acquisition and forwards final root bytes after sampler overrides; packaged DXC files stay in `Glass/`. Live engine identity, draw insertion, ordering and per-object boundary composition remain incomplete. This source has not replaced the installed correction.
+The upstream integration is limited to explicit calls: `OptiScaler.vcxproj` imports `GlassFg.props`, `dllmain.cpp` calls `InstallNativeMotionDeclarations` at process attach, the D3D12 device hook starts the geometry host, the native FG Evaluate branch and the NGX provider hook call `NativeHost`, and the Streamline common-plugin loader calls the tag bridge. ASI loading and MFG unlock stay upstream-owned.
 
-[The engine packet adapter](tests/GeometryDraws.md) now obtains direct proxy-slot provenance through the original rigid/skinned instance append and flush paths. The public draw/root consumer passes independent GPU tests and the full Release build. Internal multi-instance arrays keep their intervals without inferred identities. Build 32054cc is staged in MO2 Root for a user-launched validation run; live game validation and the new geometry-to-FG connection remain incomplete. This does not establish support for every transparent rendering route.
+## Pipeline
 
-## Cache-wide and runtime transparency inventory
+```mermaid
+flowchart LR
+  K[NativeMotionDeclarations<br/>installed at process attach] -.->|engine fills b7 rows 24..26| C
+  A[Engine transparent draw<br/>CyberpunkDraws + PSO creation hook] --> B{Graft catalog<br/>SHA-256 of the original VS}
+  B -->|root record, single draw| C[Root graft VS<br/>previous clip from MotionMatrix]
+  B -->|array or multi-instance draw,<br/>or camera-only record| D[Camera-only graft VS<br/>previous VP x current world]
+  B -->|no record or class disabled| E[Draw unchanged<br/>engine MV and depth kept]
+  C --> F[Original material PS<br/>+ 64-bit UMax packed record]
+  D --> F
+  F --> G[GlassObjectMotion.hlsl<br/>boundary, threshold, occlusion]
+  G --> H[ScopedInputs<br/>DLSS-G parameter swap]
+  H --> I[DLSS-G Evaluate]
+```
 
-`glass-native-material-v1/audit_workflow.py materials` rebuilds the shader-cache inventory and runs the bounded 16-worker rewrite checks. All 592 candidate VS binaries pass the history rewrite and DXIL validator. All 2,455 ordinary screen-transparency techniques have a validated color-capture or geometric-coverage route: 2,429 retain color/transmission and 26 use coverage fallback. The 448 rejected VS/PS pairs all contain existing pixel-UAV side effects; 432 are distortion passes. Every one of the 33 distortion material families also has an ordinary screen-transparency route, so the runtime acquisition path uses that visible-material draw rather than duplicating a side-effectful distortion pass. None of these counts proves previous-frame identity or FG input admission.
+### 1. Capture: engine draws
 
-`GeometryPipelineStream.h` reconstructs successful public `ID3D12Device2::CreatePipelineState` graphics streams through Microsoft's `D3DX12ParsePipelineStream`. Compute streams are counted separately. Duplicate, unknown/newer and non-default view-instancing subobjects are rejected instead of guessed. The original creation call, stream and returned PSO stay unchanged. Independent D3D12 tests cover a real graphics stream, compute classification, duplicate rejection and view-instancing rejection.
+At D3D12 device creation (`D3D12_Hooks.cpp:2245`), `GeometryHost.cpp` checks the Cyberpunk executable and the packaged `Glass/dxcompiler.dll` and `Glass/dxil.dll`. It then installs the PSO creation hooks (`GeometryCreation.cpp`), the engine object, draw and group hooks (`CyberpunkObjects.cpp`, `CyberpunkDraws.cpp`, `CyberpunkGroups.cpp`), the command hooks and the native D3D12 observer (`GeometryHost.cpp:86-105`). Engine functions are located through audited instruction-layout signatures (`CyberpunkLayoutProfile.h`), not fixed addresses (C16). A failed step leaves the game unchanged and shows in the `GEOMETRY_HEALTH capabilities=` log line.
 
-The replaceable census observer now selects engine-identified world draws by their actual blend state in constant time, then joins VS/PS hashes to the static catalog after capture. It retains at most 4,096 PSOs and one draw sample per PSO, performs no GPU copy, and reports runtime-blended shaders absent from the name-based cache set. A previous run missed 324,264 of 417,065 draw events because stream-created PSOs were counted but never reconstructed. The staged build addresses that acquisition gap; only a fresh-process capture can establish the new live count.
+`CyberpunkDraws.cpp` reads the renderer's batch, append and flush records. It attributes each observed `DrawIndexedInstanced` from the audited engine call site to its proxy, mesh chunk, instance span and render frame (`CyberpunkDraws.h:7-18`). `GlassMotionIdentity.cpp` builds the object identity from the draw's batch span, the object's registration lifetime, the bound depth target and, for grouped arrays, the element list published by the module's group hooks (`GlassMotionIdentity.h:6-11`).
 
-Fresh process 62764 established that this scene used 5,224 legacy graphics PSO
-creations and zero pipeline streams. Its three-second census retained 46 blended
-pipelines but still lacked a pipeline identity on 308,238 of 404,294 total draw
-events. The active 32 MiB observation cache retained opaque PSOs and exposed no
-filter/capacity counters, so that run cannot separate budget exhaustion from
-invalid descriptors. Current source removes the known opaque-budget path with a
-blended-only 2,048-entry catalog and adds explicit filter/invalid/capacity
-counters. A dynamic batch request accepted all
-47 visible candidates and observed nine newly prepared vertex-only identities;
-the compiler later reported 831 ready and 136 rejected. The catalog change is
-tested but needs a fresh-process deployment. None of these counts is object MV
-or FG quality evidence.
+### 2. Capture: the graft catalog
 
-## Boundaries
+`GeometryPipelineCache.cpp` compiles a packed variant for every transparent PSO the game creates. It runs on the pipeline-cache worker, never in a draw callback. The worker hashes the original VS container once (SHA-256) and looks it up in `Glass/grafts/index.bin` (`GGRAFT02`, 52-byte records, `NativeGraftCatalog.cpp:18-27`). The outcome of a pipeline job is final; a miss is not retried per frame (`GeometryPipelineCache.cpp:281-362`).
 
-Verification sections below retain earlier investigation results. The fresh-process deployment section records the previously verified correction; tests/GeometryDraws.md records the later acquisition build staged for validation.
+| Record kind | VS used for the packed variant | Previous clip | Used for |
+| --- | --- | --- | --- |
+| Root graft (`<sha>.dxil`) | original transparent VS plus the previous-position arithmetic copied from its native velocity-VS twin | engine MotionMatrix, material constant buffer b7 rows 24..26 | single-instance draws |
+| Camera variant of a root graft (`<sha>.camera.dxil`) | same original VS | native previous view-projection (b1 rows 16..19 or 12..15) applied to the VS's own current world position | array, grouped and multi-instance draws of the same PSO |
+| Camera-only record (no `<sha>.dxil`) | original VS without a native twin, or whose twin was refused by the factory rule or has no validated root graft | same camera-only form: the twin's camera multiply, or for a VS without a twin one of two canonical templates (`50ba90d4…` for b1 28..31 → 16..19, `79f7efb4…` for 0..3 → 12..15) | every draw of that VS |
 
-| Component | Responsibility |
+Both graft kinds keep every original output. They add two float4 outputs: the engine's de-jittered current clip (`XY − b1[51].xy·W`) and the previous clip (`NativeGraftCatalog.h:9-22`, `EngineMotionSupply.md` "Current clip convention"). The pixel stage computes `(previous UV − current UV)` with no jitter term and no capture delta (`DxilVertexHistory.h:218-222`). Graft draws read no module history. They take identity-only mappings (object ID and live generation, no history-arena block), so a full vertex-history arena cannot reject them (commit `a6712d09b`, `PackedMotionCapture.cpp:639-645`).
+
+The root graft works only if the engine actually fills rows 24..26 for the transparent material. `NativeMotionDeclarations.cpp` makes it do so. At DLL process attach, before the shader-cache provider builds any compiled layout, it detours the provider metadata getter and the vertex-stage resolution. For the declared VS/PS pairs it returns an immutable copy of the native declaration with `MatMod_MotionMatrix` added at row 24; the engine's own evaluator then writes the rows (`NativeMotionDeclarations.h:6-27`). Data: `Glass/motion-declarations.bin` (`GMDPLAN1`) and `Glass/motion-shader-pairs.bin` (`GMSPAIR1`). This replaces the RED4ext `GlassMotion` plugin used through 2026-09-23 (commits `f07b40c28`, `592de369b`). The plugin must be removed from `red4ext/plugins/`; two detours on one entry are not supported.
+
+Selection rules:
+
+- Array, grouped and multi-instance draws of a root-graft pipeline use the camera variant. The engine keeps no per-element previous transform. Its own velocity for array elements is the previous view-projection applied to the element's current world position (`research/ACTIVE.md:77`, `EngineMotionSupply.md:547-554`). Applying the root transform to every element measured 81 px of error on a still camera (`research/ACTIVE.md:77`).
+- A skinned-factory target does not take a root graft from a twin of another vertex factory whose previous graph is root-only. Such targets become camera-only records (`factory_mismatch`; commits `680525741`, `2bef442ff`; `tools/AGENTS.md:26`).
+- `GraftClassMask` admits records by the supply class of their previous graph: bit 0 root-only, bit 1 skinned (t10), bit 2 preskinned (t9/b3). The default is 1, root only (`GlassControls.h:261-277`, `GlassSettings.cpp:80-81`). A default of 3 was tried on DLL `0c5bb34e` and withdrawn: in all six still frames the NPC head region (hair and glasses, skinned class 2) delivered about 77 px where the engine had about 3.5 px (`research/ACTIVE.md:128`). A disabled class counts `class_disabled` and keeps the engine values.
+- A VS without a record counts `missing` and keeps the engine values. `VertexHistoryFallback` (default off) re-enables the old module vertex-history variant for diagnostics only. That path does not satisfy C2.
+
+Catalog regeneration is local only; the output contains extracted game shader code and stays in the ignored `artifacts/` tree. `tools/graft_native_motion.py --workspace <dir>` writes the grafts, `tools/verify_native_grafts.py --workspace <dir>` checks them, and the exporter accepts only records that pass every check (`tools/AGENTS.md:18`, `26-27`). Export from the workspace root (`research/ACTIVE.md:43`):
+
+```powershell
+python glass-optiscaler-source\OptiScaler\framegen\glass\tools\export_native_grafts.py --workspace glass-native-material-v1 --out glass-optiscaler-source\artifacts\glass-grafts\Glass
+```
+
+`motion-declarations.bin` is a copy of `glass-native-material-v1/pending-motion-declarations/declarations.bin`. `motion-shader-pairs.bin` is a copy of `pending-motion-declarations/shader-pairs-2018-direct-span-clear.bin` (SHA-256 `827bf29b…`): the 2,018 pairs whose direct writer spans are fully classified. The six pairs with an unresolved modifier 0 are not used (`EngineMotionSupply.md:588-593`, `research/ACTIVE.md:126`). Both files sit in `artifacts/glass-grafts/Glass/` (`GlassFg.props:102-108`). `GlassFg.props` copies the catalog and the declaration data into `Glass/` beside the built DLL when they exist. Without the catalog every pipeline counts as a graft miss. Without the declaration data the hook stays uninstalled with status `declaration_file_missing`. The build copy never deletes files: after a record loses its root graft, delete the stale `<sha>.dxil` from the build output. `glass-game.ps1 -Action deploy` replaces the deployed `grafts` directory as a whole (`glass-live-tools/glass-game.ps1:123-136`). The integration deploy moved the RED4ext `GlassMotion` plugin into `glass-deploy-backup-20260923-163549/red4ext-plugins-GlassMotion` (`research/ACTIVE.md:126`).
+
+### 3. Capture: packed records
+
+`PackedMotionCapture::prepare` admits the draw, selects the root or camera variant and binds the packed target. The rewritten material PS (`DxilVertexHistory.cpp`, `PackedMotionShader.h`) keeps the original colour exports, blending and discard. After the material body it writes one 64-bit record per pixel with `InterlockedMax` (`atomicBinOp.i64` opcode 7, unsigned max):
+
+| Bits | Field |
 | --- | --- |
-| `GlassSurface.hlsl`, `GlassSurfaceGpu.h` | Surface-motion candidate and image correspondence |
-| `GlassRegion.hlsl`, `GlassRegionGpu.h` | Bounded region selection, excluding broad flat glass and near-surface candidates |
-| `GlassFgPass.h` | Typed NGX input validation, owned correction resources, one execution per rendered frame, scoped MV/depth substitution and restoration |
-| `CyberpunkSurfacePass.h` | Version-specific executable signature and depth-transition identification; no fixed resource addresses |
-| `SurfaceQueueLink.h` | Bounded CPU bookkeeping of observed submissions and fence dependencies; no GPU commands or waits |
-| `ComputeRecording.h` | Fresh COMPUTE recording admission, complete callback coverage and single-use epoch tickets |
-| `NativeSession.h` | Per-feature capture, queue provenance, state admission, correction phases, completion and timer coordination |
-| `NativeHost.cpp`, `D3D12Observer.cpp` | Existing NGX dispatch integration, real COM-method observation, feature retirement and UI telemetry |
-| `CommandLifetime.h` | Official destruction notifications without retaining command lists or guessing final Release counts |
-| `StreamlineTagBridge.cpp`, `TaggedInputs.h` | Named common-plugin callback registration and bounded clone-state metadata admission |
-| `SurfaceSnapshotPool.h` | Four owned depth copies, producer/consumer completion and command-reset tracking, no wait on pool exhaustion |
-| `GlassControls.h`, `GlassSettings.cpp` | Atomic controls, separate INI persistence and OptiScaler menu widgets |
-| `GlassGpuTimer.h` | Sparse GPU timestamps, existing host completion fence and nonblocking readback |
-| `GlassFgCompile.cpp`, `GlassFg.props` | Native SDK compilation and isolated MSBuild registration |
+| 63 | covered class: material opacity ≥ interior threshold |
+| 62..46 | 17-bit depth key, ordered so that nearer is larger |
+| 45..35, 34..24 | motion X and Y, signed 11 bits in 1/8 px (±128 px) |
+| 23..16 | material opacity, 8 bits |
+| 15 | reverse-depth flag of the draw |
+| 14..0 | per-frame object ID (1..32767) |
 
-The host must supply an unambiguous surface snapshot, its generation and actual resource state. It must establish GPU ordering, preserve command-list state, and drain GPU use before resource release or recreation. `SurfaceQueueLink` records observed queue dependencies; it does not own resources or prove GPU completion. `CyberpunkSurfacePass` identifies an observed consumer transition, not the shader that wrote the depth.
+Opacity is `1 − mean(RGB transmission)` from the original blend equation. The coverage-only fallback variant, used when the equation cannot be read, records opacity 0 and therefore contributes only its boundary unless the threshold is 0. Because the store is an unsigned max, a covered record outranks an uncovered one, and within a class the nearest surface wins (C8) (`PackedMotionShader.h:105-146`). A draw whose motion at a pixel exceeds ±128 px writes no record there (`PackedMotionShader.h:82-89`); the pixel keeps the engine value unless another surface recorded it.
 
-The host seam is the native FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, using `HandleToFeature`. Stale parameter keys alone do not classify an evaluation as FG. `NativeHost` prepares a per-feature session and scopes MV/depth substitution around the original native call. It publishes runtime status and completed timing samples. Selection preview remains disabled until a valid runtime texture can be displayed.
+### 4. Compose: `GlassObjectMotion.hlsl`
 
-## Native session callback contract
+`ApplyObjectMotion` runs on the module's own command list. That list is executed on the FG queue after the wait on the packed producer's fence (`PackedMotionGpu.h:1092-1150`, `NativeSession.h:533-544`). It first copies the engine MV and depth into owned textures (`PackedMotionGpu.h:1591-1602`). Per pixel:
 
-Initialize one session per feature/size and bind its actual COMPUTE command list only after observer coverage is established. The platform adapter retains synchronization identities used by queue provenance, serializes the real queue call together with its after-callback, and excludes only this module's nested commands from observers. Call `captureIdentifiedSurface` immediately after a uniquely identified depth transition. A missing snapshot, multiple candidates between phase-1 evaluations, a missing native fence dependency or a non-fresh compute recording bypasses correction and invalidates history.
+1. No record: engine value kept.
+2. Boundary: a neighbour within `BorderWidthPx` (1..4, all 8 directions) carries a different object ID. Boundary pixels are taken whatever their opacity (C3, C4b).
+3. Interior: taken only when the covered bit is set (C4).
+4. Opaque occlusion: when the engine depth is nearer than the record by more than 4 depth-key quanta, the visible surface is an opaque one drawn after the transparent pass. The pixel keeps the engine value (counter slot 15, dump field `occluded`). The depth direction comes from the frame's `DLSSG.DepthInverted` (commits `32e3ad691`, `c6b772b3e`; `GlassObjectMotion.hlsl:253-276`).
+5. Otherwise the pixel receives the object's motion, converted to the engine's normalized MV units, and the record depth. MV z/w keep the engine values.
 
-Successful Reset clears discarded surface recordings from queue provenance, discards tracked producer-command recordings and updates snapshot/timer bookkeeping. `afterSubmit` tracks all recorded uses of corrected outputs, including later MFG phases. Its monotonic completion fence also supplies sparse timing, so enabling the timer adds no extra signal. The snapshot pool separately signals producer/read completion. These ownership signals never substitute for a native producer-to-consumer dependency; the module inserts no waits.
+A pixel either takes the object's motion and depth exactly or keeps the engine value byte for byte. There is no strength, blend, scale or clamp (C21). The delivery jitter convention is fixed at mode 0, gain 100; the INI cannot change it (`GlassSettings.cpp:102-107`). Other jitter modes, the engine-proximity gate (`enggate=`, `gatepx=`), `depthkeep=` and `stripes=` exist only as live-channel diagnostics (C7).
 
-The platform adapter calls `stop` on feature retirement and keeps forwarding submission/Reset callbacks while draining outstanding use. `readyToRelease` requires discarded command recordings and completed GPU work, not just one of those conditions. A Reset with a fresh allocator while the GPU is busy is not enough to release resources. `CommandLifetime` queries the official `ID3DDestructionNotifier` interface. Its callback only publishes a destruction flag and releases a small CPU token; it never dereferences the dying object, takes the host lock or releases GPU resources. Discarded recordings still require GPU completion. Resize/feature retirement preserves old sessions in a bounded two-entry retirement array and bypasses new correction until they drain. Shutdown stops admission; successful native FG creation can reopen it.
+### 5. Substitution: `ScopedInputs`
 
-## Reusing the OptiScaler host
+`NativeHost` intercepts the native DLSS-G Evaluate. An evaluation counts as frame generation when its parameter table carries a `DLSSG.*` marker key, when its handle was already learned as FG, or when the caller is the DLSS-G provider or Streamline's FG plugin. Every other evaluation, including DLSS-SR and Ray Reconstruction, which share the `MotionVectors`/`Depth` names, passes through with no session, GPU work or parameter change (`NativeHost.cpp:1595-1663`, `GlassFgPass.h:41-54`).
 
-Reuse the existing native NGX feature map, parameter ABI and Evaluate dispatch. The module must not detour the private FG provider or reproduce MFG unlock. Resolve D3D12 methods from the actual COM interfaces, as the existing `D3D12_Hooks` does, rather than matching driver machine code. The executable fingerprints in `CyberpunkSurfacePass` serve a separate purpose: identifying a game-specific auxiliary depth pass that the public FG input does not name.
+For an FG evaluation, `NativeSession::prepare` returns the owned MV/depth pair, and `ScopedInputs` swaps only the parameter-table pointers the provider reads (`DLSSG.MVecs`/`DLSSG.Depth`, or `MotionVectors`/`Depth` on the driver-level table) for the duration of the original call. The destructor restores them on return or unwind (`GlassFgPass.h:208-270`, `NativeHost.cpp:1818-1825`). The engine textures are never written (`controls … engine_writes=0` in the status response). `NrMotion` (default off) additionally hands the same pair to DLSS-NR as its guides (C9 option).
 
-The existing `D3D12Hooks::RestoreRoot` is conditional on user configuration and does not unconditionally preserve all state needed by this insertion. Do not silently enable global restoration settings. The broad `ResTrack_Dx12::HookDevice` also explicitly skips `FGInput::NvngxFG`; enabling its HUD/resource registry wholesale is not a native-FG surface-capture solution. Keep the required Reset/barrier/submission callbacks in the isolated adapter and reuse existing dispatch points where their contracts match.
+## Live channel, counters and dumps
 
-Current native FG observations show a fresh COMPUTE recording before each of the three generated phases. `ComputeRecording` admits insertion only after observing a successful `Reset(nullptr)` and all applicable state-changing entry points. It rejects missing hooks, non-COMPUTE lists, initial PSOs, intervening state setters, repeated insertion and stale reset tickets. The host must retain the command identity, serialize callbacks and exclude only its own correction commands from state observations. It must observe `SetPipelineState1` and `SetProgram` when their extended interfaces exist. Unknown interface-query errors do not count as interface absence.
+The game process polls `Glass/glass-debug.request` once per second and answers in `Glass/glass-debug.response` (`GlassDebugControl.h:6-9`). Use `glass-live-tools\glass-ctl.ps1 -Command <cmd>[,<cmd>]`. Main commands: `status`, `probe` (compose on, substitution off), `apply` (substitution on), `substitute=on|off`, `dump`, `fgdump=N`, `opacity=N`, `edge=N`, `rows=N`, `graftclass=N`, `vhfallback=on|off`, `opaqueprobe=on|off`, `reload-shader`, `soft-reload`. The full list is in `GlassDebugControl.cpp`. `graftclass=` and `vhfallback=` apply only to pipelines compiled afterwards; a changed class mask needs the INI value and a restart (`research/ACTIVE.md:56`).
 
-After an admitted correction, `ClearState(nullptr)` restores the fresh binding contract before native FG. Resource barriers remain the pass's separate responsibility. This avoids a full binding-state save/replay and adds no queue submission or wait. `D3D12Observer` installs the complete applicable method set from actual COM interfaces using upstream `rewrite_signature` and Detours. It checks DIRECT/COMPUTE implementation compatibility, serializes queue calls with their after-callbacks and suppresses only this module's nested API calls. Binding changes on unrelated command lists avoid the host lock; depth barriers receive a cheap state filter before game-pass identification. Follow Microsoft's [Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset) and [ClearState](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-clearstate) contracts.
+Status lines:
 
-### Streamline tag-state bridge
+| Line | Fields |
+| --- | --- |
+| `GRAFT` | `ready` root-graft pipelines, `missing` VS without a record, `rejected` graft rewrite or compile failures, `class_disabled`, `camera_only` camera-only-record pipelines, `array_ready`/`array_missing` camera variants of root-graft pipelines, `array_rejected` array draws without a usable variant, `array_draws`, `draws`, `fg_evals` (substituted FG evaluations whose capture frame drew at least one graft variant with the fallback off, `NativeHost.cpp:1983-1987`), `catalog` record count, `classmask`, `vhfallback` |
+| `DECL` | `hook` 1 when both detours are installed, `seen` provider results, `matched` augmented declarations returned, `rejected` declared keys whose native record differed from the plan, `stage_seen`, `stage_selected`, `status` (`installed`, `not_cyberpunk`, `native_layout_rejected`, `declaration_file_missing`, `declaration_profile_rejected`, `hook_attach_failed`) |
+| `packed` | admission and frame counters, `fg_frames`, `history_bypassed` (graft draws admitted without an arena block) |
+| `controls`, `identity` | control word and identity rejection split |
 
-`OnStreamlineCommonLoad` receives the parameter interface and parsed common-plugin version from OptiScaler's existing loader. `WrapStreamlineCommonFunction` wraps the common plugin's named startup/shutdown callbacks. After successful startup, it obtains `sl.param.global.getTag` through the existing typed `IParameters` ABI and registers a forwarding wrapper before dependent plugins initialize. It does not scan driver instructions or detour a private FG provider. Shutdown disables observation and restores the original registration if the bridge still owns it. A module reference keeps the original forwarding target mapped for cached callbacks; replacing that target in the same process is rejected.
+Dumps:
 
-The wrapper reads a borrowed `CommonResource` result without modifying it or copying a `shared_ptr`. This is an **internal Streamline structure**, not a stable public FG input API. Its layout is isolated and admitted only for common versions 2.14.0/2.14.1. Offsets derive from the pinned NVIDIA 2.14.1 source and were observed on the installed 2.14.0 OTA binary. Structure GUID/version, clone identity, frame, state, viewport, extent and actual native-input pointer checks reject unknown inputs. Another Streamline ABI requires review; a driver patch alone does not select a new byte signature here. The game-specific auxiliary-depth identifier remains separately version-dependent.
+- `dump` writes the next composed frame to `Glass/dump-<n>*`: the delivered and engine MV (`*-mv.f32`, `*-original-mv.f32`), both depths, the packed records, the colour image, and a text header with `dispatched_pixels`, `packed_pixels`, `edge_pixels`, `interior_pixels`, opacity and outcome buckets, `gate_skip`/`gate_px`, `depth_sub`, `stripe_skip` and `occluded` (`PackedMotionGpu.h:1442-1509`). `glass-live-tools\glass-dump-series.ps1 -Count N -Out <dir>` collects a series. `python glass-live-tools\glass_graft_residual.py <dir>` reports, per frame, the substituted pixel count, the delivered and engine |MV| medians and the residual `|delivered − engine|` on substituted pixels. The residual is a consistency measure. It is expected to be near zero where the surface and the content behind it share the camera's motion, and intentionally nonzero where an object moves behind still glass.
+- `fgdump=N` copies the DLSS-G output texture of N executed evaluations after the request is armed into `Glass/fgdump-<serial>-*.ppm` plus a manifest. The observed sessions resolved the key `DLSSG.OutputInterpolated` (`research/ACTIVE.md:88`). Copies are recorded on the FG command list and read back after per-queue fence completion, with no CPU wait in Evaluate (commits `5f0e2388e`, `433f2f60d`). `glass-live-tools\glass-fgdump.ps1 -Count N -Out <dir>` collects them. Rendered and generated frames are separated by consecutive-output differences (`research/ACTIVE.md:93`).
+- Log: MO2 `overwrite\bin\x64\OptiScaler.Glass.log`.
 
-Native FG input states can be read through `ReadStreamlineStates` once per native evaluation. Phase 1 requires fresh matching depth/motion/HUD-less tags; incomplete, mixed-frame or repeated data are rejected. The current supported state is COPY_DEST on ordinary 2D textures, with no simultaneous-access flag. The bridge stores scalar identities under a short mutex because live tag retrieval and native Evaluate occur on different threads. It allocates no GPU resource and records no GPU command. These metadata checks do not replace surface snapshot ownership, command-state admission or queue provenance.
+## Settings
 
-Two bounded read-only game probes observed FG 91/90 times with no failures. After initial incomplete observations, native MV/color/depth matched their common tag clones in 81/78 evaluations respectively; all matched states were COPY_DEST and resource flags were 0x5. Diagnostic probes used an inspected, file-hash-guarded function RVA; that address is absent from this production bridge. Hooks were disabled afterwards. The new startup registration path passed an independent test with real D3D12 resource descriptions, unchanged forwarded outputs, different producer/consumer threads and shutdown behavior; it has not yet been deployed in the game.
+`OptiScaler.Glass.ini` beside the DLL, section `[GlassFG]`; the menu window saves and reloads the same file. Without the file the hooks stay idle (`GlassSettings.cpp:26-38`).
 
-A subsequent bounded game probe compiled the production decoder, `TaggedInputs` and `ReadStreamlineStates` directly. All 155 returned tags decoded successfully; 91 of 93 observed native evaluations passed metadata admission, with two initial incomplete phases rejected. All 104 observed FG calls succeeded. The probe added no GPU command or input substitution and was disabled afterwards. This validates live decoding/admission; the game's startup registration path and actual correction are still pending. Release x64 build and all six standalone executables passed after the final code changes.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `Enabled` | false | master switch; hooks stay idle while off |
+| `ReplaceFrameGenerationInputs` | false | substitute FG motion and depth (live `apply` / `substitute=on`) |
+| `ComposePass`, `ComposeRows` | true, 240 | compose dispatch and the rows it covers from the top (1..32768); rows must cover the render height for full-frame delivery |
+| `InteriorOpacityPercent` | 50 | interior threshold (C4) |
+| `BorderWidthPx` | 2 | boundary band, 1..4 px (C3) |
+| `GraftClassMask` | 1 | admitted supply classes (bit 0 root, bit 1 skinned, bit 2 preskinned); 3 was withdrawn (`research/ACTIVE.md:128`) |
+| `VertexHistoryFallback` | false | diagnostic module vertex history; not C2 |
+| `NrMotion` | false | also supply DLSS-NR guides (C9 option) |
+| `OpaqueProbe` | false | diagnostic: admit opaque pipelines to compare with engine MV. It was left on in the deployed INI before the integration build; most `occluded` pixels of the earlier P6 run came from those opaque pipelines (`research/ACTIVE.md:127`) |
+| `SkipFartherThanMeters` | 0 | far cutoff in 25 m steps, 0 keeps every surface |
+| `MeasureGpuTime` | true | sparse GPU timestamps of the compose |
 
-## Native Windows host verification
+The legacy keys `Strength`, `InteriorFollowPercent`, `InteriorLimitPx`, `JitterMode`, `JitterGain`, `JitterCompensation`, `JitterGainPercent`, `PackedWriteBack` and `EngineArrayElementMapping` are not read and are removed on save (`GlassSettings.cpp:149-157`).
 
-The observer-driven standalone session test uses real D3D12 Reset, barrier, ExecuteCommandLists, Signal and Wait calls rather than manually forwarding their notifications. All applicable 16 binding observations installed. Missing native ordering, ambiguous surfaces and dirty compute state rejected correction. Reset without GPU completion retained resources. Destruction without Reset also retained in-flight resources until completion and allowed release afterward. A separate destruction-notifier test passed callback, explicit unregister and owner-before-command teardown cases. All eight standalone executables and the Release x64 solution build passed.
+## Build, deploy and verify
 
-A five-second game probe compiled the production `NativeHost`, `NativeSession`, D3D12 observer, decoder and shaders. It captured 88 identified surfaces and substituted owned MV/depth inputs in 258 of 270 host evaluations. All 286 FG calls observed by the outer diagnostic wrapper succeeded. Stop disabled further correction and the host reported all entries retired after completion. The game's installed OptiScaler and MFG unlock files were unchanged. The probe's central/tag observation hooks were disabled; process-lifetime D3D12 forwarding hooks remain loaded with no correction session until game exit. No diagnostic DLL is distributed in this repository.
+Commands from the workspace root (`AGENTS.md` "빌드와 검사", "게임 배포와 실행"):
 
-The diagnostic entry uses a file-identity-checked common-tag address because the game is already initialized. The production startup bridge still uses named registration. Therefore this experiment proves live capture, ordering, correction substitution and retirement, but not full DLL startup deployment or the final menu layout. The observed scene had changed to a wider view of the casino. No new moving-glass quality claim or performance guarantee follows from these successful calls.
+| Step | Command |
+| --- | --- |
+| Build | `cmd /c glass-live-tools\glass-build.bat` → `glass-optiscaler-source\x64\Release\a\OptiScaler.dll` and `a\Glass\` |
+| Geometry contract | `cmd /c glass-live-tools\glass-geometry-tests.bat` |
+| Diagnostic contract | `python glass-live-tools\_bin_glass_diag_check.py <dll> --out <json>` |
+| Recording ownership | `cmd /c glass-live-tools\glass-recording-tests.bat` |
+| Standalone tests | x64 VS Developer PowerShell in `glass-optiscaler-source`: `.\OptiScaler\framegen\glass\tests\run-tests.ps1` (refuses while the game runs) |
+| Deploy (game closed) | `glass-live-tools\glass-game.ps1 -Action deploy`: backup `glass-deploy-backup-<time>`, then the DLL, `GlassObjectMotion.hlsl`, the graft catalog and the declaration data into the MO2 layers |
+| Deployment integrity | `glass-live-tools\glass-deploy-verify.ps1` |
+| Launch | `glass-live-tools\glass-game.ps1 -Action preflight`, then `-Action start`; relaunch with `stop` then `start` (`glass-live-tools\glass-launch.md`) |
+| Live check | `glass-live-tools\glass-ctl.ps1 -Command status,apply`, then `glass-dump-series.ps1` and `glass-fgdump.ps1` |
+| FG off evidence | `glass-live-tools\glass-fg-setting.ps1 -Action off` → restart → capture → `-Action restore`. `substitute=off` is not FG-off evidence (`research/objective.md:29`) |
+
+Launch only through the MO2 script path, on the last active monitor at 3840×2160, and run FG tests only while the window is in the foreground and `fg_frames` advances (`research/objective.md:23`). A module change requires a restart; other experiments use the live channel.
+
+## Verification results
+
+All results are from 2026-09-23 at a 2560×1440 render size (dump headers). "Residual" is `|delivered − engine|` on substituted pixels from `glass_graft_residual.py`. Paths are under the workspace `glass-live-tools/` unless noted. Directories marked † are not named in `research/ACTIVE.md`. They were matched to the run by time and dump headers; for example, `scene-20260923d/ceiling-fast360/frame-2/dump-1.txt` has `engine_covered_pixels=18856`, the `sub 18,856` of `research/ACTIVE.md:87`.
+
+| Run (DLL, pid) | Scene | Result | Source | Raw data |
+| --- | --- | --- | --- | --- |
+| `585b8df5`, 42328, 13:34–14:20; root grafts, RED4ext declaration plugin | still, 24 frames | delivered MV exactly 0 px; boundary `gt0.5` 205–916 (2026-09-18 mode 3: 13,590, mode 5: 55,190) | ACTIVE.md:50 | `mv-graft-still-20260923/` |
+| same | moving, 14 frames | delivered \|MV\| ≈ engine \|MV\| (42 px); residual mean 0.1–0.4 px | ACTIVE.md:50 | `mv-graft-move-20260923/` |
+| same | Songbird ceiling and chandelier, fast rotation up to 127 px/frame | residual mean 0.08–0.25 px; >1 px 0–1.1% | ACTIVE.md:51 | `scene-20260923/` |
+| same | glass/cup table | 0 substitutions: instanced array draws rejected by the array gate | ACTIVE.md:52 | `artifacts/glasses2-f11-full.png` (workspace) |
+| same | NPC eyewear and head attachments | wrong MV, residual 6–82 px, also with a still camera | ACTIVE.md:53 | same image |
+| same | railing behind a near NPC | railing MV written where the engine depth is the NPC | ACTIVE.md:54 | `scene-20260923/glasses-fast-dumps/frame-7` (y 417–502, x 85–228) |
+| same | generated frames | desktop capture at 73 fps; generated frames not identifiable, no verdict | ACTIVE.md:55 | `scene-20260923/ceiling-fg/`, `glasses-fg/` |
+| `538e463e` (`graftarray=on` probe) | glass table, still | root graft applied to array draws: 81 px error | ACTIVE.md:69, 77 | † `scene-20260923b/glasses-array-still/` |
+| `f853a540` + occlusion shader, 4392 | glass table with the camera-only array variant | substitution 0 → all array draws (`array_draws=51,718`); still: delivered p50 0.28 px vs engine 0.33 px; moving: 67 vs 67 px | ACTIVE.md:78 | † `scene-20260923c/glasses-still/`, `glasses-move/` |
+| same | opaque occlusion (NPC arm and glasses in front of glass) | residual mean 0.8–4.4 → 0.3–1.1 px; >1 px 12–30% → 5–14%. Remaining >1 px: NPC moving behind the glass (engine 7 px = NPC, delivered 0.3 px = glass), the intended correction | ACTIVE.md:79 | † `scene-20260923c/glasses-still-occl/` |
+| same | quest icon | not substituted (0 px): drawn by DrawBuffer `ui_panel`/`ui_default_*` VS without an engine velocity twin | ACTIVE.md:80 | † `scene-20260923c/icon-move/` |
+| `b9cf9e82`, 34300 | Songbird ceiling, still, 6 frames | residual mean 0.06–0.13 px; >1 px 0.3–2.4%. `occluded` 136,859–137,240 in 5 of 6 frames; frame 5 has 126,657 with a smaller captured area (`packed_pixels` 381,693 vs about 396k), not a decision flip | ACTIVE.md:86 | † `scene-20260923d/still/` |
+| same | slow rotation, 18–25 px/frame, 8 frames | residual 0.06–0.13 px; >1 px ≤0.1% | ACTIVE.md:87 | † `scene-20260923d/ceiling-slow/` |
+| same | fast 360°, 128 px/frame | motion beyond the ±128 px record range: most substituted pixels fall back to engine values (`sub 18,856`); remaining pixels mean 0.92 px. Design limit | ACTIVE.md:87 | † `scene-20260923d/ceiling-fast360/` |
+| `9754c134`, 3172 | generated frames A-B-A-B: mezzanine glass railing, far background, fast pan 480 px / 8 steps / 40 ms | mod off: glass pattern smeared over the truss, pillar edges doubled. Mod on: pattern and pillar edges in place and sharp. Glass table: little on/off difference (table and glasses at similar depth) | ACTIVE.md:93-96 | `scene-20260923e/ab7-*`, `ab7-mezzanine-generated-ABAB.png` |
+| not named in ACTIVE.md | walking plus camera tracking, 6 segments; forward segments stuck and excluded | real move and turn segments: residual mean 0.02–0.13 px, >1 px ≤1.4%; `right-pan frame-2` (turn 28.8 px + translation −9.9 px): 0.09 px | ACTIVE.md:101-103 | `walk-20260923/` |
+| `9364be81`, 34108 | generic camera-only grafts, still | `GRAFT camera_only=183`; substituted area 127k → 508k px; residual 0.04–0.08 px, >1 px ≤0.7% | ACTIVE.md:112 | `scene-20260923f/still/`, `rail-still/` |
+| same | generated frames A-B-A-B: railing slats, lamp, quest icon | mod off: slats and lamp doubled or smeared, quest icon "!" doubled. Mod on: slats, lamp and icon single and sharp | ACTIVE.md:113 | `scene-20260923f/ab8-*`, `ab8-railing-icon-generated-ABAB.png` |
+| same | NPC glasses | 6 px wrong MV with a still camera: 18 root grafts on skinned/garment targets came from MeshStatic twins. Fixed offline by the factory rule; no dedicated in-game recheck | ACTIVE.md:114, 134 | — |
+| `9364be81`, 3188, 15:57 | FG off: profile `FrameGeneration=Off`, restart | host evaluations 0, packed capture not initialized; 69% of consecutive desktop frames identical, so no generated frames; module inactive; `restore` confirmed | ACTIVE.md:117-120 | `scene-20260923f/fgoff-burst/fgoff-pan.mp4` |
+| integration build: commit `592de369b`, DLL `0c5bb34e` then `580b24ad`, 16:36~; 5 reviews PASS | declaration hook inside the DLL | `DECL hook=1 seen=7728 matched=250 rejected=0 status=installed`; RED4ext plugin moved to backup | ACTIVE.md:126-127 | — |
+| same, `OpaqueProbe=false` | packed capture without the opaque diagnostic | `packed_pixels` ≈110k, `occluded=0`: a transparent draw does not record pixels that fail the engine depth test | ACTIVE.md:127 | — |
+| `0c5bb34e`, `GraftClassMask=3` | NPC head (hair, glasses; skinned class 2), still, 6 frames, y 636–758, x 183–303 | delivered ≈77 px vs engine ≈3.5 px in every frame: the skinned previous position is wrong | ACTIVE.md:128 | `p6-20260923b-on/still-npc-head-class2-residual.png` |
+| `580b24ad`, `GraftClassMask=1` | same protocol rerun | 77 px region gone; `class_disabled=348~367` | ACTIVE.md:128 | `p6-20260923c-on/` |
+| same | remaining unsubstituted VS | 14: 13 outside the transparent inventory (blended decal 11, debugdraw 1, unclassified 1), 1 screen-space particle (`42531526`); no further graft candidates | ACTIVE.md:129 | — |
+| `0c5bb34e` / `580b24ad` | compose GPU time | `gpu_ms=0.176` (mask 3), `0.128` (mask 1) | ACTIVE.md:130 | — |
+
+The integration build ran the in-DLL declaration hook, the factory rule, the arena decoupling and the legacy removal together (`research/ACTIVE.md:124-130`). ACTIVE.md records no dedicated recheck of the 6 px NPC-glasses error from the factory rule, and no `history_bypassed` result for the arena decoupling. Rows before 16:36 predate `OpaqueProbe=false`; their `occluded` counts may include opaque-diagnostic pipelines [INFERENCE from `research/ACTIVE.md:127`].
+
+## Known limits and open items
+
+- Skinned transparent draws (class 2), including NPC hair and glasses, keep the engine value by default. [INFERENCE, `research/ACTIVE.md:128`] The transparent pass does not keep the velocity pass's previous skinning supply (previous `INSTANCE_SKINNING_DATA` offset, previous t10 bones), so a skinned root graft reads a wrong previous position.
+- The 6 px NPC-glasses error fixed by the factory rule has no dedicated in-game recheck (`research/ACTIVE.md:134`).
+- Record range: 11-bit motion at 1/8 px bounds a record to ±128 px. Faster motion keeps the engine value (`research/ACTIVE.md:87`); this bears on C11.
+- Coverage: 54 VS without a native twin have no camera-only graft (screen-space 11, two-stage projection 17, no `SV_Position` 6, multiple stores 7, other 13; `research/ACTIVE.md:107`). Preskinned twins (t9/b3) have no root graft. In the integration build, 14 VS stayed unsubstituted, 13 of them outside the transparent inventory (`research/ACTIVE.md:129`). See [SupportMatrix.md](SupportMatrix.md).
+- Camera-only records carry camera motion only: independently moving array elements, camera-facing rotation of billboards and particles, and icon anchor motion are not included. This matches the engine's own velocity for those draws (`research/ACTIVE.md:77`, `research/ACTIVE.md:108`).
+- Not yet run: the full user protocol (`research/ACTIVE.md:62`); the 2026-09-19 report of railings and panes rotating individually; the quest icon under rotation beyond the A-B-A-B pan; vehicle glass, particles, smoke, holograms, liquids, destruction and procedural deformation in game (`research/requirements-and-evidence-20260923.md` §5).
+- Opaque-probe equivalence (T3) has not been run (`research/native-supply-integration-plan.md:90`).
+- C13: the compose GPU time on the integration build is `gpu_ms=0.128` with mask 1 (`research/ACTIVE.md:130`). The CPU hook cost was last measured on 2026-09-19 at 3.62 ms/frame (`research/requirements-and-evidence-20260923.md` §3). CPU+GPU total with diagnostics off, the P6 pass criterion, has not been measured.
+- The port to the official latest OptiScaler is the last stage (`research/objective.md:27`).
+
+## Native FG host and session contract
+
+Two seams call `EvaluateNativeFG`. One is the FrameGeneration branch of `NVNGX_DLSS_Dx12.cpp`, which finds the feature through `HandleToFeature` (`NVNGX_DLSS_Dx12.cpp:1248`, `1282`). The other is `NvngxDlssgBridge.cpp` (`:192`). It detours `NVSDK_NGX_D3D12_EvaluateFeature` in the loaded NGX provider (`nvngx_dlssg.dll`, or the driver's `_nvngx.dll`), because Streamline's `sl.dlss_g.dll` calls the provider without passing the host's NGX proxy. The loader hook returns the real module unchanged, so the MFG unlocker can still patch it (`NvngxDlssgBridge.h:9-19`). `NativeHost` keeps one `NativeSession` per FG feature and scopes the substitution around the original native call.
+
+- Command-list identities: the engine alternates between FG command lists (one per back buffer) and rebuilds them on focus regain, swap-chain changes and FG restarts. A session holds up to 16 list identities and evicts the least recently adopted one; it is not retired (`NativeSession.h:30-55`). The list type belongs to the list: Streamline submits the same FG list on a compute queue for the driver-level block and on a direct queue for the tagged evaluation (`NativeSession.h:44-50`, `262-270`).
+- Ordering: phase 1 (`inputs.index == 1`) acquires the packed frame and records its producer fence. The host pre-submit hook waits on that fence on the FG queue and then executes the compose list (`NativeSession.h:414-427`, `472-480`, `533-544`). The session adds no CPU wait.
+- Completion: `afterSubmit` signals the session fence when a submitted batch contains a known FG list while owned outputs are recorded or a compose is in flight (`NativeSession.h:272-357`). `readyToRelease` requires the compose fence drained, the session stopped, no output recording pending and the completion fence reached (`NativeSession.h:560-579`). `releaseAfterGpuDrain` is called only after that.
+- Destruction: `CommandLifetime` uses the official `ID3DDestructionNotifier`. Its callback only publishes a flag; a destroyed FG list loses its identity and the session keeps its outputs (`NativeSession.h:127-146`).
+- A failed or refused evaluation calls `invalidateHistory`, so the next phase-1 evaluation starts over.
+
+The existing `D3D12Hooks::RestoreRoot` and `ResTrack_Dx12::HookDevice` are not used: the first depends on user configuration, and the second skips `FGInput::NvngxFG`. `D3D12Observer` installs its method set from the actual COM interfaces through upstream `rewrite_signature` and Detours, serializes queue calls with their after-callbacks, and suppresses only this module's nested calls.
+
+## Streamline tag bridge
+
+`OnStreamlineCommonLoad` receives the parameter interface and the parsed common-plugin version from OptiScaler's loader (`Streamline_Hooks.cpp:1080`). `WrapStreamlineCommonFunction` wraps the common plugin's named startup and shutdown callbacks (`Streamline_Hooks.cpp:1750`). After a successful startup it obtains `sl.param.global.getTag` through the typed `IParameters` ABI and registers a forwarding wrapper before dependent plugins initialize. The bridge scans no driver instructions. Shutdown disables observation and restores the original registration if the bridge still owns it.
+
+The wrapper reads a borrowed `CommonResource` without modifying it or copying a `shared_ptr`. This is an internal Streamline structure, not a stable public API. It is admitted only for common versions 2.14.0 and 2.14.1 (`StreamlineTagBridge.cpp:149`); offsets come from the pinned NVIDIA 2.14.1 source and were observed on the installed 2.14.0 binary. The bridge allocates no GPU resource and records no GPU command.
+
+`NativeHost` calls `ReadStreamlineStates` once per native evaluation. When the tags are present, it takes the Streamline frame identity and the resource states from them. Phase 1 then requires fresh matching depth, motion and HUD-less tags; incomplete, mixed-frame or repeated data are rejected (`NativeHost.cpp:1703-1711`). The driver-level block, in which Streamline's FG plugin hands the textures straight to the NGX core, carries no tag state. For that block the host uses the DLSS-G input convention (`COPY_DEST`) and the engine render frame that also numbers the packed capture (`NativeHost.cpp:1713-1759`).
 
 ## Existing MFG unlock
 
-Keep the existing Ultimate ASI Loader `version.dll`, `plugins/mfg-unlock.asi` and OptiScaler loader configuration. Correction operates on FG input copies. It does not replace the ASI loader, patch support gates or kernels, or write multiplier options. Coexistence with the connected correction was observed in the fresh-process deployment below. This does not establish compatibility with every future loader or provider version.
-
-## Fresh-process MO2 deployment
-
-On 2026-09-10, the complete b59aa86 Release DLL was built again and installed as `overwrite/Root/bin/x64/dxgi.dll`, with both `Glass/` shaders. RootBuilder copied the files into the game. DLL SHA-256: `4dfa71cdbee83f40665f73e533d96a8fd987880b3f13b51ff9020bd861742a9a`; build identification: `b59aa86 / 20260910_130315`. Existing OptiScaler settings, `version.dll` and `mfg-unlock.asi` were preserved. The local separate INI enables correction at strength 100 with sparse timing; source defaults remain off.
-
-A fresh game process loaded this DLL and the existing ASI unlock together. No diagnostic DLL had been injected at this startup checkpoint; later paired capture added a diagnostic recorder. The production named Streamline startup path therefore supplied the tag metadata used by the initial corrections. At the initial checkpoint, 8,679 of 8,700 native host evaluations substituted inputs, with 2,897 identified surface captures. Periodically logged evaluation results were successful; these sampled results are not a complete per-call failure histogram. MO2 redirected the log to `overwrite/bin/x64/OptiScaler.Glass.log`.
-
-The actual OptiScaler menu showed correction enabled, strength 100, active status and a completed 0.364 ms GPU sample. Disabling the checkbox stopped substitution and capture counters while native evaluations continued: counters remained 9,408 substitutions / 4,315 captures through evaluations 9,900 to 11,100. Re-enabling resumed correction: evaluation 11,400 showed 9,603 substitutions / 4,380 captures, and the UI displayed a new 0.404 ms sample. Correction was left enabled and the menu closed. These are sparse correction-only samples, not average frame costs or a performance guarantee.
-
-The ratio override displayed 4X. Separate generated-phase output capture was not performed in this startup/UI check. Final moving-glass quality, cup edges, moving objects and background preservation remain pending. Runtime substitution and controls are verified; the ghosting fix is not visually accepted.
-
-## Paired moving-frame capture and remaining failure
-
-After the user reported continued background attachment, a bounded recorder observed the deployed module's original input copies and the actual substituted MV/depth at native FG entry. It added no second correction or parameter substitution. The recording contains 32 rendered frames, 96 successful generated phases and 320 complete readbacks: real color, three generated colors, original MV/depth, actual auxiliary snapshot, HUDless and delivered MV/depth. Capture hooks were disabled and all jobs completed. Readback affects cadence, so this is not a performance benchmark.
-
-The actual inputs changed: frame 12 contains 68,938 changed pixels, with a median motion delta of approximately 44.53 render pixels. Changed depth equals the auxiliary snapshot exactly; delivered vectors match projection through that depth and the recorded camera transform within half precision. Unchanged pixels and MV Z/W remain bit-identical. All frames preserve the upper 700 render rows in this particular scene. This is limited background-preservation evidence, not a guarantee for arbitrary panes.
-
-Reliable tracked scene features place the three generated phases near 25%, 50% and 75% between endpoints. A few unambiguous cup-base features agree with projected motion; repetitive glasses make other matches unreliable. This does not establish correct motion for all transparent appearance. Actual generated frames still contain cup-edge and stem duplication.
-
-A fresh-feature replay uses recorded evaluation arguments and remaps only explicit resource inputs. Two identical-input runs produced 96 bit-identical outputs. Creation arguments and internal provider history were not captured, so replay is not claimed bit-identical to the live recording. Same-time comparisons of original inputs, MV-only changes, depth-only changes and both changes show better-separated cup bodies with both changes, but remaining edge ghosts. Sparse successful runtime calls alone cannot establish image quality.
-
-At movement stop, frame 27 reverts 54,043 previously selected, depth-compatible pixels to background inputs. The shaders reject motion disagreement below 0.5 render pixels and require photometric evidence to seed each frame. An offline history-only trial retained 45,700 low-motion pixels in that frame. Its generated-image effect was small and it did not solve moving-glass ghosts; it has not been installed or adopted into production.
-
-The recorded HUDless pair also contains mixed correspondence evidence inside selected glasses. For frame 12, 38,829 selected pixels favor surface motion, 16,587 favor background motion and 13,522 are inconclusive under a 5x5 RGB residual comparison with 3/255 and 10% margins. This is not opacity or ground-truth flow: repeated shapes, occlusion, reflections and refraction violate simple brightness matching. Further work must distinguish surface appearance from refracted background rather than assume one geometric surface vector explains both.
-
-Local evidence is indexed in `outputs/glass-deployed-capture-v3/`: `input-audit.json`, `feature-flow-audit.json`, `paired-replay-audit.json`, `selection-history-audit.json`, `appearance-motion-audit.json`, full-scene comparisons and `original-vs-delivered-4x-slow.mp4`. The video preserves real/generated order at a slow 15 fps presentation, not measured timing. Diagnostic files and raw game data are not distributed here. The deployed algorithm remains b59aa86; this finding is not a completed fix.
-
-## Further recorded-input trials (2026-09-10)
-
-A later joint capture contains 24 rendered inputs, 72 generated phases and 28 actual distortion fields. Observed queue order and native fence dependencies associate the captured distortion with the following FG evaluation. A separate stage capture verified that the distortion consumer samples color at UV plus this field; its large displacement is not simply an assumed format conversion. Neither capture substitutes a new correction.
-
-Unconstrained inverse-distortion roots frequently leave the transparent surface. A bounded same-depth search also finds too few convincing cup correspondences to constitute a fix. Surface-seeded local appearance tracking changes real MV/depth inputs, but selecting only its most confident individual pixels makes some generated cup outlines bend more severely. Each candidate was evaluated through the actual NVIDIA provider, rather than judged solely from an image warp. Keeping deployed geometry and only refining local vectors, with or without conservative interior-background restoration, still leaves doubled outlines. None of these candidates has been adopted or installed.
-
-For the new recording, two fresh-feature runs of the delivered inputs produced 72 bit-identical outputs. Creation arguments and provider history remain unavailable; reproducibility does not mean exact restoration of live internal state. These observations reinforce the distinction between reduced photometric matching error and accepted FG quality.
-
-The material's dual-source shader emits a separate RGB destination multiplier. An independent synthetic D3D12 test first verified extracting this multiplier through a second draw with zero source contribution and `SRC1_COLOR` destination blending, without changing the pixel shader. All 2,048 synthetic pixels matched. Later live extraction is described below. Repeating the real glass shader has additional cost and requires draw-state and side-effect validation. The existing deployed algorithm remains b59aa86.
-
-Local evidence: `outputs/glass-local-correspondence/`, `outputs/glass-joint-capture-v2/`, `glass-joint-replay/`, and the workspace document `docs/glass-refraction-joint-capture.md`. Raw game captures are not distributed in this repository.
-
-## Material evidence and offline test direction
-
-A bounded startup diagnostic retained 28 matching original graphics PSOs and 28 separate transmission PSOs. A later draw recorder captured the RGB multiplier on owned RGBA16F targets, restoring the original PSO and render targets after each duplicate. Two original color targets were captured separately; their transmission images were bit-identical. Combining their draws into one target would count the same transmission twice. This capture added no FG input replacement.
-
-A further same-recording capture separated three material groups at one original target. Cup-shaped data appeared in `glass_onesided`, and railing-shaped data appeared in `glass`. Two `fillable_fluid_vertex` draws produced no non-unit multiplier pixels. This does not distinguish invisible/discarded/occluded geometry from surviving pixels with unit transmission. It is not proof that fluid contributes no color. These recordings are single-frame material evidence, not a quality-approved motion correction.
-
-`MaterialCaptureBlend.h` prepares blend states for transmission, accumulated source color, and surviving-pixel coverage. Its general classifier examines the actual RGB equation rather than material names. It supports the observed premultiplied-alpha, straight-alpha, additive, source-alpha attenuation and dual-source families; destination-dependent source factors and non-additive operations are rejected. It does not install hooks or admit arbitrary draws. Its independent RGBA16F GPU test checks 20,480 pixels across five families, including shader discard and nonzero source color with unit transmission. It is not connected to runtime correction. Final color decomposition also requires validation of interleaved omitted draws and background-dependent shader inputs.
-
-The current base shader cache contains 395 material names and 19,647 technique records. A separate extraction parsed 381 material templates and 1,485 passes; 127 templates have a transparency-named pass. Their color blends include premultiplied alpha, straight alpha, additive and dual-source forms. These counts are not scene objects or an exhaustive active-mod census. Active overrides and unresolved names remain under investigation. General admission must follow verified blend/output/depth semantics rather than a list of three material names.
-
-Most further experiments run through [the standalone FG replay harness](tests/replay/README.md). Dimensions, counts and paths now come from manifests, and a standard-library Python runner verifies identities, actual input changes and generated outputs. Repeated 24-frame 4x outputs match the previous local replay exactly; an eight-frame 2x case also passes. Additional scenes and layer-driven candidates remain work in progress. In-game work is limited to missing input capture and final application checks. Neither the new layer extraction nor its synthetic test resolves the observed cup ghosting by itself.
-
-`GlassLayerComposite.hlsl` applies a further controlled result as isolated GPU code: generate the separated background once, then warp endpoint source color and RGB transmission along verified surface correspondences and compose `F + T*B`. This avoids assigning foreground motion to the transmitted background. In the no-refraction synthetic test it reduced cup error and the inspected duplicated outlines more than the four tested single-MV choices. Its GPU output matches the reference, including rejected-input fallback checks. It remains disconnected from the game host. Captured game layers, common linear color domain, refraction, overlapping layers, correspondence, lifetime and per-phase output access remain necessary before integration. A cheap composition shader alone does not establish that all required game capture work fits the requested budget; see the replay README for evidence and limitations.
-
-### Stationary transparency with independent background motion
-
-The target is transparent foreground attaching to background depth/motion, not a cup-specific appearance filter. Both camera-relative motion and an independently moving object behind stationary transparency must pass. Supplying foreground depth/motion is not sufficient evidence that the generated foreground is separated correctly.
-
-A subsequent live capture separated source color, transmission and surviving-pixel coverage at one original target. Railing and cup groups had 67,493 and 50,511 surviving pixels; the observed two fluid draws had none. This is evidence about those draws, not all fluid materials. Source RGB reached 109.5, so treating it as the final RGBA8 FG color domain would be invalid. Runtime color-transfer and simultaneous background capture remain unresolved.
-
-A controlled experiment froze the captured cup F/T and moved a synthetic figure behind it, with fixed camera and surface. Three actual 4x FG runs produced 108 generated images. Foreground zero motion plus foreground depth still left displaced outlines. Separate layers in a known linear domain reduced this error. The samples are real material values, but motion, lighting and tone mapping are synthetic; it is not a live game-motion replay.
-
-The compositor now requires an explicit correction footprint in addition to valid surface endpoint correspondence. Pixels outside it retain the original FG output. Neutral F=0/T=1 pixels inside it restore the separated background because FG may have displaced a foreground ghost there. An earlier neutral-pixel bypass retained such ghosts and was rejected. Footprint construction must account for relative motion; actual surface coverage alone is insufficient. The fixture uses a known motion bound, not a runtime estimator. Three-phase GPU checks pass, and a 921,600-pixel test matches the CPU reference at every displayed 8-bit pixel while preserving all 887,331 pixels outside its footprint. Game input acquisition and quality acceptance remain incomplete.
-
-## Independent layer resolutions
-
-The isolated separated-layer compositor now accepts each input's actual dimensions and valid region, with normalized endpoint offsets. Previous/current layers, background, correspondence grid and output can have different sizes. Padded allocation edges are excluded; the original fallback matches the chosen output stage and remains exact outside correction. Five independent-resolution GPU configurations passed 326,970 pixels, and a controlled actual-FG case with 640x360 MV/depth and 1280x720 color passed composition at two output sizes. See [the coordinate contract and evidence](tests/replay/README.md#independent-resolutions-and-valid-regions). This does not establish internal DLSS-stage access, color conversion or runtime integration, and does not change the deployed b59aa86 module.
-
-## Stage placement and native-size diagnostic copies
-
-A subsequent read-only game trace contains 22 complete submission batches with material draws at list position 1, two NGX evaluations at position 3, and the bytecode-identified tone-map draw at position 7. In every batch, one material color target is exactly the first evaluation's Color resource. Observed color sizes were 2560x1440 to 2560x1440, then 2560x1440 to 3840x2160; tone output was 3840x2160. The first evaluation's Output and the second evaluation's Color are different resources even though their sizes match. OptiScaler has intermediate model processing between its first upscaler and enlargement stages. These observations do not identify a feature from stale parameter keys or prove pixel/color transfer, exposure or complete GPU timing. All 112 observed native evaluations returned success; no correction input was replaced by this diagnostic.
-
-`tests/StageReadback.h` is a bounded diagnostic copy helper for the missing color evidence. It takes each live resource's actual allocation and valid region, uses its copyable footprint, and returns tightly packed bytes without resizing or color conversion. Supported single-plane color formats include FP16/FP32 RGBA and the tested 8-bit/10-bit formats. Unsupported arrays, mip chains, MSAA, formats, invalid rectangles and over-budget copies are rejected. It inserts only a copy with transitions back to the supplied proven state. The caller must independently prove that state, a suitable recording outside render passes, live resource ownership, submission and recording discard; borrowed RTV addresses do not meet this contract. Unknown COMMON promotion is rejected. It is neither a capture hook nor production streaming code.
-
-Build with `tests/build_stage_readback.ps1` from an x64 developer PowerShell and run the returned executable. Five synthetic GPU cases checked 21,498,076 copied pixels / 111,389,400 bytes exactly, including padded 3840x2160 and different intermediate regions. Reads require both the actual queue fence completion and proof that the recording cannot be submitted again. Reset alone and completion alone were insufficient; 45 invalid operations were rejected. The debug layer was unavailable, so this is functional copy/completion evidence, not debug-layer validation or game capture. If a host cannot establish completion and discard, the diagnostic intentionally retains its resources until process termination; that policy is unsuitable for continuous production use.
-
-The game was normally exited after the trace and its diagnostic ASI restored to the previous version. No new algorithm was deployed. Next capture work must correlate actual stage colors and layer values using GPU dependencies, then validate conversion through intermediate processing. Coordinate independence does not make an early HDR material layer compatible with a final post-processed FG image.
-
-## Complete material-span reconstruction
-
-A later startup diagnostic catalogued successful graphics descriptors without matching material names. It retained PSO/root identities and owned shader/input-layout bytes, with bounded storage. The live run recorded 5,309 graphics descriptors and 1,803 unique shader blobs; 983 passed blend/stage/descriptor eligibility, but eligibility alone did not authorize another draw. No unknown pipeline-stream descriptors were catalogued; this run observed zero stream creations. Shader bytes and addresses remain local and are not distributed.
-
-A same-recording capture using the earlier four admitted PSOs selected 52 draws and omitted 91. Exact descriptor and VS/PS inspection identified eight additional variants, including 26 `fillable_fluid_vertex` discarded-variant draws. Those audited variants had no UAV or non-output resource writes, depth output, additional shader stages or stream output. Their depth/stencil state was read-only and their actual RGB blend was `One / Src1Color / Add`. The previously observed two fluid draws with no surviving pixels did not cover this other fluid variant.
-
-Using the same general blend helper for all 12 audited PSOs captured 143 direct draws with none omitted inside the selected span. B before the span, C after it, accumulated F/T and surviving coverage came from one RT/DSV and one recording at their actual 2560x1440 allocation/extent. Recording close, single submission, Reset/discard and queue-fence completion all passed; capture hooks were disabled, with no FG input substitution. The standalone capture test also covered non-indexed and indexed draws, padded subregions and omitted draws, preserving the original color output exactly.
-
-For the 119,938 surviving pixels, `F + T*B` matched actual C with median relative max-channel error 0.02864%, p99 0.08460%, and maximum 0.21867%. None exceeded 1%. Absolute max-channel error reached 0.01490 in the early HDR units. All 3,566,462 pixels outside coverage matched exactly. Direct image inspection confirmed that the formerly missing yellow fluid and cup bases were captured. These are reconstruction residuals from one material-stage sample, not generated-frame quality scores. B already contains cup-shaped refraction/detail, so it is not a clean background. Color/exposure/temporal transport through later DLSS stages remains unresolved.
-
-The game was normally exited, RootBuilder Sync/Clear completed, and the temporary startup ASI was restored to its preceding version. The deployed correction DLL remains b59aa86. Local evidence is in `outputs/glass-material-census-live-v6/`, `outputs/glass-material-joint-capture-v11/` and the workspace joint-capture document. This result supports general descriptor-based extraction; it does not approve arbitrary shader replay or the final ghosting fix.
-
-## Object motion source and material-mask limits
-
-The installed correction derives a static-world surface vector from auxiliary depth and the camera transform. Its selected pixels receive that vector and surface depth; the mask is binary. The strength control changes region admission, not a blend between foreground and background velocities. It does not yet read a moving object's previous transform or previous deformed vertices. A stationary surface behind which another object moves already has known zero surface motion; acquiring dynamic-object motion alone does not settle the layer-assignment problem.
-
-A read-only bytecode audit matched all 12 previously captured transparent PSOs to 11 unique vertex shaders, then compared six engine velocity-pass variants for static, skinned and garment meshes. The velocity path applies a separate object transform and camera projection to a second vertex state. A skinned variant reads INSTANCE_SKINNING_DATA.z to address a second set of bones in t10; the corresponding observed transparent variant reads only X/Y. Separate-transform constant locations differ by variant. The observed transparent shaders do not read the velocity path's second camera matrix. This identifies a possible geometry-based motion source, but does not prove that the transparent draw binds valid previous transforms, Z offsets or previous bones. Root/vertex-buffer contents and frame identity still need verification. Do not apply opaque-pass constant offsets to transparent draws without that evidence. If history must be retained independently, buffer address or draw order alone is not a stable object identity.
-
-A further controlled ablation used the complete captured F/T/U, including the previously missed liquid, over synthetic backgrounds. With 1280x720 color and 640x360 MV/depth, 12 runs produced 432 successful 4x outputs. Evaluated candidates selected all material pixels, attenuation-dominant pixels, surface-gradient-dominant pixels, or a combined mask; the combined mask also had an MV-only ablation. Every tested selector increased cup-region mean error against analytic intermediate truth. In the stationary-surface/moving-figure crossing region, baseline error was 8.768 and all-surface error 9.303; in relative translation, they were 3.298 and 3.844, in 8-bit RGB levels. Combined-mask MV-only error reached 8.882 in relative translation. Whole-scene generated comparisons were inspected and retained cup-edge errors. These candidates are not adopted. Frozen captured material plus synthetic motion/depth/tone mapping is not game-motion replay, and this does not rule out every single-MV method.
-
-Local evidence is recorded in the workspace document `docs/glass-object-motion-source.md`, `glass-object-motion-audit-v1/audit.json`, and `glass-material-motion-selection-v1/analysis.json`. Game bytecode and raw captures remain local. No new runtime algorithm or object-motion extraction has been installed.
-
-### Geometry motion and separate object boundaries
-
-`GlassObjectMotion.hlsli` and [the independent raster reference](tests/ObjectMotion.md) now separate current/previous object transforms and deformed vertices from current/previous camera projection. Confirmed object boundaries receive a full surface weight regardless of low opacity; gain/bias applies to the interior. The reference retains separate object masks before compositing, including a smaller transparent surface behind another pane.
-
-Eleven cases at two sizes compared actual D3D12 raster outputs with independent double-precision ray/triangle correspondence. Maximum geometric motion error across 1,769,686 checked samples was 0.000983 pixels. Per-object boundaries preserved outlines lost by the previous union mask; CPU boundary selection copied 25,668 admitted GPU vectors exactly. GPU scalar weights were also checked. Coincident edges with different vectors remain explicitly unresolved, and opaque occlusion cuts are not intrinsic object boundaries. These are synthetic input/geometry tests, not native FG quality results or extraction of engine object history. No host or installed DLL changes were made. See the linked document for sources, limits and runtime prerequisites.
-
-## Menu controls and timing
-
-The FG settings window contains **Transparent surface correction (experimental)**:
-
-- Enable glass motion correction; default off while integration is unfinished.
-- Correction strength, 0–100. Zero bypasses correction. Lower nonzero values require a larger fraction of reliable surface seeds per region. The selected vectors remain the actual projected surface vectors; surface/background velocities are not averaged. 100 preserves the preceding candidate's thresholds.
-- Save, reload and reset buttons for `OptiScaler.Glass.ini`, alongside the loaded OptiScaler DLL. This separate file preserves unrelated OptiScaler settings and is not read on each evaluation.
-- A GPU correction time line is always present. Measurement defaults on. Inactive and pending states are shown explicitly. `MeasureGpuTime=false` in the separate INI can disable sampling.
-
-The pass samples the first and then every 30th correction batch. Each sample adds two timestamp queries and one 16-byte resolve. Eight slots reserve 128 bytes of readback data, plus driver-managed query/fence metadata. The host supplies its existing monotonic GPU completion fence. The timer adds no queue signal, GPU wait, CPU wait, clock calibration or stable-power-state changes. It only reads completed results and skips samples when its ring is full.
-
-The displayed interval covers correction input copies and compute passes on the FG COMPUTE queue. It excludes the producer's surface-depth capture, DLSS-G evaluation and presentation. It is the last sampled interval, not total frame latency or the measurement's own overhead. Query operations still have a cost; sparse sampling limits their frequency without claiming zero overhead. Follow [Microsoft's timestamp contract](https://learn.microsoft.com/en-us/windows/win32/direct3d12/timing) and [query-resolution lifetime contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-resolvequerydata).
-
-Settings changes are sampled when preparing phase 1; phases 2/3 retain the same prepared inputs. This preserves consistent 4x interpolation. `NativeHost` supplies controls and submission/reset callbacks, then publishes completed samples without waiting.
-
-## Validation to date
-
-- Visual Studio 2022 Build Tools / MSVC 14.44: Release x64 solution build passed, including typed native NGX adapter instantiation.
-- Recorded replay: 32 rendered inputs, 96 successful 4x evaluations, 31 correction dispatch sequences, 93 substitutions and 96 pointer restorations. Generated outputs and corrected MV/depth/masks matched the preceding candidate in all 189 compared files.
-- Stale auxiliary depth was rejected; the following history was invalidated. Error/exception restoration and invalid-input rejection passed CPU contract checks.
-- Live read-only depth selector: selected the expected candidate on 36/36 occurrences; two other candidates were never selected. FG evaluations succeeded. This was observation, not correction deployment.
-- Queue trace: 2,866 events across 28 surface generations. Replay of queue bookkeeping bound 82 subsequent FG evaluations and bypassed 3 initial evaluations; adversarial ordering checks passed. This is CPU submission evidence, not GPU timing.
-- Strength controls: 100 matched all 189 prior output/input files; 0 matched all 96 unmodified baseline generated frames. At 50, selected pixels were a subset in all 31 corrected frames. Outside-selection values and MV Z/W stayed bit-identical. Frame 13 selected 95,100 pixels at 100 and 51,526 at 50. Full-scene images and MV views were inspected for frames 13/18; lower strength leaves some cups uncorrected and is not a new quality acceptance result.
-- Timing replay: 96 FG evaluations succeeded and all 189 output/input files matched the run without timing. Two sparse samples were 0.284672 and 1.059840 ms; the first was a history warmup. These are replay observations with a game also running, not a live-game benchmark, a 1 ms guarantee or a timer-overhead measurement.
-- Standalone GPU test: four depth copies, 8,192 exact pixels, in-flight reuse rejection, stale-token rejection and discarded-recording reuse passed. Timing returned no sample before completion and no duplicate after delivery. The D3D12 debug layer was unavailable; this is functional GPU evidence, not debug-layer validation.
-- Settings tests: defaults, range clamping, save/reload, unrelated-key preservation, failed replacement preserving the previous file, malformed-value fallback and headless ImGui vertex generation passed. Production retains FreeType; the headless test uses stb fonts. This does not prove the final game-menu layout.
-- Earlier candidate images reduced cup-body duplication; edge artifacts remain. Limited railing regions retained background motion. Dynamic objects and broader scenes are not accepted yet. No 1 ms performance guarantee is made.
-- Same-recording replay: correction and FG were recorded together without submitting/draining between them. Readbacks moved after native Evaluate. All 96 FG calls succeeded and all 189 generated/corrected-input files matched the earlier replay. This closes the previous replay's submission-boundary gap; it does not prove live hook coverage or resolve edge quality.
-- Bounded live state experiment: 16 base/extended method hooks installed successfully on the actual FG command list, including predication, indirect execution, state objects and programs. The production admission gate permitted 63 ClearState calls; all 134 observed FG calls succeeded. Hooks were disabled afterwards. No MV/depth substitution occurred, so this is state compatibility evidence, not live correction deployment or a performance result.
-- Compute recording contract test: individually missing each of 16 observations, failed Reset, initial PSO, stale tickets, repeated insertion, changed identity and non-COMPUTE lists were rejected. This CPU test checks admission semantics, not the platform hook installer.
-- Native session replay: a DIRECT queue uploads the recorded auxiliary depth and the pool captures it; native-style Signal/Wait links it to the COMPUTE queue. The session runs correction and actual 4x FG in one recording. All 96 calls succeeded and all 189 generated/corrected-input files matched the prior replay. Stale frame 19 was bypassed and completion plus discarded-recording release was verified. File-upload/readback waits belong to the standalone harness, not the session.
-- Standalone native session test: missing dependency observation, ambiguous captures and intervening predication calls reject admission. Unsubmitted and GPU-in-flight release attempts are rejected; completion after Reset permits release. Timing is unavailable before completion, delivered once afterwards, and stop prevents new captures/evaluations. This uses an independent GPU device and synthetic inputs, not a game attachment or a quality test.
-
-- Tag bridge tests: unsupported common versions and failed startup do not install a reader; named registration preserves output bytes and forwarding after shutdown. Fresh 2x/4x phases, cross-thread metadata, stale/mixed/missing data, changed handles/states/viewports/offsets and malformed structure/extent rejection passed. These tests do not prove the deployed game's startup interception.
-
-Raw game captures and diagnostic DLLs are local investigation artifacts and are not part of this repository. The source-only standalone tests below are included; the recorded FG observations are not a portable end-to-end test suite.
+Keep the existing Ultimate ASI Loader `version.dll`, `plugins/mfg-unlock.asi` and the OptiScaler loader configuration. The module substitutes FG inputs only. It does not replace the ASI loader, patch support gates or kernels, or write multiplier options.
 
 ## Standalone tests
 
-From an x64 Visual Studio Developer PowerShell with the repository dependencies initialized:
+From an x64 Visual Studio Developer PowerShell in `glass-optiscaler-source`, with the game closed:
 
 ```powershell
-./OptiScaler/framegen/glass/tests/run-tests.ps1
+.\OptiScaler\framegen\glass\tests\run-tests.ps1
 ```
 
-This builds isolated GPU-resource/timing and settings/widget tests under `artifacts/glass-tests`. The settings test requires a fresh directory and does not access installed game settings. The GPU test uses its own device and queues. It uses deliberate queue gating and CPU drains to verify lifetime behavior; those test operations are not part of the timer implementation.
+The runner builds and runs the contract executables under `artifacts/glass-tests`: packed frame selection, material blend classification, compute recording, command lifetime, tag metadata, array mapping, hook gate, motion dump format, Streamline tag bridge, GPU timer, native session queue type and release, pipeline-cache memo, the native graft packed rewrite and settings. The pipeline-cache memo needs `artifacts/glass-geometry-shader` from `tests/build_geometry_shader.ps1`. The graft rewrite needs the local catalog from `tools/export_native_grafts.py`. It runs a root graft (`4140f6d4…`, rows `7 8 7 8`) and a camera-only record (`39f8b555…`, `none none 10 11`) with their paired original PS (`tests/run-tests.ps1:91-113`). These tests check shader and host contracts on an independent device; they are not game-quality evidence.
 
 ## Build and upstream updates
 
-Clone with submodules, or run `git submodule update --init --recursive`. Build `OptiScaler.sln` with the upstream Windows dependencies and Release x64 configuration. `GlassFg.props` copies `GlassSurface.hlsl` and `GlassRegion.hlsl` into `$(TargetDir)Glass` and the upstream Release package's `a/Glass`. The fast build artifact also includes both shaders. Deployment requires this directory beside the OptiScaler DLL. The host resolves paths from the loaded DLL, independent of the process working directory.
+Clone with submodules or run `git submodule update --init --recursive`, then build `OptiScaler.sln` in Release x64 (or use `glass-build.bat`). `GlassFg.props` copies `GlassObjectMotion.hlsl`, `dxcompiler.dll`, `dxil.dll`, the graft catalog and the declaration data into `$(TargetDir)Glass` and `x64\Release\a\Glass` (`GlassFg.props:102-139`). Deployment requires this directory beside the DLL; paths resolve from the loaded DLL, not the working directory.
 
-Development is committed on `glass-motion`. Keep `upstream` pointing to the original repository and `origin` pointing to the user's fork. Merge upstream changes into the development branch:
+Development is committed on `glass-motion`. Keep `upstream` pointing to the original repository and `origin` to the user's fork:
 
 ```sh
 git fetch upstream
@@ -268,6 +253,8 @@ git merge upstream/dlss-neural-rendering
 git submodule update --init --recursive
 ```
 
-Review conflicts and build before pushing. Preserve the single `GlassFg.props` import and this directory. Future upstream changes to native NGX inputs, command-list state handling or feature lifetime require adapter review; Git separation cannot guarantee automatic compatibility. Do not overwrite upstream changes with an old complete project file.
+Review conflicts and build before pushing. Keep the single `GlassFg.props` import and the explicit integration calls. Upstream changes to native NGX inputs, command-list state handling or feature lifetime require adapter review. The original repository history, submodule pins and license remain intact.
 
-The original repository history, submodule pins and license remain intact. No separate patch-file installation workflow is required.
+## Code from earlier stages still in the tree
+
+The surface/region correction, the strength-blend path, the Streamline in-place write-back and their tests were removed in `db4945922`. Still present and slated for a separate cleanup (`research/ACTIVE.md:27`, `128`): `Experiment*.cpp`/`.h`, `plugins/`, `GlassPluginHost`, the `plugin=` live command and several older documents (`Compatibility.md`, `EngineGeometry.md`, `tests/GeometryShaders.md`, `tests/ObjectMotion.md`, `tests/replay/*.md`). Their statements describe earlier stages, not the current product path.

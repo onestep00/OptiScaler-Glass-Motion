@@ -728,3 +728,103 @@ Outstanding proof includes native rendered-frame correspondence, original array
 elements, skinning/deformation/particle inputs, final GPU binding, exact material
 boundaries, FG substitution and generated-frame quality. Correct CPU root output
 alone does not complete any of those requirements.
+
+## Product integration and the array convention, 2026-09-23
+
+The supply described above is now the product's source of previous positions.
+The module vertex history stays only as the off-by-default
+`VertexHistoryFallback`. Architecture and settings are in [README.md](README.md).
+Line numbers of the workspace `research/ACTIVE.md` refer to its 2026-09-23
+16:30 revision.
+
+Declaration supply. `NativeMotionDeclarations.cpp` replaces the RED4ext build
+of `CyberpunkDeclarationProbe.cpp`, which was deleted (commits `f07b40c28`,
+`592de369b`). It is installed from `DllMain` at process attach, before the
+shader-cache provider builds any compiled layout. It detours the same two
+engine entries: the provider metadata getter and the vertex-stage resolution.
+Its plans come from `Glass/motion-declarations.bin` (a copy of
+`pending-motion-declarations/declarations.bin`) and
+`Glass/motion-shader-pairs.bin`, a copy of
+`shader-pairs-2018-direct-span-clear.bin` (SHA-256 `827bf29b…`). That file holds
+the 2,018 pairs with complete direct-span classifications; the six modifier-0
+pairs of "Exact pair direct-writer audit" are excluded (`research/ACTIVE.md:126`).
+The status line `DECL` reports `hook`, `seen`, `matched`, `rejected`,
+`stage_seen`, `stage_selected` and the step that stopped installation. The
+RED4ext plugin must not be loaded in the same process; the integration deploy
+moved it to a backup. The integration build (commit `592de369b`) reported
+`DECL hook=1 seen=7728 matched=250 rejected=0 status=installed`
+(`research/ACTIVE.md:127`). The earlier plugin session (DLL `585b8df5`) had
+reported `matched=0`, presumably from cached layout reuse
+(`research/ACTIVE.md:49`).
+
+Graft catalog (`glass-native-material-v1/native-grafted/index.json` summary;
+exported `index.bin`, 641 `GGRAFT02` records, SHA-256 `52e45006…`):
+
+- 250 transparent VS with a native twin: 226 root grafts (82 class 1, 144
+  class 2), 14 `factory_mismatch`, 10 roots not validated. The 10 have preskinned
+  (class 4) twins that fail with `missing native resource contract` for t9/b3.
+  All 250 camera variants validate. They use b1 rows 16..19 with current rows
+  28..31 in 215 cases, and rows 12..15 with 0..3 in 35.
+- 445 transparent VS without a twin: 391 camera-only records from two
+  canonical templates (`50ba90d4…` for 28..31 → 16..19, `79f7efb4…` for
+  0..3 → 12..15) and 54 unsupported. The unsupported reasons are screen space
+  11, two-stage projection 17, no `SV_Position` 6, multiple stores 7, and other
+  non-VP clips 13 (`research/ACTIVE.md:107`).
+
+A camera variant copies the native previous camera multiply node for node and
+substitutes the target's own current world operands. It adds no arithmetic and
+reads no b7 row. The verifier requires unchanged original definitions and
+stores, the current clip `XY − b1[51].xy·W`, no added b7 load, and a previous
+position graph equal to the target's current projection with the camera rows
+renamed (`tools/verify_native_grafts.py`, `tools/native_graft_checks.py`).
+
+Array convention. The preceding section left open whether an array proxy has
+per-element history ("Current clip convention and original batch scheduling",
+steps 4-5). The 2026-09-23 runs answer it for ordinary instanced arrays:
+
+- A live probe (`graftarray=on`, commit `8ff0eaa35`, DLL `538e463e`) applied the
+  root graft to array draws. It produced 81 px of error on a still camera
+  (`research/ACTIVE.md:69`, `77`). With the root graft, every element moves by
+  the proxy root's previous transform because the element-to-root
+  `INSTANCE_TRANSFORM` factor is missing.
+- Opaque arrays are also drawn as one instanced draw
+  (`GATE_DETAIL reason=array instances=40 blend=0`, `research/ACTIVE.md:77`).
+- Static evidence agrees. The append copies current transforms only (steps
+  4-5 above). The feature `0x20` is not added for 192 of 192 array conditions
+  without special input (`CompletionPlan.md:130`). 725 of 879 native velocity
+  VS do not read `INSTANCE_TRANSFORM` in the previous graph (720 + 5 above).
+  The camera-default velocity initialization applies the previous camera to
+  depth (`CompletionPlan.md:142`, `171`). [INFERENCE] The ordinary array
+  elements take that camera-only velocity. The technique of the observed glass
+  draws was not captured directly.
+
+The product therefore gives array, grouped and multi-instance draws the camera
+variant (commit `8ad300854`). Glass-table substitution went from 0 to all array
+draws (`array_draws=51,718`). On a still camera the delivered p50 was 0.28 px
+against 0.33 px for the engine; while moving both were 67 px
+(`research/ACTIVE.md:78`). Independently moving elements (physics arrays)
+receive camera motion only, as in the engine.
+
+Factory rule. A current-position graph match is not evidence for the previous
+input (`CompletionPlan.md:27`, `48`). Eighteen skinned or garment
+targets had current graphs that fold to the rigid path, matched MeshStatic
+twins, and received their root-only previous arithmetic. NPC glasses then took
+the proxy root's previous transform: 6 px of error with a still camera
+(`research/ACTIVE.md:114`) and 6–82 px in the first session
+(`research/ACTIVE.md:53`). `graft_native_motion.py` now refuses, for a skinned
+factory target, a twin whose previous graph is root-only unless the twin shares
+a vertex factory (commits `680525741`, `2bef442ff`). The 14 refused targets
+(`cloak`, `cloak_v2`, `optical_camouflage`, `cloak_*_forward`) became
+camera-only records. Raising the default `GraftClassMask` to 3 (commit
+`592de369b`) was tried on DLL `0c5bb34e` and withdrawn. In all six still frames
+the NPC head region (hair and glasses, skinned class 2) delivered about 77 px
+where the engine had about 3.5 px. [INFERENCE, `research/ACTIVE.md:128`] The
+transparent pass does not keep the velocity pass's previous skinning supply
+(previous `INSTANCE_SKINNING_DATA` offset, previous t10 bones). With the default
+1 (DLL `580b24ad`) the rerun no longer showed that region
+(`class_disabled=348~367`).
+
+Remaining proof for this supply: a previous skinning supply for skinned
+transparent draws (class 2), a dedicated recheck of the 6 px glasses error, a
+preskinned (t9/b3) previous supply, the 54 unsupported VS, and opaque-probe
+equivalence (`research/native-supply-integration-plan.md:90`).
