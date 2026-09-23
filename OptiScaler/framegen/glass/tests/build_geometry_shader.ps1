@@ -25,7 +25,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometry shader GPU test build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryInstances.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCoverageRecorder.cpp') `
-    (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
+    (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') (Join-Path $PSScriptRoot '../NativeGraftCatalog.cpp') `
     (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
     (Join-Path $PSScriptRoot '../GeometryViews.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$instances" /link d3d12.lib dxgi.lib `
@@ -61,7 +61,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Borrowed draw experiment DLL build failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Independent coverage module build failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" "/I$repository/OptiScaler" "/I$repository/OptiScaler/include" `
     (Join-Path $PSScriptRoot 'GeometryIndirect.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
-    (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') `
+    (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') (Join-Path $PSScriptRoot '../NativeGraftCatalog.cpp') `
     (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') (Join-Path $PSScriptRoot '../GeometryCommands.cpp') `
     (Join-Path $PSScriptRoot '../GeometryViews.cpp') `
     (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$build/GeometryIndirect.exe" /link d3d12.lib dxgi.lib `

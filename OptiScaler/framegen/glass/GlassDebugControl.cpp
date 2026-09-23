@@ -13,6 +13,8 @@
 #include "CyberpunkGroups.h"
 #include "GeometryGateTrace.h"
 #include "GlassHookProbe.h"
+#include "GeometryHealth.h"
+#include "NativeGraftCatalog.h"
 #include <Util.h>
 #include <cstdio>
 #include <fstream>
@@ -99,6 +101,14 @@ void writeStatus(std::ofstream& file)
          << " acquire_consumer_busy=" << packed.acquireConsumerBusy
          << " packed_opaqueprobe_ready=" << ReadOpaqueProbeReadyCount()
          << " packed_opaqueprobe_rejected=" << ReadOpaqueProbeRejectedCount() << "\n";
+    file << "GRAFT ready=" << ReadGeometryGraft(GraftReady) << " missing=" << ReadGeometryGraft(GraftMissing)
+         << " rejected=" << ReadGeometryGraft(GraftRejected)
+         << " class_disabled=" << ReadGeometryGraft(GraftClassDisabled)
+         << " array_rejected=" << ReadGeometryGraft(GraftArrayRejected)
+         << " draws=" << ReadGeometryGraft(GraftDraws)
+         << " fg_evals=" << ReadGeometryGraft(NativePreviousEvaluations)
+         << " catalog=" << NativeGraftCount() << " classmask=" << ReadGraftClassMask()
+         << " vhfallback=" << (VertexHistoryFallbackEnabled() ? 1 : 0) << "\n";
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected
          << " no_owner=" << identity.noOwner << " no_view=" << identity.noView
          << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex
@@ -356,6 +366,26 @@ void PollGlassDebugControl() noexcept
                 const bool enabled = line.substr(12) == "on" || line.substr(12) == "1";
                 SetOpaqueProbe(enabled);
                 output << "opaqueprobe=" << (enabled ? 1 : 0) << "\n";
+                continue;
+            }
+            if (line.rfind("vhfallback=", 0) == 0)
+            {
+                // Vertex-history fallback for pipelines without an enabled
+                // graft and for graft pipelines drawn as arrays. Applies to
+                // pipelines compiled after the change; INI VertexHistoryFallback
+                // seeds it at load.
+                const bool enabled = line.substr(11) == "on" || line.substr(11) == "1";
+                SetVertexHistoryFallback(enabled);
+                output << "vhfallback=" << (enabled ? 1 : 0) << "\n";
+                continue;
+            }
+            if (line.rfind("graftclass=", 0) == 0)
+            {
+                // Admitted graft supply classes (bit 0 root-only, bit 1
+                // skinning, bit 2 preskinned). Applies to pipelines compiled
+                // after the change; INI GraftClassMask seeds it at load.
+                SetGraftClassMask(static_cast<unsigned>(std::strtoul(line.c_str() + 11, nullptr, 0)));
+                output << "graftclass=" << ReadGraftClassMask() << "\n";
                 continue;
             }
             if (line.rfind("stripes=", 0) == 0)

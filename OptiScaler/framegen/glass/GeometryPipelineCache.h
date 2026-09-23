@@ -11,6 +11,10 @@ struct GeometryPipelineEntry
 {
     std::shared_ptr<const GeometryRoot> root;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> original, instrumented, packed;
+    // Vertex-history packed variant for array/grouped or multi-instance draws of
+    // a graft pipeline. Compiled only when VertexHistoryFallback was on at
+    // compile time; otherwise such draws keep the engine's motion.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> packedHistory;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
     std::uint64_t identity = 0;
     bool vertexOnlyCapture = false;
@@ -20,6 +24,11 @@ struct GeometryPipelineEntry
     // motion; this flag separates the cause from any other missing pipeline
     // (F-01).
     bool deltaMissing = false;
+    // `packed` takes the previous clip from the engine's MotionMatrix supply
+    // through a grafted VS. The engine evaluates that supply once per draw
+    // proxy, so the packed capture admits this variant only for a single-instance
+    // draw with a non-array identity.
+    bool nativeGraft = false;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputs;

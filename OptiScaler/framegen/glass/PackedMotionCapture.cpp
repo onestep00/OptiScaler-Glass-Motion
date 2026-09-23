@@ -581,6 +581,31 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             }
             return false;
         }
+        // Graft variant gate. The engine evaluates the MotionMatrix supply once
+        // per draw proxy and its array append copies every element's transform
+        // without a per-element evaluation (EngineMotionSupply.md), so a grafted
+        // VS would move every element of an array/grouped span, and every
+        // instance of a multi-instance draw, by the root's previous transform.
+        // Such a draw takes the vertex-history variant when one was compiled
+        // under VertexHistoryFallback, otherwise it keeps the engine's motion.
+        ID3D12PipelineState* packedPipeline = pipeline->packed.Get();
+        bool graftDraw = pipeline->nativeGraft;
+        if (graftDraw)
+        {
+            bool arrayDraw = args.instances != 1;
+            for (const auto& span : draw.objects)
+                arrayDraw = arrayDraw || (span.count && (!span.identity || span.count != 1));
+            if (arrayDraw)
+            {
+                if (!pipeline->packedHistory)
+                {
+                    NoteGeometryGraft(GraftArrayRejected);
+                    return false;
+                }
+                packedPipeline = pipeline->packedHistory.Get();
+                graftDraw = false;
+            }
+        }
         const auto* raster = ReadGeometryRasterState(command);
         const auto shape = ReadCyberpunkMeshShape(draw);
         if (!raster || !raster->usable())
@@ -671,6 +696,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     ++counters.unknownIdentity; ++counters.unknownNoArrayGeneration;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
+                // Second half of the graft gate: an identity the resolver
+                // placed in an array lifetime is an array element even when
+                // the span looked single.
+                if (graftDraw && key.arrayGeneration)
+                {
+                    NoteGeometryGraft(GraftArrayRejected);
+                    continue;
+                }
                 const auto allocation = objectMappings.acquire(key, vertices, frameNumber);
                 if (!allocation)
                 {
@@ -754,7 +787,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         };
         std::memcpy(frameSlot->constants + constantIndex * 256, &constants, sizeof(constants));
         frameSlot->mappingUsed += args.instances;
-        prepared.pipeline = pipeline->packed.Get();
+        prepared.pipeline = packedPipeline;
         prepared.history = { mappingBase, MappingCapacity, HistoryCapacity, 0, args.instances, 0,
                              frameNumber, frameNumber - 1 };
         prepared.previous = history[(frameNumber - 1) & 1]->GetGPUVirtualAddress();
@@ -771,6 +804,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", frameNumber, draw.chunk);
             std::fflush(log);
         }
+        if (graftDraw)
+            NoteGeometryGraft(GraftDraws);
         return true;
     }
 

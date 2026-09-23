@@ -15,6 +15,7 @@ struct VertexConstantPair;
 struct VertexInputPair;
 struct VertexClipPair;
 struct NativeClipInputs;
+struct NativeGraft;
 // Captured serialized bytes must belong to originalIdentity after any upstream
 // sampler overrides. Creation does not bind or replace the application's root.
 struct GeometryRoot
@@ -69,10 +70,18 @@ class GeometryCompiler
     // delta, so its recorded motion is the raw jittered difference and not the
     // engine's motion convention. The caller has to withhold that variant from
     // delivery (F-01).
+    //
+    // With a native graft (NativeGraftCatalog) the vertex stage is the grafted
+    // VS: its own outputs carry the engine's de-jittered current clip and the
+    // previous clip from the engine's MotionMatrix supply, no vertex history is
+    // read or written, and the pixel stage adds neither a jitter term nor a
+    // capture delta. capture must be null then; pairMissing stays false and a
+    // failed graft rewrite is returned as the failure (no pair-less retry).
     HRESULT createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
-                               const VertexConstantPair* capture = nullptr, bool* pairMissing = nullptr);
+                               const VertexConstantPair* capture = nullptr, bool* pairMissing = nullptr,
+                               const NativeGraft* graft = nullptr);
     HRESULT createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
@@ -103,6 +112,7 @@ class GeometryCompiler
                          const VertexConstantPair* capture = nullptr,
                          const VertexClipPair* clipPair = nullptr,
                          const NativeClipInputs* nativeInputs = nullptr,
-                         const VertexInputPair* inputPair = nullptr);
+                         const VertexInputPair* inputPair = nullptr,
+                         const NativeGraft* graft = nullptr);
 };
 } // namespace GlassFg

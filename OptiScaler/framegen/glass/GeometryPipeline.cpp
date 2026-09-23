@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GeometryPipeline.h"
 #include "DxilVertexHistory.h"
+#include "NativeGraftCatalog.h"
 #include "GlassControls.h"
 #include "MaterialCaptureBlend.h"
 #include <dxcapi.h>
@@ -273,7 +274,8 @@ struct GeometryCompiler::Impl
                     MaterialMotionTarget target, const VertexConstantPair* capture = nullptr,
                     const VertexClipPair* clipPair = nullptr, const NativeClipInputs* nativeInputs = nullptr,
                     const VertexInputPair* inputPair = nullptr, bool captureDelta = false,
-                    bool markMissingDelta = false)
+                    bool markMissingDelta = false, const VertexClipPair* nativePrevious = nullptr,
+                    std::array<NativeClipVarying, 2>* nativeVaryings = nullptr)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -285,7 +287,8 @@ struct GeometryCompiler::Impl
         const std::string_view text(static_cast<const char*>(disassembly->GetBufferPointer()),
                                     disassembly->GetBufferSize());
         auto rewritten =
-            vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair, captureDelta, markMissingDelta)
+            vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair, captureDelta, markMissingDelta,
+                                          nativePrevious)
                    : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs,
                                            target == MaterialMotionTarget::OriginalColorAndPackedMotion, captureDelta);
         if (!rewritten)
@@ -295,6 +298,8 @@ struct GeometryCompiler::Impl
         }
         if (vertex)
             historyRegister = rewritten.previousRegister;
+        if (vertex && nativeVaryings)
+            *nativeVaryings = rewritten.nativeVaryings;
         hr = library->CreateBlobWithEncodingOnHeapCopy(rewritten.assembly.data(),
                                                        static_cast<UINT32>(rewritten.assembly.size()), CP_UTF8, &bytes);
         ComPtr<IDxcOperationResult> op;
@@ -328,12 +333,23 @@ HRESULT GeometryCompiler::createCoverage(ID3D12Device* device, const GeometryRoo
 HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                              ComPtr<ID3D12PipelineState>& output, std::string& error,
-                                             const VertexConstantPair* capture, bool* pairMissing)
+                                             const VertexConstantPair* capture, bool* pairMissing,
+                                             const NativeGraft* graft)
 {
     if (pairMissing)
         *pairMissing = false;
     if (root.layout != GeometryLayout::PerInstance)
         return reject(error, "Packed motion requires per-instance identity mapping");
+    if (graft)
+    {
+        // The graft supplies the engine's own previous clip; there is no
+        // capture pair to fall back from, so a failure is the result.
+        if (capture)
+            return reject(error, "Native graft excludes the capture constant pair");
+        return createTarget(device, root, original, output, error,
+                            MaterialMotionTarget::OriginalColorAndPackedMotion, false, nullptr, nullptr, nullptr,
+                            nullptr, graft);
+    }
     if (capture)
     {
         const auto status = createTarget(device, root, original, output, error,
@@ -387,11 +403,14 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
                                        MaterialMotionTarget target, bool vertexOnly, const VertexConstantPair* capture,
                                        const VertexClipPair* clipPair, const NativeClipInputs* nativeInputs,
-                                       const VertexInputPair* inputPair)
+                                       const VertexInputPair* inputPair, const NativeGraft* graft)
 {
     error.clear();
     if (FAILED(implementation->status))
         return reject(error, "DXC is unavailable", implementation->status);
+    if (graft && (target != MaterialMotionTarget::OriginalColorAndPackedMotion || vertexOnly || capture ||
+                  clipPair || nativeInputs || inputPair || !graft->bytes || !graft->size))
+        return reject(error, "Native graft requires the plain packed target");
     D3D12_BLEND_DESC validatedBlend {};
     bool nativeBlend = !original.BlendState.AlphaToCoverageEnable;
     for (UINT i = 0; i < std::min(original.NumRenderTargets, UINT(D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)); ++i)
@@ -498,16 +517,25 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     const bool captureDelta = packedMotion && capture != nullptr;
     // Packed variants compiled without the audited pair (R6) still write the
     // record tag, and the next paired frame would read their untouched bytes
-    // 24/28 as its predecessor jitter. Mark those words as absent instead.
-    const bool markMissingDelta = packedMotion && capture == nullptr;
-    if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
+    // 24/28 as its predecessor jitter. Mark those words as absent instead. A
+    // graft variant writes no record tag at all.
+    const bool markMissingDelta = packedMotion && capture == nullptr && !graft;
+    // Native graft: the grafted VS replaces the original VS bytes; its own
+    // outputs carry the engine's current and previous clip, and the pixel
+    // stage reads them as a native material pair declared at the same rows.
+    const VertexClipPair graftOutputs { graft ? graft->currentOutput : 0u, graft ? graft->previousOutput : 0u };
+    NativeClipInputs graftInputs { graftOutputs.currentOutput, graftOutputs.previousOutput, false, true };
+    const auto vertexShader = graft ? D3D12_SHADER_BYTECODE { graft->bytes, graft->size } : original.VS;
+    const auto* pixelNative = graft ? &graftInputs : nativeInputs;
+    if (FAILED(hr = implementation->rewrite(vertexShader, true, source, destination, vs, error, historyRegister,
                                             root.layout, target, capture, clipPair, nullptr, inputPair,
-                                            captureDelta, markMissingDelta)))
+                                            captureDelta, markMissingDelta, graft ? &graftOutputs : nullptr,
+                                            graft ? &graftInputs.linked : nullptr)))
         return hr;
     if (!vertexOnly)
     {
         hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                     root.layout, target, nullptr, nullptr, nativeInputs, nullptr, captureDelta);
+                                     root.layout, target, nullptr, nullptr, pixelNative, nullptr, captureDelta);
         if (FAILED(hr) && packedMotion && destination != MaterialDestination::CoverageOnly)
         {
             // The material equation needs colour exports this pixel shader does
@@ -522,7 +550,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
             error.clear();
             hr = implementation->rewrite(original.PS, false, MaterialSource::Zero,
                                          MaterialDestination::CoverageOnly, ps, error, historyRegister, root.layout,
-                                         target, nullptr, nullptr, nativeInputs, nullptr, captureDelta);
+                                         target, nullptr, nullptr, pixelNative, nullptr, captureDelta);
             if (SUCCEEDED(hr))
                 ++packedCoverageFallbacks;
         }

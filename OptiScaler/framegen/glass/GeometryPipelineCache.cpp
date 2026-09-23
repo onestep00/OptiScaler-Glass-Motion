@@ -2,6 +2,8 @@
 #include "GeometryPipelineCache.h"
 #include "DxilVertexHistory.h"
 #include "GeometryGateTrace.h"
+#include "GeometryHealth.h"
+#include "NativeGraftCatalog.h"
 #include "GlassControls.h"
 #include "MaterialCaptureBlend.h"
 #include <condition_variable>
@@ -159,6 +161,18 @@ unsigned candidateReason(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d, bool verte
         return GateCandidateBlend;
     return GateCandidateRoot;
 }
+// First 16 hex digits of the VS container hash for the rejection message.
+std::string hashPrefix(const std::array<std::uint8_t, 32>& hash)
+{
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string text(16, '0');
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        text[i * 2] = digits[hash[i] >> 4];
+        text[i * 2 + 1] = digits[hash[i] & 15];
+    }
+    return text;
+}
 } // namespace
 
 struct GeometryPipelineCache::Impl
@@ -213,7 +227,9 @@ struct GeometryPipelineCache::Impl
         compilingGeometry = true;
         try
         {
-            GeometryCompiler compiler(compilerPath);
+            // Elaborated: GeometryHealth.h also names the GeometryCompiler
+            // capability bit.
+            class GeometryCompiler compiler(compilerPath);
             for (;;)
             {
                 Job job;
@@ -253,30 +269,77 @@ struct GeometryPipelineCache::Impl
                             std::string packedError;
                             // Audited Cyberpunk transparent-VS camera block: the
                             // raw NDC jitter pair lives in row 51 of the
-                            // 848-byte b1/space0 constant buffer. Packed capture
-                            // stores the current frame's words in every record
-                            // tag and the linked pixel shader adds their
-                            // frame-to-frame UV delta, so the delivered motion
-                            // no longer depends on the declared compose jitter.
-                            // Shaders without this binding are recompiled
-                            // without the pair instead of being dropped (R6).
+                            // 848-byte b1/space0 constant buffer. The vertex-
+                            // history variant stores the current frame's words
+                            // in every record tag and the linked pixel shader
+                            // adds their frame-to-frame UV delta. Shaders
+                            // without this binding are recompiled without the
+                            // pair instead of being dropped (R6).
                             constexpr VertexConstantPair packedCameraCapture { 0, 1, 848, 51 };
                             const auto materialStatus = compiler.create(device.Get(), *work.root->result,
                                                                          entry.description, entry.instrumented, error);
-                            const auto packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,
-                                                                                   entry.description, entry.packed,
-                                                                                   packedError,
-                                                                                   &packedCameraCapture,
-                                                                                   &packedPairMissing);
-                            // F-01: without the audited constant pair the packed pixel
-                            // stage adds a zero delta, so the recorded motion is the raw
-                            // jittered position difference instead of the engine's motion
-                            // convention. Withhold that variant from delivery: prepare()
-                            // then leaves the draw on the game's own pipeline and the
-                            // engine's motion value survives byte for byte. The compiler
-                            // still returns the pair-less PSO for the offline fixtures.
-                            if (SUCCEEDED(packedStatus) && packedPairMissing)
-                                entry.packed.Reset();
+                            // C2: the packed previous clip comes from the engine's
+                            // own MotionMatrix supply through a grafted VS. The
+                            // lookup hashes the VS once per pipeline job here; the
+                            // outcome, including a miss, is final for this entry
+                            // (a rejected job is never re-queued), so nothing is
+                            // retried per frame.
+                            std::array<std::uint8_t, 32> vertexHash {};
+                            const auto graft = FindNativeGraft(entry.description.VS.pShaderBytecode,
+                                                               entry.description.VS.BytecodeLength, &vertexHash);
+                            const bool historyFallback = VertexHistoryFallbackEnabled();
+                            HRESULT packedStatus = E_NOTIMPL;
+                            bool graftReady = false;
+                            if (graft && !GraftClassEnabled(graft->supplyClass))
+                            {
+                                NoteGeometryGraft(GraftClassDisabled);
+                                packedError = "Native graft supply class " + std::to_string(graft->supplyClass) +
+                                              " disabled for vertex shader " + hashPrefix(vertexHash);
+                            }
+                            else if (graft)
+                            {
+                                packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,
+                                                                           entry.description, entry.packed,
+                                                                           packedError, nullptr, nullptr, &*graft);
+                                graftReady = SUCCEEDED(packedStatus);
+                                NoteGeometryGraft(graftReady ? GraftReady : GraftRejected);
+                                if (!graftReady)
+                                {
+                                    entry.packed.Reset();
+                                    packedError = "Native graft rejected for vertex shader " +
+                                                  hashPrefix(vertexHash) + ": " + packedError;
+                                }
+                            }
+                            else
+                            {
+                                NoteGeometryGraft(GraftMissing);
+                                packedError = "No native graft for vertex shader " + hashPrefix(vertexHash);
+                            }
+                            // Module vertex history only on explicit request: as
+                            // the packed variant when no graft is usable, or as
+                            // the array/multi-instance variant of a graft pipeline.
+                            if (historyFallback)
+                            {
+                                std::string historyError;
+                                auto& historyTarget = graftReady ? entry.packedHistory : entry.packed;
+                                const auto historyStatus = compiler.createPackedMotion(
+                                    device.Get(), *work.root->result, entry.description, historyTarget, historyError,
+                                    &packedCameraCapture, &packedPairMissing);
+                                // F-01: without the audited constant pair the history
+                                // variant adds a zero delta, so its motion is the raw
+                                // jittered difference. Withhold it; the draw keeps the
+                                // engine's motion.
+                                if (SUCCEEDED(historyStatus) && packedPairMissing)
+                                    historyTarget.Reset();
+                                if (graftReady)
+                                    packedPairMissing = false; // Concerns only the optional array variant.
+                                else
+                                {
+                                    packedStatus = historyStatus;
+                                    packedError = std::move(historyError);
+                                }
+                            }
+                            entry.nativeGraft = graftReady;
                             {
                                 std::lock_guard lock(mutex);
                                 if (SUCCEEDED(packedStatus) && !packedPairMissing)

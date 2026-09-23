@@ -74,6 +74,11 @@ bool load()
     // The controls word below does not carry it: its 64 bits are all assigned
     // and this flag is session diagnostic state, like depthkeep.
     SetOpaqueProbe(ini.GetBoolValue("GlassFG", "OpaqueProbe", false));
+    // Engine-supply policy for the packed capture (GlassControls.h). Both are
+    // session values outside the full controls word, like OpaqueProbe.
+    SetVertexHistoryFallback(ini.GetBoolValue("GlassFG", "VertexHistoryFallback", false));
+    SetGraftClassMask(static_cast<unsigned>(
+        std::clamp(ini.GetLongValue("GlassFG", "GraftClassMask", long(GraftClassRootOnly)), 0L, long(GraftClassAll))));
     controls.store(Controls { ini.GetBoolValue("GlassFG", "Enabled", false),
                               static_cast<unsigned>(std::clamp(opacityPercent, 0L, 100L)),
                               ini.GetBoolValue("GlassFG", "MeasureGpuTime", true),
@@ -145,6 +150,8 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "ZeroFrameGenerationMotion", value.zeroMotion);
     ini.SetBoolValue("GlassFG", "NrMotion", value.nrMotion);
     ini.SetBoolValue("GlassFG", "OpaqueProbe", OpaqueProbeEnabled());
+    ini.SetBoolValue("GlassFG", "VertexHistoryFallback", VertexHistoryFallbackEnabled());
+    ini.SetLongValue("GlassFG", "GraftClassMask", ReadGraftClassMask());
     ini.SetLongValue("GlassFG", "SkipFartherThanMeters", std::min(value.farSkipStep, 15u) * 25u);
     // Legacy spellings are removed so the file has exactly one name per option.
     for (const auto* legacy : { "Strength", "EdgeWidth", "InteriorFollowPercent", "InteriorLimitPx",

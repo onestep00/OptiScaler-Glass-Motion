@@ -15,6 +15,7 @@
 - `check_motion_writer_slots.py`: owned checks for multi-row overlap, absent-name gates, resource bindings, signed rows and conflicting stage metadata.
 
 - `export_motion_declarations.py`: pending bounded declarations and exact VS/PS cache pairs; records unpaired variants, no automatic deployment or writer/history admission.
+- `export_native_grafts.py`: validated grafts to the local `Glass/grafts` catalog (`GGRAFT01`, supply class from the previous-graph union); output is extracted game code and stays in the ignored `artifacts/` tree.
 - `check_motion_declarations.py`: batch-build owned declaration/scope/relocation/callback and foreign-startup tests; never attaches to the game.
 - `audit_motion_gaps.py`: group all unresolved candidates by position/control dependencies; input presence does not prove history supply.
 - `check_native_projection.py`: owned split-output and exact jitter-subtraction checks; invalid components, sign, W and rows reject.

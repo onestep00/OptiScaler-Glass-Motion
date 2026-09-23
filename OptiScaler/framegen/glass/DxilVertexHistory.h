@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <string>
 #include <string_view>
 #include <cstdint>
@@ -22,6 +23,14 @@ struct VertexHistoryConstants
     }
 };
 static_assert(sizeof(VertexHistoryConstants) == 32);
+// Graft VS output that a packed native pixel shader declares as a new input
+// with the same semantic, index and register. The original pixel shader never
+// read it, so it is absent from the original pixel signature.
+struct NativeClipVarying
+{
+    std::string semantic; // Quoted metadata string, for example !"TEXCOORD".
+    unsigned semanticIndex = 0, row = UINT32_MAX;
+};
 struct VertexHistoryShader
 {
     std::string assembly;
@@ -29,6 +38,8 @@ struct VertexHistoryShader
     unsigned previousRegister = 0;
     unsigned missingRegister = 0;
     unsigned recordBytes = 32;
+    // Native-previous mode only: current and previous clip varyings.
+    std::array<NativeClipVarying, 2> nativeVaryings {};
     explicit operator bool() const { return !assembly.empty(); }
 };
 
@@ -83,6 +94,10 @@ struct NativeClipInputs
     // transmission from the original blend equation. Requires read-only depth.
     // The caller still proves the supplied clip inputs are actual current/previous positions.
     bool material = false;
+    // Packed native motion only: the current/previous varyings the linked VS
+    // exports (RewriteVertexHistory nativePrevious). The pixel rewrite declares
+    // them as new inputs; currentInput/previousInput are then ignored.
+    std::array<NativeClipVarying, 2> linked {};
 };
 // Keep an explicitly identified native float4 render target as SV_Target0.
 // Preserves native inputs/calculation/discard; does not identify motion semantics,
@@ -92,12 +107,23 @@ VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsi
 // quiet NaN so a later paired frame rejects the missing pair (IsFinite) instead
 // of reading an older capture's words as its predecessor jitter. Pair and
 // diagnostic input payloads are unchanged.
+//
+// nativePrevious selects the engine-supply mode for a grafted VS whose own
+// outputs currentOutput/previousOutput already carry the de-jittered current
+// clip and the engine's previous clip (MotionMatrix rows). The rewrite then
+// reads and writes no vertex history: GlassHistory (t0) and GlassNext (u0) are
+// not declared, GlassInstances stays at t1 and GlassConstants at b0 in space31.
+// It exports GLASS_HISTORY_MISSING (always 0) at previousRegister and
+// GLASS_OBJECT_INDEX at previousRegister + 1, never GLASS_PREVIOUS or
+// GLASS_CAPTURE_DELTA, and returns both clip varyings in nativeVaryings.
+// Requires PerInstance layout and excludes every diagnostic payload.
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly,
                                          GeometryLayout layout = GeometryLayout::Contiguous,
                                          const VertexConstantPair* capture = nullptr,
                                          const VertexClipPair* clipPair = nullptr,
                                          const VertexInputPair* inputPair = nullptr,
-                                         bool captureDelta = false, bool markMissingDelta = false);
+                                         bool captureDelta = false, bool markMissingDelta = false,
+                                         const VertexClipPair* nativePrevious = nullptr);
 
 enum class MaterialSource
 {
@@ -189,4 +215,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
 // Records: float MV.xy/depth, uint frame; float transmission.rgb, uint zero.
 // OriginalColorAndPackedMotion requires per-instance mapping, SM 6.6 plus
 // Int64ShaderOps and reserved[0] as a nonzero frame-local object ID.
+// Packed native (OriginalColorAndPackedMotion with nativeInputs): the pixel
+// stage declares nativeInputs->linked as new inputs at the grafted VS rows,
+// expects GLASS_HISTORY_MISSING/GLASS_OBJECT_INDEX at firstHistoryRegister
+// (the VS previousRegister of native-previous mode) and records
+// (previous UV - current UV) with no jitter term and no capture delta.
 } // namespace GlassFg

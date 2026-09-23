@@ -175,4 +175,40 @@ inline void PublishGeometryMotionDegraded(bool value)
 {
     GeometryTelemetry::motionDegraded.store(value ? 1u : 0u, std::memory_order_relaxed);
 }
+
+// Native graft path outcomes (engine MotionMatrix supply through a grafted VS).
+// Compile outcomes are counted once per packed pipeline on the cache worker:
+// ready + missing + rejected + class disabled = pipelines that asked for a
+// packed variant. Draw outcomes are counted by the packed capture's prepare,
+// and NativePreviousEvaluations by the FG host for a substituted evaluation
+// whose frame drew at least one graft variant while the vertex-history
+// fallback was off. Diagnostics only; no render path reads them.
+enum GeometryGraftCounter : unsigned
+{
+    GraftReady,
+    GraftMissing,
+    GraftRejected,
+    GraftClassDisabled,
+    // Draws of a graft pipeline whose identity is an array/grouped span or
+    // that carries more than one instance. The engine evaluates MotionMatrix
+    // once per proxy (no per-element evaluation in the array append), so one
+    // root previous transform would be applied to independently moving
+    // elements; the draw keeps the engine's motion instead.
+    GraftArrayRejected,
+    GraftDraws,
+    NativePreviousEvaluations,
+    GraftCounterCount
+};
+namespace GeometryTelemetry
+{
+inline std::array<std::atomic<std::uint64_t>, GraftCounterCount> grafts {};
+} // namespace GeometryTelemetry
+inline void NoteGeometryGraft(GeometryGraftCounter counter) noexcept
+{
+    GeometryTelemetry::grafts[counter].fetch_add(1, std::memory_order_relaxed);
+}
+inline std::uint64_t ReadGeometryGraft(GeometryGraftCounter counter) noexcept
+{
+    return GeometryTelemetry::grafts[counter].load(std::memory_order_relaxed);
+}
 } // namespace GlassFg

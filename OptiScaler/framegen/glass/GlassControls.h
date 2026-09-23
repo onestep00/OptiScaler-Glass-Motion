@@ -240,6 +240,52 @@ inline std::atomic<bool>& OpaqueProbeFlag() noexcept
 }
 inline void SetOpaqueProbe(bool enabled) noexcept { OpaqueProbeFlag().store(enabled, std::memory_order_relaxed); }
 inline bool OpaqueProbeEnabled() noexcept { return OpaqueProbeFlag().load(std::memory_order_relaxed); }
+// Vertex-history fallback for the packed capture, off by default and persisted
+// in the INI as GlassFG/VertexHistoryFallback; live vhfallback=on|off. Session
+// value only, like OpaqueProbe: the packed control word has no free bit.
+// Off: a packed pipeline takes the previous clip from the engine's own
+// MotionMatrix supply through a grafted vertex shader, and a pipeline without
+// an enabled graft gets no packed variant (the engine's motion and depth stay).
+// On: pipelines without a graft, and graft pipelines drawn as arrays, use the
+// module's vertex history instead (C2 does not accept this as the default).
+// The compiler reads it when a pipeline is compiled, so a change applies to
+// pipelines the game creates afterwards.
+inline std::atomic<bool>& VertexHistoryFallbackFlag() noexcept
+{
+    static std::atomic<bool> value { false };
+    return value;
+}
+inline void SetVertexHistoryFallback(bool enabled) noexcept
+{
+    VertexHistoryFallbackFlag().store(enabled, std::memory_order_relaxed);
+}
+inline bool VertexHistoryFallbackEnabled() noexcept
+{
+    return VertexHistoryFallbackFlag().load(std::memory_order_relaxed);
+}
+// Graft supply classes admitted at pipeline compile time (INI
+// GlassFG/GraftClassMask, live graftclass=<n>, default 1). Bit 0: the previous
+// graph reads only the MotionMatrix and camera rows (root transform). Bit 1: it
+// also reads skinning inputs / the t10 bone buffer. Bit 2: it reads t9/b3
+// preskinned previous vertices. A graft is admitted when every bit of its class
+// is enabled; otherwise it counts GraftClassDisabled and the pipeline is
+// treated as a graft miss. Applies to pipelines compiled afterwards.
+inline constexpr unsigned GraftClassRootOnly = 1u, GraftClassSkinning = 2u, GraftClassPreskinned = 4u,
+                          GraftClassAll = 7u;
+inline std::atomic<unsigned>& GraftClassMaskValue() noexcept
+{
+    static std::atomic<unsigned> value { GraftClassRootOnly };
+    return value;
+}
+inline void SetGraftClassMask(unsigned mask) noexcept
+{
+    GraftClassMaskValue().store(mask & GraftClassAll, std::memory_order_relaxed);
+}
+inline unsigned ReadGraftClassMask() noexcept { return GraftClassMaskValue().load(std::memory_order_relaxed); }
+inline bool GraftClassEnabled(unsigned supplyClass) noexcept
+{
+    return supplyClass && !(supplyClass & ~ReadGraftClassMask());
+}
 // Simultaneous stripe A/B for the delivered frame, off by default. The compose
 // keeps the object's motion in even 64-pixel column bands and leaves the
 // engine's value in odd bands, so both arms sample the same pan, the same

@@ -1,5 +1,6 @@
 #include "../GeometryCommands.h"
 #include "../CyberpunkDraws.h"
+#include "Util.h"
 // Owned test identity only. The real engine callbacks have a separate fixture;
 // this supplies a borrowed packet during one actual independent GPU draw.
 bool geometryFixturePacket = false;
@@ -31,3 +32,12 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void*, std::uint32_t indices, s
     return { std::span(&object, 1), 2, geometryFixtureFrame, 0, 48, startInstance, instances };
 }
 } // namespace GlassFg
+// Module location for the linked NativeGraftCatalog. No Glass/grafts catalog
+// exists there, so every packed pipeline these fixtures create is a graft miss.
+namespace Util
+{
+std::filesystem::path DllPath()
+{
+    return std::filesystem::temp_directory_path() / L"glass-test-no-graft-module" / L"OptiScaler.dll";
+}
+} // namespace Util

@@ -8,6 +8,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryInstance.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryPipelineCache.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryPipelineCache.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)NativeGraftCatalog.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)NativeGraftCatalog.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)DetourThreads.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCreation.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryPipelineStream.h" />
@@ -98,12 +100,24 @@
     <None Include="$(MSBuildThisFileDirectory)GlassRegion.hlsl" />
     <None Include="$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl" />
   </ItemGroup>
+  <!-- Local graft catalog written by tools/export_native_grafts.py. It holds
+       extracted game shader code, so it lives in the ignored artifacts tree and
+       is copied only when present; without it every packed pipeline counts as
+       a graft miss. -->
+  <PropertyGroup>
+    <GlassGraftSource>$(MSBuildThisFileDirectory)..\..\..\artifacts\glass-grafts\Glass\grafts\</GlassGraftSource>
+  </PropertyGroup>
   <Target Name="CopyGlassShaders" AfterTargets="Build">
     <MakeDir Directories="$(TargetDir)Glass" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl;$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <GlassGraftFiles Include="$(GlassGraftSource)*.bin;$(GlassGraftSource)*.dxil" />
+    </ItemGroup>
+    <MakeDir Directories="$(TargetDir)Glass\grafts" Condition="'@(GlassGraftFiles)' != ''" />
+    <Copy SourceFiles="@(GlassGraftFiles)" DestinationFolder="$(TargetDir)Glass\grafts" SkipUnchangedFiles="true" />
     <!-- Upstream moves the Release DLL into a/ before packaging. -->
     <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl;$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
@@ -112,5 +126,9 @@
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
           DestinationFolder="$(SolutionDir)x64\Release\a\Glass" SkipUnchangedFiles="true"
           Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass\grafts"
+             Condition="'$(Configuration)|$(Platform)'=='Release|x64' And '@(GlassGraftFiles)' != ''" />
+    <Copy SourceFiles="@(GlassGraftFiles)" DestinationFolder="$(SolutionDir)x64\Release\a\Glass\grafts"
+          SkipUnchangedFiles="true" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
   </Target>
 </Project>
