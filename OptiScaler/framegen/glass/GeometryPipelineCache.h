@@ -10,12 +10,12 @@ namespace GlassFg
 {
 // Native graft outcome of one pipeline job. The compiler worker decides it once
 // per job (GeometryPipelineCache.cpp) and it is final for the entry. It exists
-// for the coverage report only: the draw path reads nativeGraft and the variant
-// pointers, never this value.
+// for the coverage report and GeometryPipelineEntry::refusalOnly: the draw path
+// reads nativeGraft and the variant pointers, never this value.
 enum class GeometryGraftKind : std::uint8_t
 {
     Pending,       // The job has not finished.
-    VertexOnly,    // Explicit vertex-only capture entry; no graft lookup ran.
+    VertexOnly,    // Explicit vertex-only capture entry; only the refusal lookup ran.
     Missing,       // No graft record for the VS.
     Refused,       // No record: the catalog refused the VS (NativeGraftRefusal).
     ClassDisabled, // Graft record whose supply class is disabled.
@@ -87,6 +87,15 @@ struct GeometryPipelineEntry
         std::atomic<std::uint64_t> draws { 0 }, captures { 0 }, graft { 0 }, array { 0 }, arrayRejected { 0 };
     };
     mutable Coverage coverage;
+    // Published for the coverage report only: the catalog refused the VS and
+    // neither the material nor the packed rewrite built a variant, so every draw
+    // keeps the engine's output. The entry never gets a capture variant later,
+    // not even an explicit vertex-only one: pipelineCreated(..., vertexOnly) and
+    // RequestGeometryVertexCapture refuse it instead of reporting it prepared.
+    bool refusalOnly() const noexcept
+    {
+        return graftKind == GeometryGraftKind::Refused && !instrumented && !packed;
+    }
 };
 
 struct GeometryCacheLimits

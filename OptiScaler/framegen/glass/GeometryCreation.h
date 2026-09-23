@@ -30,6 +30,9 @@ std::shared_ptr<const GeometryPipelineEntry> FindGeometryPipeline(ID3D12Pipeline
 std::shared_ptr<const GeometryPipelineEntry> FindObservedGeometryPipeline(ID3D12PipelineState* original) noexcept;
 // Explicit diagnostic request, off the draw callback. Success means queued or
 // already known, not compiled. Only observed original descriptors are accepted.
+// A refused VS never gets a vertex-only variant: the request fails for a
+// published refusal-only entry (GeometryPipelineEntry::refusalOnly), and a
+// queued vertex-only job for a refused VS fails on the compiler worker.
 bool RequestGeometryVertexCapture(ID3D12PipelineState* original) noexcept;
 void ObserveGeometryRoot(ID3D12Device* device, UINT node, const void* bytes, SIZE_T size, IUnknown* created) noexcept;
 
