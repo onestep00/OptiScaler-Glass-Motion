@@ -828,6 +828,8 @@ void GeometryPipelineCache::readCoverage(std::vector<GeometryPipelineCoverage>& 
             value.graft = counts.graft.load(std::memory_order_relaxed);
             value.array = counts.array.load(std::memory_order_relaxed);
             value.arrayRejected = counts.arrayRejected.load(std::memory_order_relaxed);
+            for (unsigned gate = 0; gate < GeometryPipelineEntry::CoverageGateCount; ++gate)
+                value.gates[gate] = counts.gates[gate].load(std::memory_order_relaxed);
             entries.push_back(value);
         }
     }
@@ -848,6 +850,8 @@ void GeometryPipelineCache::resetCoverage() noexcept
                 for (auto* counter : { &counts.draws, &counts.captures, &counts.graft, &counts.array,
                                        &counts.arrayRejected })
                     counter->store(0, std::memory_order_relaxed);
+                for (auto& counter : counts.gates)
+                    counter.store(0, std::memory_order_relaxed);
             }
         }
     }

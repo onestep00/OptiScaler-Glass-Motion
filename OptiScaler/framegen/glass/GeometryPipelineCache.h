@@ -68,6 +68,36 @@ struct GeometryPipelineEntry
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputs;
+    // Admission gates of the packed capture (PackedMotionCapture.cpp prepare)
+    // that refused a draw of this entry. span_* and history count refused
+    // elements, like prepare_span and prepare_history of GEOMETRY_GATE; the
+    // others count draws. The report prints the non-zero ones as
+    // `gates=name:count,...` (GeometryHost.cpp).
+    enum CoverageGate : unsigned
+    {
+        GateNotPacked,
+        GateRoot,
+        GateMapping,
+        GateRaster,
+        GateShape,
+        GateViewport,
+        GateFrameSlot,
+        GateOrdering,
+        // Span split, in GEOMETRY_PACKED_SPLIT order: no owner or an invalid
+        // span, identity unresolved, owner mismatch, key field mismatch, array
+        // element without an array generation.
+        GateSpanOwner,
+        GateSpanResolve,
+        GateSpanMismatch,
+        GateSpanField,
+        GateSpanArray,
+        GateHistory,
+        GateNoElement,
+        CoverageGateCount
+    };
+    static constexpr const char* coverageGateNames[CoverageGateCount] {
+        "notpacked",  "root",         "mapping",       "raster",     "shape",      "viewport", "frameslot", "ordering",
+        "span_owner", "span_resolve", "span_mismatch", "span_field", "span_array", "history",  "noelement" };
     // Per-pipeline coverage for the GEOMETRY_PIPELINES report. The packed
     // capture adds to these with relaxed atomics, and only while the gate trace
     // is armed (GateArmed). gate=on and gate=reset zero them. No render path
@@ -84,6 +114,8 @@ struct GeometryPipelineEntry
         //   neither an array nor a history variant. They keep the engine's
         //   motion.
         std::atomic<std::uint64_t> draws { 0 }, captures { 0 }, graft { 0 }, array { 0 }, arrayRejected { 0 };
+        // By CoverageGate.
+        std::atomic<std::uint64_t> gates[CoverageGateCount] {};
     };
     mutable Coverage coverage;
 };
@@ -112,6 +144,7 @@ struct GeometryPipelineCoverage
 {
     std::uint64_t identity = 0, vertexHash = 0, pixelHash = 0;
     std::uint64_t draws = 0, captures = 0, graft = 0, array = 0, arrayRejected = 0;
+    std::uint64_t gates[GeometryPipelineEntry::CoverageGateCount] {};
     GeometryGraftKind kind = GeometryGraftKind::Pending;
     // A vertex-history variant exists: `packed` itself when no graft is
     // usable, `packedHistory` for the array draws of a graft entry.

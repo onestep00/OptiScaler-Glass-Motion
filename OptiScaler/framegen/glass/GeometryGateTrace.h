@@ -18,6 +18,9 @@ enum GateStage : unsigned
     GateNoBindings,
     GateNoRecord,
     GateNoOwner,
+    // Draws refused because the capture mutex was busy. prepare no longer
+    // refuses a draw for that (it waits, GatePrepareLockWait), so this stays
+    // zero; it is kept so old and new GEOMETRY_GATE lines compare.
     GatePrepareLock,
     GatePrepareFailed,
     GatePrepareCommand,
@@ -37,6 +40,9 @@ enum GateStage : unsigned
     GatePrepareNoElement,
     GateBindRejected,
     GateCaptured,
+    // prepare calls that found the capture mutex held by another thread and
+    // waited for it.
+    GatePrepareLockWait,
     GateStageCount
 };
 
@@ -73,9 +79,9 @@ inline void GateArm(bool armed) noexcept
     Gate().armed.store(armed, std::memory_order_relaxed);
 }
 
-inline void GateNote(unsigned stage) noexcept
+inline void GateNote(unsigned stage, std::uint64_t count = 1) noexcept
 {
-    Gate().stage[stage].fetch_add(1, std::memory_order_relaxed);
+    Gate().stage[stage].fetch_add(count, std::memory_order_relaxed);
 }
 
 // Lock-free distinct-pipeline probe: a 64-word Bloom filter. Pointers can

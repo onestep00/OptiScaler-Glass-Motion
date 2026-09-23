@@ -321,16 +321,18 @@ void ReportGeometryHost(FILE* log) noexcept
             const auto& gate = Gate();
             fprintf(log,
                     "GEOMETRY_GATE draws=%llu no_pipeline=%llu no_bindings=%llu no_record=%llu no_owner=%llu "
-                    "prepare_lock=%llu prepare_failed=%llu prepare_command=%llu prepare_frameid=%llu "
-                    "prepare_instances=%llu prepare_mapping=%llu prepare_pipeline=%llu prepare_notpacked=%llu "
-                    "prepare_root=%llu prepare_raster=%llu prepare_shape=%llu prepare_viewport=%llu "
+                    "prepare_lock=%llu prepare_lock_wait=%llu prepare_failed=%llu prepare_command=%llu "
+                    "prepare_frameid=%llu prepare_instances=%llu prepare_mapping=%llu prepare_pipeline=%llu "
+                    "prepare_notpacked=%llu prepare_root=%llu prepare_raster=%llu prepare_shape=%llu "
+                    "prepare_viewport=%llu "
                     "prepare_frameslot=%llu prepare_ordering=%llu prepare_span=%llu prepare_history=%llu "
                     "prepare_noelement=%llu bind_rejected=%llu captured=%llu "
                     "unseen_pipeline_probes=%llu unseen_pipeline_distinct=%llu\n",
                     gate.stage[GateObjectDraws].load(), gate.stage[GateNoPipeline].load(),
                     gate.stage[GateNoBindings].load(), gate.stage[GateNoRecord].load(),
                     gate.stage[GateNoOwner].load(),
-                    gate.stage[GatePrepareLock].load(), gate.stage[GatePrepareFailed].load(),
+                    gate.stage[GatePrepareLock].load(), gate.stage[GatePrepareLockWait].load(),
+                    gate.stage[GatePrepareFailed].load(),
                     gate.stage[GatePrepareCommand].load(), gate.stage[GatePrepareFrameId].load(),
                     gate.stage[GatePrepareInstances].load(), gate.stage[GatePrepareMapping].load(),
                     gate.stage[GatePreparePipeline].load(), gate.stage[GatePrepareNotPacked].load(),
@@ -390,7 +392,9 @@ void ReportGeometryHost(FILE* log) noexcept
             // counter moved since the previous report: most drawn first, at most
             // 256, pipelines with draws only. vs/ps are the sha256 prefixes of the
             // native catalog (all-cache-techniques.json). id is the pipeline
-            // column of the dump id table (dump-<serial>-pipelines.txt).
+            // column of the dump id table (dump-<serial>-pipelines.txt) and of
+            // the GATE_DETAIL lines. gates= lists the admission gates that refused
+            // the entry's draws or elements, non-zero only ("-" when none).
             {
                 static std::atomic<std::uint64_t> reportedDraws { UINT64_MAX };
                 std::vector<GeometryPipelineCoverage> pipelines;
@@ -415,16 +419,29 @@ void ReportGeometryHost(FILE* log) noexcept
                 for (std::size_t i = 0; i < shown; ++i)
                 {
                     const auto& item = pipelines[i];
+                    char gates[640] = "-";
+                    std::size_t used = 0;
+                    for (unsigned gate = 0; gate < GeometryPipelineEntry::CoverageGateCount; ++gate)
+                    {
+                        if (!item.gates[gate])
+                            continue;
+                        const int written = std::snprintf(gates + used, sizeof(gates) - used, "%s%s:%llu",
+                                                          used ? "," : "", GeometryPipelineEntry::coverageGateNames[gate],
+                                                          static_cast<unsigned long long>(item.gates[gate]));
+                        if (written < 0 || std::size_t(written) >= sizeof(gates) - used)
+                            break;
+                        used += std::size_t(written);
+                    }
                     fprintf(log,
                             "GEOMETRY_PIPELINE id=%llu vs=%016llx ps=%016llx kind=%s history=%u draws=%llu "
-                            "captures=%llu graft=%llu array=%llu array_rejected=%llu\n",
+                            "captures=%llu graft=%llu array=%llu array_rejected=%llu gates=%s\n",
                             static_cast<unsigned long long>(item.identity),
                             static_cast<unsigned long long>(item.vertexHash),
                             static_cast<unsigned long long>(item.pixelHash), GeometryGraftKindName(item.kind),
                             item.history ? 1u : 0u, static_cast<unsigned long long>(item.draws),
                             static_cast<unsigned long long>(item.captures),
                             static_cast<unsigned long long>(item.graft), static_cast<unsigned long long>(item.array),
-                            static_cast<unsigned long long>(item.arrayRejected));
+                            static_cast<unsigned long long>(item.arrayRejected), gates);
                 }
             }
         }

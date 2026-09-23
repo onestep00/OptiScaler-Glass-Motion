@@ -28,6 +28,9 @@ struct PackedMotionIdentityScratch
 };
 // Process-resident source adapter. It must establish view/topology and original
 // source lifetimes for this borrowed draw; addresses/counts alone do not qualify.
+// prepare calls resolve and flush on the recording thread outside the capture
+// mutex, so draws on different recording threads resolve concurrently, each
+// with its own scratch. A provider must be safe for that.
 struct PackedMotionIdentityProvider
 {
     const void* context = nullptr;
@@ -158,7 +161,9 @@ struct PackedMotionProvider
 
 // One process-resident owner. Initialization is a one-time feature setup, not a
 // render callback. Runtime draw admission performs bounded table lookup and
-// persistently-mapped upload writes only; it never compiles, allocates or waits.
+// persistently-mapped upload writes only; it never compiles or allocates, and
+// the only wait is for another recording thread's bounded hold of the capture
+// mutex (PackedMotionCapture.cpp, Capture::status), never for the GPU.
 bool InitializePackedMotionCapture(ID3D12Device* device, std::uint32_t width, std::uint32_t height,
                                    FILE* log = nullptr, PackedMotionIdentityProvider identities = {}) noexcept;
 // Drops the process-resident capture so a different extent can be built. The

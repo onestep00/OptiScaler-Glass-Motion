@@ -17,6 +17,7 @@
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <thread>
 
 namespace GlassFg
@@ -106,6 +107,10 @@ class Capture final : public GeometryDrawCaptureOwner
     struct Frame
     {
         std::uint32_t number = 0, mappingUsed = 0, constantsUsed = 0;
+        // Advances on every (re)assignment of the slot. A draw that admits in
+        // several batches (prepare) releases the mutex between them and checks
+        // this before its next batch.
+        std::uint32_t serial = 0;
         // Dump id table (diagnostics). idsRecording is set when the slot is
         // assigned while a dump request has the table armed, so a recording slot
         // holds every element its frame admitted. Kept beside the counters every
@@ -178,22 +183,45 @@ class Capture final : public GeometryDrawCaptureOwner
     // Diagnostic only: module log and the last frame that produced a replay
     // trace line, so the line appears once per captured frame.
     FILE* log = nullptr;
-    std::uint32_t lastReplayFrame = 0;
+    std::atomic<std::uint32_t> lastReplayFrame { 0 };
     // Bounded attribution for the admission gates. A scene that never captures
     // a surface has to leave enough detail to name the gate without turning the
-    // per-draw path into a logger.
-    static constexpr unsigned GateDetailLimit = 240;
-    unsigned gateDetailLines = 0, gateAdmitLines = 0;
+    // per-draw path into a logger. prepare writes these lines outside the
+    // capture mutex, so the budgets are atomic.
+    static constexpr unsigned GateDetailLimit = 240, GateAdmitLimit = 64;
+    std::atomic<unsigned> gateDetailLines { 0 }, gateAdmitLines { 0 };
     // Bounded log for the stale-slot recovery in beginMappings (diagnostics).
     unsigned staleSlotReports = 0;
+    // The capture mutex. It guards the frame slots and their upload memory, the
+    // object mappings, the submission and fence bookkeeping, the dump id table,
+    // `counters`, `overflowChunks` and the span family table. Every recording
+    // thread's prepare shares it, so prepare holds it only for one element
+    // batch of a draw: slot and mapping updates, the reservation and the upload
+    // writes. Identity resolution, the draw checks and all logging run outside.
+    // A busy mutex is waited for, never a reason to drop a draw; the longest
+    // holders are listed at status().
     mutable std::mutex mutex;
     PackedMotionCaptureStatus counters;
-    std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
     std::array<PackedMotionCaptureStatus::ChunkCount, 16> overflowChunks {};
-    // Pair-less packed variants the cache withheld: the draw keeps the engine's
-    // own motion, and this table names the engine chunks that lost coverage
-    // because of it (F-01).
-    std::array<PackedMotionCaptureStatus::ChunkCount, 16> deltaMissingChunks {};
+    // Refusals that prepare counts before it would take the capture mutex:
+    // pipeline, raster, shape, viewport and identity. A refused draw holds this
+    // lock for one chunk table update and never waits for the capture mutex.
+    struct Rejections
+    {
+        std::uint64_t missingPipeline = 0, deltaMissingDraws = 0;
+        std::uint64_t topologyRejected = 0, rasterRejected = 0, shapeRejected = 0, viewportRejected = 0;
+        std::uint64_t unknownIdentity = 0, unknownOwnerSpan = 0, unknownResolve = 0, unknownOwnerMismatch = 0;
+        std::uint64_t unknownFieldMismatch = 0, unknownNoArrayGeneration = 0;
+        std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
+        // Pair-less packed variants the cache withheld: the draw keeps the
+        // engine's own motion, and this table names the engine chunks that lost
+        // coverage because of it (F-01).
+        std::array<PackedMotionCaptureStatus::ChunkCount, 16> deltaMissingChunks {};
+    };
+    std::mutex rejectionMutex;
+    Rejections rejections;
+    // Recorded draws (finish). Atomic, so finish takes no lock.
+    std::atomic<std::uint64_t> admittedDraws { 0 };
     // Bounded family table for the packed capture. A four-probe hash window
     // keeps the per-span cost at a few comparisons; a family that cannot be
     // placed is counted, never silently merged into another mesh.
@@ -209,7 +237,10 @@ class Capture final : public GeometryDrawCaptureOwner
     std::uint32_t configuredWidth = 0, configuredHeight = 0;
     std::uint64_t nextProducer = 0, nextConsumer = 0;
     MotionFramePair framePair;
-    bool failed = false, historyClearSubmitted = false;
+    // Sticky capture failure. Written under the mutex; prepare also reads it
+    // before it takes the mutex.
+    std::atomic<bool> failed { false };
+    bool historyClearSubmitted = false;
     // Dump id table state (PackedMotionCapture.h), under mutex. idsArmed means a
     // dump request asked for a table and no frame has been frozen for it yet.
     // Slots assigned meanwhile record. idsArmedFrames ends the recording when the
@@ -237,23 +268,26 @@ class Capture final : public GeometryDrawCaptureOwner
         std::array<DumpIdPipeline, ConstantCapacity> pipeline;
     } idSnapshot;
 
-    static void noteChunk(std::array<PackedMotionCaptureStatus::ChunkCount, 16>& list,
-                          std::uint32_t chunk) noexcept
+    // Adds `count` refusals of one chunk, exactly as that many single calls
+    // would: the first places the chunk (or replaces the smallest entry) and the
+    // rest find it.
+    static void noteChunk(std::array<PackedMotionCaptureStatus::ChunkCount, 16>& list, std::uint32_t chunk,
+                          std::uint64_t count = 1) noexcept
     {
-        if (!chunk) return;
+        if (!chunk || !count) return;
         auto* smallest = &list[0];
         for (auto& entry : list)
         {
             if (entry.chunk == chunk)
             {
-                ++entry.count;
+                entry.count += count;
                 return;
             }
             if (entry.count < smallest->count)
                 smallest = &entry;
         }
         smallest->chunk = chunk;
-        smallest->count = 1;
+        smallest->count = count;
     }
 
     // Counts `elements` admitted elements of one family, exactly as that many
@@ -421,6 +455,7 @@ class Capture final : public GeometryDrawCaptureOwner
             if (reusable(value))
             {
                 value.number = number;
+                ++value.serial;
                 for (unsigned i = 0; i < value.constantsUsed; ++i) value.pipelines[i].reset();
                 value.mappingUsed = value.constantsUsed = 0;
                 value.recordings = {};
@@ -445,6 +480,7 @@ class Capture final : public GeometryDrawCaptureOwner
                 continue;
             ++counters.slotReclaimed;
             value.number = number;
+            ++value.serial;
             for (unsigned i = 0; i < value.constantsUsed; ++i) value.pipelines[i].reset();
             value.mappingUsed = value.constantsUsed = 0;
             value.recordings = {};
@@ -617,46 +653,162 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         counters.width = width; counters.height = height;
     }
 
+  private:
+    // One element of a draw. prepare resolves it outside the capture mutex and
+    // admits it under the mutex.
+    struct Element
+    {
+        VertexHistoryKey key;
+        // Mapping slot in the draw's range: span.first + ordinal.
+        std::uint32_t index;
+        // Set under the mutex; empty unless the element was admitted.
+        PackedMotionAllocation allocation;
+    };
+    // Elements a draw admits per hold of the capture mutex. The largest draw in
+    // the live gate logs (2026-09-24) had 35 elements, so a draw normally takes
+    // the mutex once; a larger one takes it once per batch, which bounds a hold
+    // at 64 table lookups and 64 upload records.
+    static constexpr unsigned ElementBatch = 64;
+    // Identity refusals of one draw, in GEOMETRY_PACKED_SPLIT order. Counted
+    // without a lock and published once per draw.
+    enum SpanRefusal : unsigned
+    {
+        SpanOwner,
+        SpanResolve,
+        SpanOwnerMismatch,
+        SpanFieldMismatch,
+        SpanNoArrayGeneration,
+        SpanRefusalCount
+    };
+    static constexpr GeometryPipelineEntry::CoverageGate SpanRefusalGate[SpanRefusalCount] {
+        GeometryPipelineEntry::GateSpanOwner, GeometryPipelineEntry::GateSpanResolve,
+        GeometryPipelineEntry::GateSpanMismatch, GeometryPipelineEntry::GateSpanField,
+        GeometryPipelineEntry::GateSpanArray };
+
+    // Claims one line of a bounded detail budget. The plain load keeps an
+    // exhausted budget from counting further on every draw.
+    static bool claimLine(std::atomic<unsigned>& used, unsigned limit) noexcept
+    {
+        return used.load(std::memory_order_relaxed) < limit && used.fetch_add(1, std::memory_order_relaxed) < limit;
+    }
+    // Per-pipeline entry of a draw-level gate; CoverageGateCount for the gates
+    // that describe the capture or the draw rather than the pipeline (failed
+    // capture, missing command, frame id or instances).
+    static unsigned pipelineGate(unsigned stage) noexcept
+    {
+        switch (stage)
+        {
+        case GatePrepareNotPacked: return GeometryPipelineEntry::GateNotPacked;
+        case GatePrepareRoot: return GeometryPipelineEntry::GateRoot;
+        case GatePrepareMapping: return GeometryPipelineEntry::GateMapping;
+        case GatePrepareRaster: return GeometryPipelineEntry::GateRaster;
+        case GatePrepareShape: return GeometryPipelineEntry::GateShape;
+        case GatePrepareViewport: return GeometryPipelineEntry::GateViewport;
+        case GatePrepareFrameSlot: return GeometryPipelineEntry::GateFrameSlot;
+        case GatePrepareOrdering: return GeometryPipelineEntry::GateOrdering;
+        case GatePrepareNoElement: return GeometryPipelineEntry::GateNoElement;
+        default: return GeometryPipelineEntry::CoverageGateCount;
+        }
+    }
+    // A draw-level refusal on the stage counter and, for a known pipeline, on
+    // its GEOMETRY_PIPELINE split. Only while the gate trace is armed.
+    static void refuse(bool gate, const GeometryPipelineEntry* pipeline, unsigned stage) noexcept
+    {
+        if (!gate) return;
+        GateNote(stage);
+        const auto entry = pipelineGate(stage);
+        if (pipeline && entry != GeometryPipelineEntry::CoverageGateCount)
+            pipeline->coverage.gates[entry].fetch_add(1, std::memory_order_relaxed);
+    }
+    void rejectPipeline(const GeometryPipelineEntry& pipeline, std::uint32_t chunk) noexcept
+    {
+        std::lock_guard lock(rejectionMutex);
+        ++rejections.missingPipeline;
+        noteChunk(rejections.missingChunks, chunk);
+        if (pipeline.deltaMissing)
+        {
+            ++rejections.deltaMissingDraws;
+            noteChunk(rejections.deltaMissingChunks, chunk);
+        }
+    }
+    void rejectTopology(std::uint64_t Rejections::* reason, std::uint32_t chunk) noexcept
+    {
+        std::lock_guard lock(rejectionMutex);
+        ++rejections.topologyRejected;
+        ++(rejections.*reason);
+        noteChunk(rejections.topologyChunks, chunk);
+    }
+    void rejectSpans(const std::array<std::uint32_t, SpanRefusalCount>& refused, std::uint64_t total,
+                     std::uint32_t chunk) noexcept
+    {
+        std::lock_guard lock(rejectionMutex);
+        rejections.unknownIdentity += total;
+        rejections.unknownOwnerSpan += refused[SpanOwner];
+        rejections.unknownResolve += refused[SpanResolve];
+        rejections.unknownOwnerMismatch += refused[SpanOwnerMismatch];
+        rejections.unknownFieldMismatch += refused[SpanFieldMismatch];
+        rejections.unknownNoArrayGeneration += refused[SpanNoArrayGeneration];
+        noteChunk(rejections.unknownChunks, chunk, total);
+    }
+    static bool fits(const Frame& slot, std::uint32_t instances) noexcept
+    {
+        return slot.mappingUsed <= MappingCapacity - instances && slot.constantsUsed != ConstantCapacity;
+    }
+    // Draw-level admission, under the mutex, in the order a draw always met
+    // it: capture state, frame slot, mapping frame, capacity, recording.
+    // GateStageCount when the draw may admit elements into `slot`.
+    unsigned openDraw(ID3D12GraphicsCommandList* command, std::uint64_t epoch, std::uint32_t frameNumber,
+                      std::uint32_t instances, Frame*& slot)
+    {
+        if (failed)
+            return GatePrepareFailed;
+        slot = frame(frameNumber);
+        if (!slot)
+            return GatePrepareFrameSlot;
+        if (!beginMappings(frameNumber))
+        {
+            ++counters.orderingRejected;
+            return GatePrepareOrdering;
+        }
+        if (!fits(*slot, instances))
+        {
+            ++counters.mappingOverflow;
+            return GatePrepareMapping;
+        }
+        if (!epoch || !record(*slot, command, epoch))
+        {
+            ++counters.orderingRejected;
+            return GatePrepareOrdering;
+        }
+        return GateStageCount;
+    }
+
+  public:
     bool prepare(ID3D12GraphicsCommandList* command, const GeometryDrawView& draw,
                  const GeometryIndexedArguments& args, const std::shared_ptr<const GeometryPipelineEntry>& pipeline,
                  const GraphicsRootBindings&, GeometryPreparedDraw& prepared) noexcept override
     {
-        std::unique_lock lock(mutex, std::try_to_lock);
         const bool gate = GateArmed();
         // Per-pipeline coverage (GEOMETRY_PIPELINES, GeometryHost.cpp). It is
         // counted only while the gate trace is armed, like the stage counters.
         if (gate && pipeline)
             pipeline->coverage.draws.fetch_add(1, std::memory_order_relaxed);
-        if (!lock)
-        {
-            if (gate) GateNote(GatePrepareLock);
-            return false; // Counters share this lock too.
-        }
         const auto frameNumber = resolvedDrawFrame(draw);
-        if (failed || !command || frameNumber == 0 || !args.instances || args.instances > MappingCapacity ||
+        const bool broken = failed.load(std::memory_order_relaxed);
+        if (broken || !command || frameNumber == 0 || !args.instances || args.instances > MappingCapacity ||
             !pipeline || !pipeline->packed || !pipeline->root || !pipeline->root->extended)
         {
-            if (gate)
-            {
-                GateNote(failed                            ? GatePrepareFailed
-                         : !command                        ? GatePrepareCommand
-                         : frameNumber == 0                ? GatePrepareFrameId
-                         : !args.instances                 ? GatePrepareInstances
-                         : args.instances > MappingCapacity ? GatePrepareMapping
-                         : !pipeline                       ? GatePreparePipeline
-                         : !pipeline->packed               ? GatePrepareNotPacked
-                                                           : GatePrepareRoot);
-            }
+            refuse(gate, pipeline.get(),
+                   broken                             ? GatePrepareFailed
+                   : !command                         ? GatePrepareCommand
+                   : frameNumber == 0                 ? GatePrepareFrameId
+                   : !args.instances                  ? GatePrepareInstances
+                   : args.instances > MappingCapacity ? GatePrepareMapping
+                   : !pipeline                        ? GatePreparePipeline
+                   : !pipeline->packed                ? GatePrepareNotPacked
+                                                      : GatePrepareRoot);
             if (pipeline && !pipeline->packed)
-            {
-                ++counters.missingPipeline;
-                noteChunk(missingChunks, draw.chunk);
-                if (pipeline->deltaMissing)
-                {
-                    ++counters.deltaMissingDraws;
-                    noteChunk(deltaMissingChunks, draw.chunk);
-                }
-            }
+                rejectPipeline(*pipeline, draw.chunk);
             return false;
         }
         // Graft variant gate. The engine evaluates the MotionMatrix supply once
@@ -682,20 +834,25 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             {
                 // Gate-trace evidence for the engine's array convention: which
                 // draws of a graft pipeline arrive with more than one instance
-                // or a non-single span, and whether their depth test is on.
-                if (gate && log && gateDetailLines < GateDetailLimit)
+                // or a non-single span, and whether their depth test is on. The
+                // line is several writes; the file lock keeps it whole against
+                // the other recording threads.
+                if (gate && log && claimLine(gateDetailLines, GateDetailLimit))
                 {
-                    ++gateDetailLines;
                     const bool depthTest = pipeline->description.DepthStencilState.DepthEnable != 0;
                     const bool blended = pipeline->description.BlendState.RenderTarget[0].BlendEnable != 0;
-                    std::fprintf(log, "GATE_DETAIL reason=array chunk=%u instances=%u spans=%zu depth=%d blend=%d frame=%u",
-                                 draw.chunk, args.instances, draw.objects.size(), depthTest ? 1 : 0, blended ? 1 : 0,
-                                 frameNumber);
+                    _lock_file(log);
+                    std::fprintf(log,
+                                 "GATE_DETAIL reason=array pipeline=%llu chunk=%u instances=%u spans=%zu depth=%d "
+                                 "blend=%d frame=%u",
+                                 static_cast<unsigned long long>(pipeline->identity), draw.chunk, args.instances,
+                                 draw.objects.size(), depthTest ? 1 : 0, blended ? 1 : 0, frameNumber);
                     for (const auto& span : draw.objects)
                         std::fprintf(log, " [first=%u count=%u id=%d parent=%d]", span.first, span.count,
                                      span.identity ? 1 : 0, span.parent ? 1 : 0);
                     std::fputc('\n', log);
                     std::fflush(log);
+                    _unlock_file(log);
                 }
                 if (pipeline->packedArray)
                 {
@@ -725,136 +882,88 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         const auto shape = ReadCyberpunkMeshShape(draw);
         if (!raster || !raster->usable())
         {
-            if (gate) GateNote(GatePrepareRaster);
-            ++counters.topologyRejected; ++counters.rasterRejected; noteChunk(topologyChunks, draw.chunk);
+            refuse(gate, pipeline.get(), GatePrepareRaster);
+            rejectTopology(&Rejections::rasterRejected, draw.chunk);
             return false;
         }
         if (!shape || !shape.vertices || (!historyFree && shape.vertices > HistoryCapacity))
         {
-            if (gate) GateNote(GatePrepareShape);
-            ++counters.topologyRejected; ++counters.shapeRejected; noteChunk(topologyChunks, draw.chunk);
+            refuse(gate, pipeline.get(), GatePrepareShape);
+            rejectTopology(&Rejections::shapeRejected, draw.chunk);
             return false;
         }
         // Sizes the arena block on the vertex-history path; a graft draw skipped
         // the capacity check and uses the count for diagnostics only.
         const auto vertices = shape.vertices;
-        if (!std::isfinite(raster->viewport.TopLeftX) || !std::isfinite(raster->viewport.TopLeftY) ||
-            !std::isfinite(raster->viewport.Width) || !std::isfinite(raster->viewport.Height) ||
-            raster->viewport.Width <= 0 || raster->viewport.Height <= 0 || raster->viewport.TopLeftX < 0 ||
-            raster->viewport.TopLeftY < 0 || raster->viewport.TopLeftX + raster->viewport.Width > configuredWidth ||
-            raster->viewport.TopLeftY + raster->viewport.Height > configuredHeight)
+        const auto& viewport = raster->viewport;
+        if (!std::isfinite(viewport.TopLeftX) || !std::isfinite(viewport.TopLeftY) || !std::isfinite(viewport.Width) ||
+            !std::isfinite(viewport.Height) || viewport.Width <= 0 || viewport.Height <= 0 || viewport.TopLeftX < 0 ||
+            viewport.TopLeftY < 0 || viewport.TopLeftX + viewport.Width > configuredWidth ||
+            viewport.TopLeftY + viewport.Height > configuredHeight)
         {
-            if (gate) GateNote(GatePrepareViewport);
-            ++counters.topologyRejected; ++counters.viewportRejected; noteChunk(topologyChunks, draw.chunk);
+            refuse(gate, pipeline.get(), GatePrepareViewport);
+            rejectTopology(&Rejections::viewportRejected, draw.chunk);
             return false;
         }
-        auto* frameSlot = frame(frameNumber);
-        if (!frameSlot) { if (gate) GateNote(GatePrepareFrameSlot); return false; }
-        if (!beginMappings(frameNumber)) { if (gate) GateNote(GatePrepareOrdering); ++counters.orderingRejected; return false; }
-        if (frameSlot->mappingUsed > MappingCapacity - args.instances || frameSlot->constantsUsed == ConstantCapacity)
-        {
-            if (gate) GateNote(GatePrepareMapping);
-            ++counters.mappingOverflow;
-            return false;
-        }
-        const auto epoch = ReadGeometryRecordingEpoch(command);
-        if (!epoch || !record(*frameSlot, command, epoch))
-        {
-            if (gate) GateNote(GatePrepareOrdering);
-            ++counters.orderingRejected;
-            return false;
-        }
-        const auto mappingBase = frameSlot->mappingUsed;
-        auto* mapping = frameSlot->mappings + mappingBase;
-        // The mapping and constant buffers are write-combined upload memory, and
-        // a locked instruction (identity and array-mapping counters, reference
-        // counts, the mutex release) waits until pending write-combined lines
-        // have drained. Written in the element loop, every admitted element paid
-        // one such drain, which cost more than the rest of its work. Admitted
-        // elements are therefore staged in cacheable memory and the upload
-        // writes are made together, as whole 64-byte records, after the last
-        // locked instruction before the mutex release. The bytes are unchanged:
-        // zeroes over the draw's range, then each admitted record in admission
-        // order. A draw that admits nothing leaves the upload memory untouched;
-        // its range is not reserved and the next draw clears it again.
-        struct StagedElement
-        {
-            std::uint32_t index, historyBase, vertices, generation, boundaryId;
-        };
-        std::array<StagedElement, 64> staged;
-        unsigned stagedCount = 0;
-        bool cleared = false;
-        const auto writeStaged = [&]() noexcept
-        {
-            if (!cleared)
-            {
-                std::memset(mapping, 0, args.instances * sizeof(GeometryInstance));
-                cleared = true;
-            }
-            GeometryInstance item {};
-            item.width = configuredWidth; item.height = configuredHeight;
-            item.pixelBase = 1; item.stride = configuredWidth;
-            item.pixelCapacity = configuredWidth * configuredHeight + 1;
-            for (unsigned i = 0; i < stagedCount; ++i)
-            {
-                const auto& element = staged[i];
-                item.historyBase = element.historyBase;
-                item.vertices = element.vertices;
-                item.generation = element.generation;
-                item.reserved[0] = element.boundaryId;
-                mapping[element.index] = item;
-            }
-            stagedCount = 0;
-        };
-        // One identity scratch per draw: the provider resolves the draw-wide
-        // inputs once and publishes its counters in flush below.
+        // Identities are resolved outside the capture mutex, a batch at a time:
+        // the provider is safe on concurrent recording threads
+        // (PackedMotionCapture.h) and the scratch belongs to this draw. The
+        // mutex then covers what the recording threads share: the frame slot,
+        // the object mappings and tables, the reservation and the upload writes
+        // of that batch. The element storage stays uninitialized until an
+        // element is resolved into it, so a draw pays only for its elements.
         PackedMotionIdentityScratch identityScratch;
-        // Consecutive admitted elements of one owner mesh; the family table is
-        // updated once per run.
-        std::uint32_t familyMesh = 0, familyRun = 0;
-        bool any = false;
-        for (unsigned spanIndex = 0; spanIndex < draw.objects.size(); ++spanIndex)
+        std::array<std::uint32_t, SpanRefusalCount> refused {};
+        alignas(Element) std::byte storage[ElementBatch * sizeof(Element)];
+        const auto element = [&storage](unsigned index) noexcept -> Element&
+        { return *std::launder(reinterpret_cast<Element*>(storage + index * sizeof(Element))); };
+        // Resolution cursor: the next element is `ordinal` of span `spanIndex`.
+        unsigned spanIndex = 0;
+        std::uint32_t ordinal = 0;
+        const auto resolveBatch = [&]() noexcept -> unsigned
         {
-            const auto& span = draw.objects[spanIndex];
-            const auto& owner = span.parent ? span.parent : span.identity;
-            if (!owner || !span.count || std::uint64_t(span.first) + span.count > args.instances)
+            unsigned count = 0;
+            while (count < ElementBatch && spanIndex < draw.objects.size())
             {
-                if (span.count)
+                const auto& span = draw.objects[spanIndex];
+                const auto& owner = span.parent ? span.parent : span.identity;
+                if (!ordinal && (!owner || !span.count || std::uint64_t(span.first) + span.count > args.instances))
                 {
-                    if (gate) GateNote(GatePrepareSpan);
-                    ++counters.unknownIdentity; ++counters.unknownOwnerSpan;
-                    noteChunk(unknownChunks, draw.chunk);
+                    refused[SpanOwner] += span.count ? 1u : 0u;
+                    ++spanIndex;
+                    continue;
                 }
-                continue;
-            }
-            for (unsigned ordinal = 0; ordinal < span.count; ++ordinal)
-            {
-                VertexHistoryKey key;
-                if (!identitySource.resolve(identitySource.context, identityScratch, command, draw, shape, *pipeline,
-                    spanIndex, ordinal, key) || !key || !key.object.generation)
+                const auto current = spanIndex;
+                const auto elementOrdinal = ordinal;
+                if (++ordinal == span.count)
                 {
-                    if (gate) GateNote(GatePrepareSpan);
-                    ++counters.unknownIdentity; ++counters.unknownResolve;
-                    noteChunk(unknownChunks, draw.chunk); continue;
+                    ordinal = 0;
+                    ++spanIndex;
+                }
+                auto& item = *::new (storage + count * sizeof(Element)) Element;
+                auto& key = item.key;
+                if (!identitySource.resolve(identitySource.context, identityScratch, command, draw, shape, *pipeline,
+                                            current, elementOrdinal, key) ||
+                    !key || !key.object.generation)
+                {
+                    ++refused[SpanResolve];
+                    continue;
                 }
                 if (!sameOwner(key.object, owner))
                 {
-                    if (gate) GateNote(GatePrepareSpan);
-                    ++counters.unknownIdentity; ++counters.unknownOwnerMismatch;
-                    noteChunk(unknownChunks, draw.chunk); continue;
+                    ++refused[SpanOwnerMismatch];
+                    continue;
                 }
                 if (key.chunk != draw.chunk || key.vertexFactory != shape.vertexFactory ||
                     key.pipeline != pipeline->identity)
                 {
-                    if (gate) GateNote(GatePrepareSpan);
-                    ++counters.unknownIdentity; ++counters.unknownFieldMismatch;
-                    noteChunk(unknownChunks, draw.chunk); continue;
+                    ++refused[SpanFieldMismatch];
+                    continue;
                 }
                 if ((!span.identity || span.count != 1) && !key.arrayGeneration)
                 {
-                    if (gate) GateNote(GatePrepareSpan);
-                    ++counters.unknownIdentity; ++counters.unknownNoArrayGeneration;
-                    noteChunk(unknownChunks, draw.chunk); continue;
+                    ++refused[SpanNoArrayGeneration];
+                    continue;
                 }
                 // Second half of the graft gate: an identity the resolver
                 // placed in an array lifetime is an array element even when
@@ -873,110 +982,259 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     graftDraw = false;
                     graftArrayDraw = true;
                 }
-                // A graft element fails only when the frame-local boundary table
-                // has no ID left for it; the arena is never asked.
-                const auto allocation = historyFree ? objectMappings.acquireIdentity(key, frameNumber)
-                                                    : objectMappings.acquire(key, vertices, frameNumber);
-                if (!allocation)
+                item.index = span.first + elementOrdinal;
+                ++count;
+            }
+            return count;
+        };
+        Frame* frameSlot = nullptr;
+        std::uint32_t slotSerial = 0, mappingBase = 0, constantIndex = 0;
+        bool opened = false, reserved = false;
+        // Draw-level refusal met under the mutex; GateStageCount when none.
+        unsigned refusal = GateStageCount;
+        std::uint64_t historyMisses = 0, epoch = 0;
+        // Draw-wide inputs of the locked phase, read once the draw has an
+        // element to admit.
+        MaterialCaptureConstants constants {};
+        auto count = resolveBatch();
+        if (count)
+        {
+            epoch = ReadGeometryRecordingEpoch(command);
+            const auto depthFunction = pipeline->description.DepthStencilState.DepthFunc;
+            const bool reverse = depthFunction == D3D12_COMPARISON_FUNC_GREATER ||
+                                 depthFunction == D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+            // Far-surface skip. The capture shader drops a record whose surface
+            // is farther than this view distance, so distant level-of-detail
+            // glass costs nothing and keeps the engine's own motion. 0 = keep
+            // all.
+            std::uint32_t farCutoffBits = 0;
+            const auto controls = ReadControls();
+            const auto farCutoffMeters = controls.farCutoffMeters();
+            if (farCutoffMeters > 0.f)
+                std::memcpy(&farCutoffBits, &farCutoffMeters, sizeof(farCutoffBits));
+            constants = {
+                viewport.TopLeftX, viewport.TopLeftY, 1.f / viewport.Width, 1.f / viewport.Height,
+                0, 0, frameNumber, reverse ? 1u : 0u,
+                0, 0, configuredWidth, configuredHeight,
+                0, configuredWidth, configuredWidth * configuredHeight, farCutoffBits,
+                // Coverage class boundary. The capture marks a record covered
+                // when its material opacity reaches this value, and the packed
+                // store keeps the nearest covered record ahead of any uncovered
+                // one.
+                controls.opacityThreshold(), 0.f, 0.f, 0.f
+            };
+        }
+        while (count)
+        {
+            bool acquired = false;
+            {
+                std::unique_lock lock(mutex, std::try_to_lock);
+                if (!lock)
                 {
+                    // Another recording thread is inside its own batch. Wait
+                    // for it: the hold is bounded (ElementBatch) and dropping
+                    // the draw would flip this surface between corrected and
+                    // uncorrected from frame to frame.
                     if (gate)
+                        GateNote(GatePrepareLockWait);
+                    lock.lock();
+                }
+                if (!opened)
+                {
+                    opened = true;
+                    refusal = openDraw(command, epoch, frameNumber, args.instances, frameSlot);
+                    if (refusal != GateStageCount)
+                        break;
+                    slotSerial = frameSlot->serial;
+                }
+                else if (frameSlot->serial != slotSerial || objectMappings.frame() != frameNumber)
+                {
+                    // Between two batches of this draw another thread moved the
+                    // slot to a newer frame, which voids the reservation, or
+                    // began the next frame, which ends admission for the rest.
+                    ++counters.orderingRejected;
+                    refusal = GatePrepareOrdering;
+                    reserved = reserved && frameSlot->serial == slotSerial;
+                    break;
+                }
+                else if (!reserved && !fits(*frameSlot, args.instances))
+                {
+                    ++counters.mappingOverflow;
+                    refusal = GatePrepareMapping;
+                    break;
+                }
+                acquired = true;
+                unsigned admitted = 0;
+                // Consecutive admitted elements of one owner mesh; the family
+                // table is updated once per run.
+                std::uint32_t familyMesh = 0, familyRun = 0;
+                for (unsigned i = 0; i < count; ++i)
+                {
+                    auto& item = element(i);
+                    // A graft element fails only when the frame-local boundary
+                    // table has no ID left for it; the arena is never asked.
+                    item.allocation = historyFree ? objectMappings.acquireIdentity(item.key, frameNumber)
+                                                  : objectMappings.acquire(item.key, vertices, frameNumber);
+                    if (!item.allocation)
                     {
-                        GateNote(GatePrepareHistory);
-                        if (log && gateDetailLines < GateDetailLimit)
+                        ++counters.historyOverflow;
+                        noteChunk(overflowChunks, draw.chunk);
+                        continue;
+                    }
+                    ++admitted;
+                    // The family table is a bounded diagnostic key, not an
+                    // identity check (the hash still mixes the full mesh
+                    // address), so the low 32 bits printed in the status line
+                    // are enough here.
+                    const auto familyKey = std::uint32_t(item.key.object.mesh);
+                    if (familyRun && familyKey != familyMesh)
+                    {
+                        noteSpanFamily(draw.chunk, familyMesh, vertices, familyRun);
+                        familyRun = 0;
+                    }
+                    familyMesh = familyKey;
+                    ++familyRun;
+                }
+                if (familyRun)
+                    noteSpanFamily(draw.chunk, familyMesh, vertices, familyRun);
+                frameSpanCount += admitted;
+                // The first admitted element reserves the draw's mapping range
+                // and constant slot, under the same hold that checked the
+                // capacity. A draw that admits nothing reserves nothing.
+                const bool fresh = admitted && !reserved;
+                if (fresh)
+                {
+                    reserved = true;
+                    mappingBase = frameSlot->mappingUsed;
+                    frameSlot->mappingUsed += args.instances;
+                    constantIndex = frameSlot->constantsUsed++;
+                    frameSlot->pipelines[constantIndex] = pipeline;
+                    if (historyFree)
+                    {
+                        ++frameSlot->graftDraws;
+                        ++counters.historyBypassed;
+                    }
+                }
+                // Dump id table: one row per admitted element, keyed by the
+                // draw's constant index.
+                if (reserved && frameSlot->idsRecording)
+                {
+                    frameSlot->idVariants[constantIndex] = graftDraw        ? DumpVariantRoot
+                                                           : graftArrayDraw ? DumpVariantArray
+                                                                            : DumpVariantHistory;
+                    for (unsigned i = 0; i < count; ++i)
+                    {
+                        const auto& item = element(i);
+                        if (item.allocation && frameSlot->idCount < frameSlot->ids.size())
+                            frameSlot->ids[frameSlot->idCount++] = { std::uint16_t(item.allocation.boundaryId),
+                                                                     std::uint16_t(constantIndex) };
+                    }
+                }
+                // Upload writes last. The mapping and constant buffers are
+                // write-combined upload memory, and a locked instruction
+                // (reference counts, the mutex release) waits until pending
+                // write-combined lines have drained, so the records are written
+                // together as whole 64-byte records after the last locked
+                // instruction but the release. The bytes are unchanged: zeroes
+                // over the draw's range, then each admitted record in admission
+                // order. They stay under the mutex, so a slot another thread
+                // reclaims later is rewritten after these writes, never under
+                // them.
+                if (admitted)
+                {
+                    auto* mapping = frameSlot->mappings + mappingBase;
+                    if (fresh)
+                    {
+                        std::memset(mapping, 0, args.instances * sizeof(GeometryInstance));
+                        std::memcpy(frameSlot->constants + constantIndex * 256, &constants, sizeof(constants));
+                    }
+                    GeometryInstance record {};
+                    record.width = configuredWidth;
+                    record.height = configuredHeight;
+                    record.pixelBase = 1;
+                    record.stride = configuredWidth;
+                    record.pixelCapacity = configuredWidth * configuredHeight + 1;
+                    for (unsigned i = 0; i < count; ++i)
+                    {
+                        const auto& item = element(i);
+                        if (!item.allocation)
+                            continue;
+                        record.historyBase = item.allocation.history.base;
+                        record.vertices = item.allocation.history.vertices;
+                        record.generation = item.allocation.history.generation;
+                        record.reserved[0] = item.allocation.boundaryId;
+                        mapping[item.index] = record;
+                    }
+                }
+            }
+            // Outside the mutex: the batch's refused elements and the bounded
+            // detail lines.
+            if (acquired)
+                for (unsigned i = 0; i < count; ++i)
+                {
+                    const auto& item = element(i);
+                    if (!item.allocation)
+                    {
+                        ++historyMisses;
+                        if (gate && log && claimLine(gateDetailLines, GateDetailLimit))
                         {
-                            ++gateDetailLines;
                             std::fprintf(log,
-                                         "GATE_DETAIL reason=%s chunk=%u mesh=%u verts=%u vp=%.0f,%.0f,%.0f,%.0f "
-                                         "frame=%u\n",
-                                         historyFree ? "identity" : "history", draw.chunk,
-                                         std::uint32_t(key.object.mesh), vertices,
-                                         raster->viewport.TopLeftX, raster->viewport.TopLeftY,
-                                         raster->viewport.Width, raster->viewport.Height, frameNumber);
+                                         "GATE_DETAIL reason=%s pipeline=%llu chunk=%u mesh=%u verts=%u "
+                                         "vp=%.0f,%.0f,%.0f,%.0f frame=%u\n",
+                                         historyFree ? "identity" : "history",
+                                         static_cast<unsigned long long>(pipeline->identity), draw.chunk,
+                                         std::uint32_t(item.key.object.mesh), vertices, viewport.TopLeftX,
+                                         viewport.TopLeftY, viewport.Width, viewport.Height, frameNumber);
                             std::fflush(log);
                         }
                     }
-                    ++counters.historyOverflow;
-                    noteChunk(overflowChunks, draw.chunk);
-                    continue;
+                    else if (gate && log && claimLine(gateAdmitLines, GateAdmitLimit))
+                    {
+                        std::fprintf(log,
+                                     "GATE_DETAIL reason=admit pipeline=%llu chunk=%u mesh=%u verts=%u "
+                                     "vp=%.0f,%.0f,%.0f,%.0f frame=%u\n",
+                                     static_cast<unsigned long long>(pipeline->identity), draw.chunk,
+                                     std::uint32_t(item.key.object.mesh), vertices, viewport.TopLeftX,
+                                     viewport.TopLeftY, viewport.Width, viewport.Height, frameNumber);
+                        std::fflush(log);
+                    }
                 }
-                // The family table is a bounded diagnostic key, not an identity
-                // check (the hash still mixes the full mesh address), so the low
-                // 32 bits printed in the status line are enough here.
-                const auto familyKey = std::uint32_t(key.object.mesh);
-                if (familyRun && familyKey != familyMesh)
-                {
-                    noteSpanFamily(draw.chunk, familyMesh, vertices, familyRun);
-                    familyRun = 0;
-                }
-                familyMesh = familyKey;
-                ++familyRun;
-                ++frameSpanCount;
-                if (stagedCount == staged.size())
-                    writeStaged();
-                staged[stagedCount++] = { span.first + ordinal, allocation.history.base, allocation.history.vertices,
-                                          allocation.history.generation, allocation.boundaryId };
-                // Dump id table: this draw takes constant index constantsUsed
-                // below, once any element is admitted, and no other draw can
-                // take it first because this one holds the mutex.
-                if (frameSlot->idsRecording && frameSlot->idCount < frameSlot->ids.size())
-                    frameSlot->ids[frameSlot->idCount++] = { std::uint16_t(allocation.boundaryId),
-                                                             std::uint16_t(frameSlot->constantsUsed) };
-                any = true;
-                if (gate && log && gateAdmitLines < 64)
-                {
-                    ++gateAdmitLines;
-                    std::fprintf(log,
-                                 "GATE_DETAIL reason=admit chunk=%u mesh=%u verts=%u vp=%.0f,%.0f,%.0f,%.0f "
-                                 "frame=%u\n",
-                                 draw.chunk, std::uint32_t(key.object.mesh), vertices,
-                                 raster->viewport.TopLeftX, raster->viewport.TopLeftY,
-                                 raster->viewport.Width, raster->viewport.Height, frameNumber);
-                    std::fflush(log);
-                }
-            }
+            count = resolveBatch();
         }
         identitySource.flush(identitySource.context, identityScratch);
-        if (familyRun)
-            noteSpanFamily(draw.chunk, familyMesh, vertices, familyRun);
-        if (!any)
+        std::uint64_t spanRefused = 0;
+        for (const auto value : refused)
+            spanRefused += value;
+        if (spanRefused)
+            rejectSpans(refused, spanRefused, draw.chunk);
+        if (gate)
         {
-            if (gate) GateNote(GatePrepareNoElement);
+            if (spanRefused)
+            {
+                GateNote(GatePrepareSpan, spanRefused);
+                for (unsigned reason = 0; reason < SpanRefusalCount; ++reason)
+                    if (refused[reason])
+                        pipeline->coverage.gates[SpanRefusalGate[reason]].fetch_add(refused[reason],
+                                                                                    std::memory_order_relaxed);
+            }
+            if (historyMisses)
+            {
+                GateNote(GatePrepareHistory, historyMisses);
+                pipeline->coverage.gates[GeometryPipelineEntry::GateHistory].fetch_add(historyMisses,
+                                                                                       std::memory_order_relaxed);
+            }
+        }
+        if (!reserved)
+        {
+            refuse(gate, pipeline.get(), refusal != GateStageCount ? refusal : GatePrepareNoElement);
             return false;
         }
-        const auto constantIndex = frameSlot->constantsUsed++;
-        frameSlot->pipelines[constantIndex] = pipeline;
-        if (frameSlot->idsRecording)
-            frameSlot->idVariants[constantIndex] = graftDraw        ? DumpVariantRoot
-                                                   : graftArrayDraw ? DumpVariantArray
-                                                                    : DumpVariantHistory;
-        const auto depthFunction = pipeline->description.DepthStencilState.DepthFunc;
-        const bool reverse = depthFunction == D3D12_COMPARISON_FUNC_GREATER ||
-                             depthFunction == D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-        // Far-surface skip. The capture shader drops a record whose surface is
-        // farther than this view distance, so distant level-of-detail glass
-        // costs nothing and keeps the engine's own motion. 0 = keep all.
-        std::uint32_t farCutoffBits = 0;
-        const auto controls = ReadControls();
-        const auto farCutoffMeters = controls.farCutoffMeters();
-        if (farCutoffMeters > 0.f)
-            std::memcpy(&farCutoffBits, &farCutoffMeters, sizeof(farCutoffBits));
-        const MaterialCaptureConstants constants {
-            raster->viewport.TopLeftX, raster->viewport.TopLeftY,
-            1.f / raster->viewport.Width, 1.f / raster->viewport.Height,
-            0, 0, frameNumber, reverse ? 1u : 0u,
-            0, 0, configuredWidth, configuredHeight,
-            0, configuredWidth, configuredWidth * configuredHeight, farCutoffBits,
-            // Coverage class boundary. The capture marks a record covered when
-            // its material opacity reaches this value, and the packed store
-            // keeps the nearest covered record ahead of any uncovered one.
-            controls.opacityThreshold(), 0.f, 0.f, 0.f
-        };
+        // Admission ended early (the next frame began between two batches):
+        // the admitted part stands and the rest keeps the engine's motion.
+        if (refusal != GateStageCount)
+            refuse(gate, pipeline.get(), refusal);
         if (historyFree)
-        {
             NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
-            ++frameSlot->graftDraws;
-            ++counters.historyBypassed;
-        }
         if (gate)
         {
             auto& coverage = pipeline->coverage;
@@ -989,17 +1247,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         // Crash attribution for the replay path. Sparse on purpose: one line per
         // few hundred frames keeps the log bounded while still proving that the
         // packed raster was drawn after the last load.
-        if (log && frameNumber != lastReplayFrame && frameNumber % 300 == 0)
+        if (log && frameNumber % 300 == 0 && lastReplayFrame.load(std::memory_order_relaxed) != frameNumber &&
+            lastReplayFrame.exchange(frameNumber, std::memory_order_relaxed) != frameNumber)
         {
-            lastReplayFrame = frameNumber;
             std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", frameNumber, draw.chunk);
             std::fflush(log);
         }
-        // Upload writes last (see the staging note above): only the mutex
-        // release follows them.
-        writeStaged();
-        std::memcpy(frameSlot->constants + constantIndex * 256, &constants, sizeof(constants));
-        frameSlot->mappingUsed += args.instances;
         prepared.pipeline = packedPipeline;
         prepared.history = { mappingBase, MappingCapacity, HistoryCapacity, 0, args.instances, 0,
                              frameNumber, frameNumber - 1 };
@@ -1014,42 +1267,53 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     void finish(ID3D12GraphicsCommandList*, bool recorded) noexcept override
     {
         if (!recorded) return;
-        std::lock_guard lock(mutex);
-        ++counters.admittedDraws;
+        // No lock: prepare already reserved everything the recorded draw uses.
+        admittedDraws.fetch_add(1, std::memory_order_relaxed);
         GeometryTelemetry::counts[GeometryCaptureDraws].fetch_add(1, std::memory_order_relaxed);
         GeometryTelemetry::changedMs[GeometryCaptureDraws].store(GetTickCount64(), std::memory_order_relaxed);
     }
 
     void beforeSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept override
     {
-        std::lock_guard lock(mutex);
-        if (failed || !queue || !lists || !count || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
-        for (auto& frame : frames)
+        if (!queue || !lists || !count || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
+        // The history clear and one clear per slot, queued after the mutex is
+        // released so a recording thread in prepare never waits on the driver.
+        // The host's submission scope (D3D12Observer submit) serializes every
+        // hooked submission, so the clears still reach the queue ahead of these
+        // lists, and nothing acts on clearSubmitted before submitted() has
+        // seen these lists.
+        std::array<ID3D12CommandList*, FrameCount + 1> clears {};
+        UINT clearCount = 0;
         {
-            bool selected = false;
-            for (UINT i = 0; i < count; ++i) selected |= contains(frame, lists[i]);
-            if (!selected || frame.clearSubmitted) continue;
-            if (!historyClearSubmitted)
+            std::lock_guard lock(mutex);
+            if (failed) return;
+            for (auto& frame : frames)
             {
-                historyQueue = queue;
-                ID3D12CommandList* historyClear[] { historyClearCommand.Get() };
-                queue->ExecuteCommandLists(1, historyClear);
-                historyClearSubmitted = true;
+                bool selected = false;
+                for (UINT i = 0; i < count; ++i) selected |= contains(frame, lists[i]);
+                if (!selected || frame.clearSubmitted) continue;
+                if (!historyClearSubmitted)
+                {
+                    historyQueue = queue;
+                    clears[clearCount++] = historyClearCommand.Get();
+                    historyClearSubmitted = true;
+                }
+                else if (historyQueue.Get() != queue)
+                {
+                    failed = true; ++counters.orderingRejected; continue;
+                }
+                if (frame.producerQueue && frame.producerQueue.Get() != queue)
+                {
+                    failed = true; ++counters.orderingRejected; continue;
+                }
+                frame.producerQueue = queue;
+                clears[clearCount++] = frame.clearCommand.Get();
+                frame.clearSubmitted = true;
+                ++counters.capturedFrames;
             }
-            else if (historyQueue.Get() != queue)
-            {
-                failed = true; ++counters.orderingRejected; continue;
-            }
-            if (frame.producerQueue && frame.producerQueue.Get() != queue)
-            {
-                failed = true; ++counters.orderingRejected; continue;
-            }
-            frame.producerQueue = queue;
-            ID3D12CommandList* clear[] { frame.clearCommand.Get() };
-            queue->ExecuteCommandLists(1, clear);
-            frame.clearSubmitted = true;
-            ++counters.capturedFrames;
         }
+        for (UINT i = 0; i < clearCount; ++i)
+            queue->ExecuteCommandLists(1, &clears[i]);
     }
 
     void submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept override
@@ -1247,48 +1511,80 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                  selected->graftDraws };
     }
 
+    // A recording thread in prepare waits for whoever holds the capture mutex.
+    // The longest holders, which bound that wait: this copy (the pinned-entry
+    // count walks the 16,384-entry history table, about 1.4 MB, tens of
+    // microseconds; once or twice per second from the health thread and the
+    // report, and per UI frame while the settings overlay is open),
+    // selectDumpFrame and writeDumpIds (dump requests only), and a prepare
+    // batch on the vertex-history path whose arena is full (each failed
+    // reservation sweeps up to 1,024 entries; graft draws never ask the arena).
+    // Every other holder scans the three slots, one element batch (at most 64
+    // table lookups and upload records; the first also zeroes the draw's
+    // 64-byte records, one per instance) or the 256-entry signal ring;
+    // submitted() adds its fence Signal calls, and beforeSubmit queues its
+    // clears after releasing the mutex.
     PackedMotionCaptureStatus status()
     {
-        std::lock_guard lock(mutex);
-        auto value = counters;
-        value.unknownChunks = unknownChunks;
-        value.topologyChunks = topologyChunks;
-        value.missingChunks = missingChunks;
-        value.deltaMissingChunks = deltaMissingChunks;
-        value.healthy = counters.initialized && !failed;
-        const auto& history = objectMappings.historyStats();
-        value.historyHits = history.hits;
-        value.historyInserted = history.inserted;
-        value.historyReclaimed = history.reclaimed;
-        value.historyRejectedTopology = history.rejectedTopology;
-        value.historySetFull = history.setFull;
-        value.historyArenaFull = history.arenaFull;
-        value.historyArenaReclaimed = history.arenaReclaimed;
-        value.historyArenaFullPages = history.arenaFullPages;
-        value.historyArenaFullPageCount = history.arenaFullPageCount;
-        value.historyLive = objectMappings.liveHistories();
-        value.historyArenaPages = objectMappings.arenaPages();
-        value.historyArenaUsedPages = objectMappings.arenaUsedPages();
-        value.historyArenaLargestFree = objectMappings.arenaLargestFreePages();
-        value.historyFrame = objectMappings.historyFrame();
-        value.historyRetiredFrame = objectMappings.historyRetiredFrame();
-        value.historyPinnedEntries = objectMappings.historyPinnedEntries();
-        value.overflowChunks = overflowChunks;
-        value.spanFamilyEvictions = spanFamilyEvictions;
-        value.frameSpanCount = frameSpanCount;
-        value.admittedSpanFamilyCount = 0;
+        PackedMotionCaptureStatus value;
+        std::array<SpanFamily, SpanFamilyCount> sorted;
         {
-            // Copy the heaviest families only; the full table stays internal so
-            // the periodic line and the control response keep a fixed size.
-            std::array<SpanFamily, SpanFamilyCount> sorted = spanFamilies;
-            std::sort(sorted.begin(), sorted.end(),
-                      [](const SpanFamily& a, const SpanFamily& b) { return a.count > b.count; });
-            for (const auto& entry : sorted)
-            {
-                if (!entry.count || value.admittedSpanFamilyCount >= value.admittedSpans.size()) break;
-                value.admittedSpans[value.admittedSpanFamilyCount++] =
-                    { entry.chunk, entry.mesh, entry.vertices, entry.count };
-            }
+            std::lock_guard lock(mutex);
+            value = counters;
+            value.healthy = counters.initialized && !failed;
+            const auto& history = objectMappings.historyStats();
+            value.historyHits = history.hits;
+            value.historyInserted = history.inserted;
+            value.historyReclaimed = history.reclaimed;
+            value.historyRejectedTopology = history.rejectedTopology;
+            value.historySetFull = history.setFull;
+            value.historyArenaFull = history.arenaFull;
+            value.historyArenaReclaimed = history.arenaReclaimed;
+            value.historyArenaFullPages = history.arenaFullPages;
+            value.historyArenaFullPageCount = history.arenaFullPageCount;
+            value.historyLive = objectMappings.liveHistories();
+            value.historyArenaPages = objectMappings.arenaPages();
+            value.historyArenaUsedPages = objectMappings.arenaUsedPages();
+            value.historyArenaLargestFree = objectMappings.arenaLargestFreePages();
+            value.historyFrame = objectMappings.historyFrame();
+            value.historyRetiredFrame = objectMappings.historyRetiredFrame();
+            value.historyPinnedEntries = objectMappings.historyPinnedEntries();
+            value.overflowChunks = overflowChunks;
+            value.spanFamilyEvictions = spanFamilyEvictions;
+            value.frameSpanCount = frameSpanCount;
+            sorted = spanFamilies;
+        }
+        {
+            std::lock_guard lock(rejectionMutex);
+            value.missingPipeline = rejections.missingPipeline;
+            value.deltaMissingDraws = rejections.deltaMissingDraws;
+            value.topologyRejected = rejections.topologyRejected;
+            value.rasterRejected = rejections.rasterRejected;
+            value.shapeRejected = rejections.shapeRejected;
+            value.viewportRejected = rejections.viewportRejected;
+            value.unknownIdentity = rejections.unknownIdentity;
+            value.unknownOwnerSpan = rejections.unknownOwnerSpan;
+            value.unknownResolve = rejections.unknownResolve;
+            value.unknownOwnerMismatch = rejections.unknownOwnerMismatch;
+            value.unknownFieldMismatch = rejections.unknownFieldMismatch;
+            value.unknownNoArrayGeneration = rejections.unknownNoArrayGeneration;
+            value.unknownChunks = rejections.unknownChunks;
+            value.topologyChunks = rejections.topologyChunks;
+            value.missingChunks = rejections.missingChunks;
+            value.deltaMissingChunks = rejections.deltaMissingChunks;
+        }
+        value.admittedDraws = admittedDraws.load(std::memory_order_relaxed);
+        // Copy the heaviest families only; the full table stays internal so
+        // the periodic line and the control response keep a fixed size. Sorted
+        // after the mutex is released.
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const SpanFamily& a, const SpanFamily& b) { return a.count > b.count; });
+        value.admittedSpanFamilyCount = 0;
+        for (const auto& entry : sorted)
+        {
+            if (!entry.count || value.admittedSpanFamilyCount >= value.admittedSpans.size()) break;
+            value.admittedSpans[value.admittedSpanFamilyCount++] =
+                { entry.chunk, entry.mesh, entry.vertices, entry.count };
         }
         return value;
     }
@@ -1462,21 +1758,24 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
 
     void resetCounters()
     {
-        std::lock_guard lock(mutex);
-        const auto initialized = counters.initialized, healthy = counters.healthy;
-        const auto width = counters.width, height = counters.height;
-        counters = {};
-        counters.initialized = initialized;
-        counters.healthy = healthy;
-        counters.width = width;
-        counters.height = height;
-        unknownChunks = {};
-        topologyChunks = {};
-        missingChunks = {};
-        deltaMissingChunks = {};
-        overflowChunks = {};
-        spanFamilies = {};
-        spanFamilyEvictions = 0;
+        {
+            std::lock_guard lock(mutex);
+            const auto initialized = counters.initialized, healthy = counters.healthy;
+            const auto width = counters.width, height = counters.height;
+            counters = {};
+            counters.initialized = initialized;
+            counters.healthy = healthy;
+            counters.width = width;
+            counters.height = height;
+            overflowChunks = {};
+            spanFamilies = {};
+            spanFamilyEvictions = 0;
+        }
+        {
+            std::lock_guard lock(rejectionMutex);
+            rejections = {};
+        }
+        admittedDraws.store(0, std::memory_order_relaxed);
     }
 };
 

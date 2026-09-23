@@ -12,11 +12,13 @@ New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
 $objectDirectory = $buildDirectory.TrimEnd('\') + '\'
 $common = @('/nologo', '/std:c++20', '/EHsc', '/O2', '/MD', '/D_CRT_SECURE_NO_WARNINGS',
             "/I$PSScriptRoot", "/Fo$objectDirectory")
+# Packed capture: second-consumer frame selection, and draw admission of the
+# real capture on two recording threads (independent device).
 $selectionExe = Join-Path $buildDirectory 'PackedMotionSelection.exe'
-& $compiler @common (Join-Path $PSScriptRoot 'PackedMotionSelection.cpp') "/Fe$selectionExe"
-if ($LASTEXITCODE -ne 0) { throw 'Packed frame selection test build failed' }
+& $compiler @common (Join-Path $PSScriptRoot 'PackedMotionSelection.cpp') "/Fe$selectionExe" /link d3d12.lib d3dcompiler.lib
+if ($LASTEXITCODE -ne 0) { throw 'Packed capture test build failed' }
 & $selectionExe
-if ($LASTEXITCODE -ne 0) { throw 'Packed frame selection contract failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Packed frame selection or concurrent capture admission contract failed' }
 $materialExe = Join-Path $buildDirectory 'MaterialCaptureBlend.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'MaterialCaptureBlend.cpp') "/Fe$materialExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 if ($LASTEXITCODE -ne 0) { throw 'Material capture blend test build failed' }
