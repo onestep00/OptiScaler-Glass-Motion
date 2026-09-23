@@ -183,6 +183,29 @@ std::string hashPrefix(const std::array<std::uint8_t, 32>& hash)
     }
     return text;
 }
+// First eight digest bytes as one big-endian word, so %016llx prints the same
+// 16 hex digits as hashPrefix: the coverage identity of an entry.
+std::uint64_t hashWord(const std::array<std::uint8_t, 32>& hash) noexcept
+{
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        value = value << 8 | hash[i];
+    return value;
+}
+// Every live cache in the process, for the coverage report (readCoverage). The
+// constructor adds a cache and the destructor removes it before the
+// implementation is destroyed, both under this mutex, so a reader never walks
+// a destroyed cache. Never freed: a cache can outlive static destruction.
+struct LiveCaches
+{
+    std::mutex mutex;
+    std::vector<const GeometryPipelineCache*> caches;
+};
+LiveCaches& liveCaches()
+{
+    static auto* value = new LiveCaches;
+    return *value;
+}
 } // namespace
 
 struct GeometryPipelineCache::Impl
@@ -275,9 +298,24 @@ struct GeometryPipelineCache::Impl
                     {
                         auto& entry = *work.entry;
                         bool packedPairMissing = false;
+                        // Coverage identity (report only). The PS container is
+                        // hashed once per job. The VS hash comes from the graft
+                        // lookup below, or from the same helper on the
+                        // vertex-only path, which runs no lookup.
+                        std::array<std::uint8_t, 32> pixelHash {};
+                        HashShaderSha256(entry.description.PS.pShaderBytecode, entry.description.PS.BytecodeLength,
+                                         pixelHash);
+                        entry.pixelHash = hashWord(pixelHash);
                         if (entry.vertexOnlyCapture)
+                        {
+                            std::array<std::uint8_t, 32> vertexHash {};
+                            HashShaderSha256(entry.description.VS.pShaderBytecode,
+                                             entry.description.VS.BytecodeLength, vertexHash);
+                            entry.vertexHash = hashWord(vertexHash);
+                            entry.graftKind = GeometryGraftKind::VertexOnly;
                             status = compiler.createVertexCapture(device.Get(), *work.root->result, entry.description,
                                                                   entry.instrumented, error);
+                        }
                         else
                         {
                             std::string packedError;
@@ -304,9 +342,11 @@ struct GeometryPipelineCache::Impl
                             const bool historyFallback = VertexHistoryFallbackEnabled();
                             HRESULT packedStatus = E_NOTIMPL;
                             bool graftReady = false;
+                            GeometryGraftKind graftKind = GeometryGraftKind::Missing;
                             if (graft && !GraftClassEnabled(graft->supplyClass))
                             {
                                 NoteGeometryGraft(GraftClassDisabled);
+                                graftKind = GeometryGraftKind::ClassDisabled;
                                 packedError = "Native graft supply class " + std::to_string(graft->supplyClass) +
                                               " disabled for vertex shader " + hashPrefix(vertexHash);
                             }
@@ -328,6 +368,7 @@ struct GeometryPipelineCache::Impl
                                                                            packedError, nullptr, nullptr, &camera);
                                 graftReady = SUCCEEDED(packedStatus);
                                 NoteGeometryGraft(graftReady ? GraftCameraOnly : GraftRejected);
+                                graftKind = graftReady ? GeometryGraftKind::CameraOnly : GeometryGraftKind::Rejected;
                                 if (graftReady)
                                     entry.packedArray = entry.packed;
                                 else
@@ -344,6 +385,7 @@ struct GeometryPipelineCache::Impl
                                                                            packedError, nullptr, nullptr, &*graft);
                                 graftReady = SUCCEEDED(packedStatus);
                                 NoteGeometryGraft(graftReady ? GraftReady : GraftRejected);
+                                graftKind = graftReady ? GeometryGraftKind::RootNoArray : GeometryGraftKind::Rejected;
                                 if (!graftReady)
                                 {
                                     entry.packed.Reset();
@@ -365,6 +407,8 @@ struct GeometryPipelineCache::Impl
                                     if (!arrayReady)
                                         entry.packedArray.Reset();
                                     NoteGeometryGraft(arrayReady ? GraftArrayReady : GraftArrayMissing);
+                                    if (arrayReady)
+                                        graftKind = GeometryGraftKind::Root;
                                 }
                                 else
                                     NoteGeometryGraft(GraftArrayMissing);
@@ -400,6 +444,8 @@ struct GeometryPipelineCache::Impl
                                 }
                             }
                             entry.nativeGraft = graftReady;
+                            entry.vertexHash = hashWord(vertexHash);
+                            entry.graftKind = graftKind;
                             {
                                 std::lock_guard lock(mutex);
                                 if (SUCCEEDED(packedStatus) && !packedPairMissing)
@@ -480,12 +526,46 @@ struct GeometryPipelineCache::Impl
     ~Impl() { stop(); }
 };
 
+const char* GeometryGraftKindName(GeometryGraftKind kind) noexcept
+{
+    switch (kind)
+    {
+    case GeometryGraftKind::Pending:
+        return "pending";
+    case GeometryGraftKind::VertexOnly:
+        return "vertex_only";
+    case GeometryGraftKind::Missing:
+        return "missing";
+    case GeometryGraftKind::ClassDisabled:
+        return "class_disabled";
+    case GeometryGraftKind::Rejected:
+        return "rejected";
+    case GeometryGraftKind::CameraOnly:
+        return "camera_only";
+    case GeometryGraftKind::Root:
+        return "root";
+    case GeometryGraftKind::RootNoArray:
+        return "root_noarray";
+    }
+    return "unknown";
+}
+
 GeometryPipelineCache::GeometryPipelineCache(ID3D12Device* device, std::filesystem::path compiler,
                                              GeometryCacheLimits limits)
     : implementation(std::make_unique<Impl>(device, std::move(compiler), limits))
 {
+    auto& live = liveCaches();
+    std::lock_guard lock(live.mutex);
+    live.caches.push_back(this);
 }
-GeometryPipelineCache::~GeometryPipelineCache() = default;
+GeometryPipelineCache::~GeometryPipelineCache()
+{
+    // Before the implementation is destroyed, so the coverage report never
+    // reads a cache whose worker is being joined.
+    auto& live = liveCaches();
+    std::lock_guard lock(live.mutex);
+    std::erase(live.caches, this);
+}
 bool GeometryPipelineCache::compilerThread() { return compilingGeometry; }
 void GeometryPipelineCache::stop() { implementation->stop(); }
 
@@ -717,5 +797,62 @@ bool GeometryPipelineCache::tryCounters(GeometryCacheStats& result) const
     result.packedOpaqueProbeReady = r.counters.packedOpaqueProbeReady;
     result.packedOpaqueProbeRejected = r.counters.packedOpaqueProbeRejected;
     return true; // No allocation or diagnostic-string copy on the UI path.
+}
+void GeometryPipelineCache::readCoverage(std::vector<GeometryPipelineCoverage>& entries)
+{
+    auto& live = liveCaches();
+    std::lock_guard registry(live.mutex);
+    for (const auto* cache : live.caches)
+    {
+        const auto& r = *cache->implementation;
+        std::shared_lock lock(r.mutex);
+        if (r.stopping)
+            continue;
+        entries.reserve(entries.size() + r.pipelines.size());
+        for (const auto& item : r.pipelines)
+        {
+            // Only published entries: their identity fields were written before
+            // ready was set under this mutex and are constant afterwards.
+            if (!item.second->ready)
+                continue;
+            const auto& entry = *item.second->entry;
+            const auto& counts = entry.coverage;
+            GeometryPipelineCoverage value;
+            value.identity = entry.identity;
+            value.vertexHash = entry.vertexHash;
+            value.pixelHash = entry.pixelHash;
+            value.kind = entry.graftKind;
+            value.history = (entry.nativeGraft ? entry.packedHistory : entry.packed).Get() != nullptr;
+            value.draws = counts.draws.load(std::memory_order_relaxed);
+            value.captures = counts.captures.load(std::memory_order_relaxed);
+            value.graft = counts.graft.load(std::memory_order_relaxed);
+            value.array = counts.array.load(std::memory_order_relaxed);
+            value.arrayRejected = counts.arrayRejected.load(std::memory_order_relaxed);
+            entries.push_back(value);
+        }
+    }
+}
+void GeometryPipelineCache::resetCoverage() noexcept
+{
+    try
+    {
+        auto& live = liveCaches();
+        std::lock_guard registry(live.mutex);
+        for (const auto* cache : live.caches)
+        {
+            const auto& r = *cache->implementation;
+            std::shared_lock lock(r.mutex);
+            for (const auto& item : r.pipelines)
+            {
+                auto& counts = item.second->entry->coverage;
+                for (auto* counter : { &counts.draws, &counts.captures, &counts.graft, &counts.array,
+                                       &counts.arrayRejected })
+                    counter->store(0, std::memory_order_relaxed);
+            }
+        }
+    }
+    catch (...)
+    {
+    }
 }
 } // namespace GlassFg

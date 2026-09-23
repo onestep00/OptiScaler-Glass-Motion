@@ -39,6 +39,12 @@ struct NativeGraft
 // draw or API callback.
 std::optional<NativeGraft> FindNativeGraft(const void* vertexShader, std::size_t size,
                                            std::array<std::uint8_t, 32>* hash = nullptr) noexcept;
+// SHA-256 of a shader container, from the same provider as the graft lookup. The
+// pipeline cache calls it for the PS half of a pipeline's coverage identity
+// (GeometryPipelineEntry::pixelHash), because the lookup above hashes only the
+// VS. Returns false and a zeroed digest when the provider or the input is
+// unusable. Same threading rule as FindNativeGraft: compiler worker only.
+bool HashShaderSha256(const void* bytes, std::size_t size, std::array<std::uint8_t, 32>& digest) noexcept;
 // Records in the loaded index; 0 when the index is absent or malformed.
 std::size_t NativeGraftCount() noexcept;
 } // namespace GlassFg

@@ -10,6 +10,7 @@
 #include "GeometryViews.h"
 #include "GeometryHealth.h"
 #include "GeometryGateTrace.h"
+#include "GeometryPipelineCache.h"
 #include "PackedMotionCapture.h"
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
@@ -19,6 +20,8 @@
 #include "GlassHostTiming.h"
 #include <Util.h>
 #include <State.h>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -382,6 +385,48 @@ void ReportGeometryHost(FILE* log) noexcept
                     static_cast<unsigned long long>(census.transparentReason[GateCandidateSamples].load()),
                     static_cast<unsigned long long>(census.transparentReason[GateCandidateTopology].load()),
                     static_cast<unsigned long long>(census.transparentReason[GateCandidateInputLayout].load()));
+            // Per-pipeline coverage since gate=on (GeometryPipelineCache.h). Every
+            // report prints the totals line. The entry lines follow only when a
+            // counter moved since the previous report: most drawn first, at most
+            // 256, pipelines with draws only. vs/ps are the sha256 prefixes of the
+            // native catalog (all-cache-techniques.json). id is the pipeline
+            // column of the dump id table (dump-<serial>-pipelines.txt).
+            {
+                static std::atomic<std::uint64_t> reportedDraws { UINT64_MAX };
+                std::vector<GeometryPipelineCoverage> pipelines;
+                GeometryPipelineCache::readCoverage(pipelines);
+                std::uint64_t draws = 0, captures = 0, drawn = 0, captured = 0;
+                for (const auto& item : pipelines)
+                {
+                    draws += item.draws;
+                    captures += item.captures;
+                    drawn += item.draws != 0 ? 1u : 0u;
+                    captured += item.captures != 0 ? 1u : 0u;
+                }
+                const bool moved = reportedDraws.exchange(draws, std::memory_order_relaxed) != draws;
+                const auto shown = moved ? (std::min)(drawn, std::uint64_t(256)) : 0;
+                fprintf(log, "GEOMETRY_PIPELINES n=%zu drawn=%llu captured=%llu shown=%llu draws=%llu captures=%llu\n",
+                        pipelines.size(), static_cast<unsigned long long>(drawn),
+                        static_cast<unsigned long long>(captured), static_cast<unsigned long long>(shown),
+                        static_cast<unsigned long long>(draws), static_cast<unsigned long long>(captures));
+                std::sort(pipelines.begin(), pipelines.end(),
+                          [](const GeometryPipelineCoverage& a, const GeometryPipelineCoverage& b)
+                          { return a.draws != b.draws ? a.draws > b.draws : a.identity < b.identity; });
+                for (std::size_t i = 0; i < shown; ++i)
+                {
+                    const auto& item = pipelines[i];
+                    fprintf(log,
+                            "GEOMETRY_PIPELINE id=%llu vs=%016llx ps=%016llx kind=%s history=%u draws=%llu "
+                            "captures=%llu graft=%llu array=%llu array_rejected=%llu\n",
+                            static_cast<unsigned long long>(item.identity),
+                            static_cast<unsigned long long>(item.vertexHash),
+                            static_cast<unsigned long long>(item.pixelHash), GeometryGraftKindName(item.kind),
+                            item.history ? 1u : 0u, static_cast<unsigned long long>(item.draws),
+                            static_cast<unsigned long long>(item.captures),
+                            static_cast<unsigned long long>(item.graft), static_cast<unsigned long long>(item.array),
+                            static_cast<unsigned long long>(item.arrayRejected));
+                }
+            }
         }
         const auto identity = ReadGlassMotionIdentityStats();
         fprintf(log,

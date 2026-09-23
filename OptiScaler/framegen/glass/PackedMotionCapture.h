@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d12.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 
@@ -178,4 +179,34 @@ PackedMotionCaptureStatus ReadPackedMotionCaptureStatus() noexcept;
 void ResetPackedMotionCounters() noexcept;
 // Pointer identity only, including a destroyed COM object's former identity.
 void DiscardPackedMotionRecording(const void* command, bool destroyed) noexcept;
+
+// Dump id table (live `dump` diagnostics). It maps the frame-local object ids in
+// dump-<serial>-packrec.bin to the pipelines that drew them. The compose runs
+// select just before it copies a dump frame. The first call arms the capture
+// and returns false, so the dump waits: from then on, every frame slot the
+// capture assigns records `boundary id -> draw` for each admitted element.
+// select returns true for the first frame recorded from its first draw.
+// Usually that is the next frame or the one after. The capture gives up after
+// a bounded number of calls and lets the dump go on with an incomplete table.
+// On true, the capture freezes that frame's table. The dump writer then calls
+// write where it writes the other dump files (the health thread, or the retire
+// path), and the path gets `id pipeline vs16 ps16 kind variant` rows, one per
+// distinct (id, pipeline, variant). Both are function pointers that
+// InitializePackedMotionCapture installs. The compose header therefore links
+// without the capture, as it must in the offline GPU fixtures. A null pointer
+// means no table and no deferral.
+struct PackedMotionDumpIdSummary
+{
+    // Distinct (id, pipeline, variant) rows and distinct object ids written.
+    std::uint32_t records = 0, ids = 0;
+    // Composes that select held this dump back.
+    std::uint32_t deferred = 0;
+    // False when select gave up before a frame was recorded from its first draw.
+    bool complete = false;
+};
+using PackedMotionDumpSelect = bool (*)(std::uint32_t frame) noexcept;
+using PackedMotionDumpWrite = bool (*)(const wchar_t* path, unsigned serial, std::uint32_t frame,
+                                       PackedMotionDumpIdSummary* summary) noexcept;
+inline std::atomic<PackedMotionDumpSelect> packedMotionDumpSelect = nullptr;
+inline std::atomic<PackedMotionDumpWrite> packedMotionDumpWrite = nullptr;
 } // namespace GlassFg

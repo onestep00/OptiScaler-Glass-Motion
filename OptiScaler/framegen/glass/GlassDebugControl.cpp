@@ -316,6 +316,7 @@ void PollGlassDebugControl() noexcept
                         stage.store(0, std::memory_order_relaxed);
                     gate.unseenPipelineProbes.store(0, std::memory_order_relaxed);
                     gate.unseenPipelineDistinct.store(0, std::memory_order_relaxed);
+                    GeometryPipelineCache::resetCoverage();
                     output << "gate=reset\n";
                     continue;
                 }
@@ -324,6 +325,9 @@ void PollGlassDebugControl() noexcept
                     stage.store(0, std::memory_order_relaxed);
                 gate.unseenPipelineProbes.store(0, std::memory_order_relaxed);
                 gate.unseenPipelineDistinct.store(0, std::memory_order_relaxed);
+                // The per-pipeline counters (GEOMETRY_PIPELINES) start over
+                // with the stage counters.
+                GeometryPipelineCache::resetCoverage();
                 GateArm(armed);
                 output << "gate=" << (armed ? "on" : "off") << "\n";
                 continue;

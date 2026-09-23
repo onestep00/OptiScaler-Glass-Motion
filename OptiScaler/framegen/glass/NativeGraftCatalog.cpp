@@ -182,21 +182,29 @@ bool loadBytes(Graft& graft) noexcept
 }
 } // namespace
 
+bool HashShaderSha256(const void* bytes, std::size_t size, std::array<std::uint8_t, 32>& digest) noexcept
+{
+    digest = {};
+    // The provider is opened with the index, so the first hash also loads it.
+    std::call_once(catalog.indexOnce, loadIndex);
+    if (!bytes || !size || size > ULONG_MAX || !catalog.sha256)
+        return false;
+    if (BCRYPT_SUCCESS(BCryptHash(catalog.sha256, nullptr, 0, static_cast<PUCHAR>(const_cast<void*>(bytes)),
+                                  static_cast<ULONG>(size), digest.data(), static_cast<ULONG>(digest.size()))))
+        return true;
+    digest = {};
+    return false;
+}
+
 std::optional<NativeGraft> FindNativeGraft(const void* vertexShader, std::size_t size,
                                            std::array<std::uint8_t, 32>* hash) noexcept
 {
     std::array<std::uint8_t, 32> digest {};
+    const bool hashed = HashShaderSha256(vertexShader, size, digest);
     if (hash)
         *hash = digest;
-    std::call_once(catalog.indexOnce, loadIndex);
-    if (!vertexShader || !size || size > ULONG_MAX || !catalog.sha256)
+    if (!hashed)
         return std::nullopt;
-    if (!BCRYPT_SUCCESS(BCryptHash(catalog.sha256, nullptr, 0,
-                                   static_cast<PUCHAR>(const_cast<void*>(vertexShader)), static_cast<ULONG>(size),
-                                   digest.data(), static_cast<ULONG>(digest.size()))))
-        return std::nullopt;
-    if (hash)
-        *hash = digest;
     const auto found = std::lower_bound(catalog.grafts.begin(), catalog.grafts.end(), digest,
                                         [](const Graft& graft, const auto& key) { return graft.sha < key; });
     if (found == catalog.grafts.end() || found->sha != digest || !loadBytes(*found))

@@ -185,6 +185,11 @@ class PackedMotionGpu
     UINT64 dumpValue = 0;
     unsigned dumpSerial = 0, dumpFrame = 0;
     bool dumpPending = false;
+    // Object-id side of the written dump, reported in dump-<serial>.txt:
+    // whether -packrec.bin was written, and the id table the capture wrote
+    // beside it (PackedMotionCapture.h; zero when no capture is installed).
+    bool dumpRecordsWritten = false, dumpIdsWritten = false;
+    PackedMotionDumpIdSummary dumpIdSummary {};
     // Steady-clock stamp of the compose that carries the pending dump. A dump
     // whose compose never completes is abandoned instead of being retried for
     // the rest of the session.
@@ -665,6 +670,16 @@ class PackedMotionGpu
         return dumpPending || dumpRequests.load(std::memory_order_relaxed) != 0;
     }
 
+    // Object-id table gate for a dump of `frame` (PackedMotionCapture.h). The
+    // capture may hold the dump back until it has recorded a whole frame, for a
+    // bounded number of composes. Without the hook (offline fixtures, no
+    // capture) there is no table and no delay.
+    static bool dumpIdsReady(std::uint32_t frame) noexcept
+    {
+        const auto select = packedMotionDumpSelect.load(std::memory_order_acquire);
+        return !select || select(frame);
+    }
+
     void setDumpColor(ID3D12Resource* resource, D3D12_RESOURCE_STATES state) noexcept
     {
         if (!resource)
@@ -921,6 +936,8 @@ class PackedMotionGpu
         const auto motionStride = readbackFootprint[0].Footprint.RowPitch;
         WriteMotion32F((base + L"-mv.f32").c_str(), readbackRow(static_cast<const std::byte*>(data[0]), 0, 0),
                        width, height, motionStride, dumpSerial, dumpFrame);
+        dumpRecordsWritten = dumpIdsWritten = false;
+        dumpIdSummary = {};
         if (kDumpEngineInputs)
         {
             writeMotion(base + L"-original-mv.ppm", static_cast<const std::byte*>(data[3]));
@@ -932,6 +949,20 @@ class PackedMotionGpu
             if (logFile)
                 std::fprintf(logFile, "PACKED_RAW %s serial=%u frame=%u path=%ls-packrec.bin\n",
                     rawWritten ? "written" : "failed", dumpSerial, dumpFrame, base.c_str());
+            dumpRecordsWritten = rawWritten;
+            // The boundary-id -> pipeline table of the same frame, so the object
+            // ids in -packrec.bin can be grouped by pipeline offline.
+            if (const auto writeIds = packedMotionDumpWrite.load(std::memory_order_acquire))
+            {
+                dumpIdsWritten = writeIds((base + L"-pipelines.txt").c_str(), dumpSerial, dumpFrame, &dumpIdSummary);
+                if (logFile)
+                    std::fprintf(logFile,
+                                 "PACKED_IDS %s serial=%u frame=%u records=%u ids=%u complete=%u deferred=%u "
+                                 "path=%ls-pipelines.txt\n",
+                                 dumpIdsWritten ? "written" : "failed", dumpSerial, dumpFrame, dumpIdSummary.records,
+                                 dumpIdSummary.ids, dumpIdSummary.complete ? 1u : 0u, dumpIdSummary.deferred,
+                                 base.c_str());
+            }
             WriteMotion32F((base + L"-original-mv.f32").c_str(),
                            readbackRow(static_cast<const std::byte*>(data[3]), 0, 0), width, height, motionStride,
                            dumpSerial, dumpFrame);
@@ -1459,6 +1490,17 @@ class PackedMotionGpu
         std::fprintf(file, "color=%u format=%u extent=%ux%u\n", dumpColorCopied ? 1u : 0u,
                      unsigned(dumpColorDescription.Format), unsigned(dumpColorDescription.Width),
                      unsigned(dumpColorDescription.Height));
+        // Object-id side of the dump. packrec=1: -packrec.bin holds the exact
+        // records. pipelines=1: -pipelines.txt maps their object ids to
+        // pipelines (PackedMotionCapture.h). complete=0 means the capture could
+        // not record a whole frame for it. deferred counts the composes the table
+        // held this dump back (bounded). A dump without this line predates both
+        // files.
+        std::fprintf(file,
+                     "packrec=%u pipelines=%u pipeline_records=%u pipeline_ids=%u pipelines_complete=%u "
+                     "pipelines_deferred=%u\n",
+                     dumpRecordsWritten ? 1u : 0u, dumpIdsWritten ? 1u : 0u, dumpIdSummary.records, dumpIdSummary.ids,
+                     dumpIdSummary.complete ? 1u : 0u, dumpIdSummary.deferred);
         if (counterData)
         {
             const auto* value = reinterpret_cast<const unsigned*>(counterData);
@@ -1711,8 +1753,11 @@ class PackedMotionGpu
         // buffers already exist (allocated by the health thread), and no
         // earlier compose is still executing. A request that cannot start
         // stays counted and is picked up by a later compose instead of being
-        // recorded into a compose that is already in flight.
-        if (!dumpPending && dumpRequests.load(std::memory_order_acquire) && readbackReady() && composeReady())
+        // recorded into a compose that is already in flight. The capture's
+        // object-id table can hold it back as well, by the frame or two that a
+        // complete table takes and never more than its own bound (dumpIdsReady).
+        if (!dumpPending && dumpRequests.load(std::memory_order_acquire) && readbackReady() && composeReady() &&
+            dumpIdsReady(packed.frame))
         {
             transition(command, motion, outputMotionState, D3D12_RESOURCE_STATE_COPY_SOURCE);
             transition(command, depth, outputDepthState, D3D12_RESOURCE_STATE_COPY_SOURCE);

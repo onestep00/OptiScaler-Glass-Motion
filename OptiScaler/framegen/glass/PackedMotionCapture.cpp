@@ -94,9 +94,26 @@ bool sameOwner(const GeometryDrawIdentity& a, const GeometryDrawIdentity& b)
 class Capture final : public GeometryDrawCaptureOwner
 {
     struct Recording { ID3D12GraphicsCommandList* command = nullptr; std::uint64_t epoch = 0; };
+    // Dump id table row (PackedMotionCapture.h): a boundary ID and the constant
+    // index of the draw that admitted the element.
+    struct DumpId { std::uint16_t id, constant; };
+    // Draw variant of a dump id table row, by constant index.
+    enum DumpVariant : std::uint8_t { DumpVariantHistory, DumpVariantRoot, DumpVariantArray };
+    static const char* dumpVariantName(std::uint8_t variant) noexcept
+    {
+        return variant == DumpVariantRoot ? "root" : variant == DumpVariantArray ? "array" : "history";
+    }
     struct Frame
     {
         std::uint32_t number = 0, mappingUsed = 0, constantsUsed = 0;
+        // Dump id table (diagnostics). idsRecording is set when the slot is
+        // assigned while a dump request has the table armed, so a recording slot
+        // holds every element its frame admitted. Kept beside the counters every
+        // admitted element already touches. The rows are ids[0, idCount); the
+        // constant index of a row names its draw, whose entry and variant are
+        // pipelines[] and idVariants[] at that index.
+        bool idsRecording = false;
+        std::uint32_t idCount = 0;
         GeometryInstance* mappings = nullptr;
         std::byte* constants = nullptr;
         ComPtr<ID3D12Resource> mapping, constantBuffer, capture;
@@ -120,6 +137,9 @@ class Capture final : public GeometryDrawCaptureOwner
         std::uint64_t submitBatch = 0;
         // Draws recorded into this frame that used a native graft variant.
         std::uint64_t graftDraws = 0;
+        // Dump id table rows and per-draw variants (idsRecording above).
+        std::array<DumpId, MappingCapacity> ids;
+        std::array<std::uint8_t, ConstantCapacity> idVariants;
         bool clearSubmitted = false, syncPending = false;
     };
     struct FgCommand
@@ -190,6 +210,32 @@ class Capture final : public GeometryDrawCaptureOwner
     std::uint64_t nextProducer = 0, nextConsumer = 0;
     MotionFramePair framePair;
     bool failed = false, historyClearSubmitted = false;
+    // Dump id table state (PackedMotionCapture.h), under mutex. idsArmed means a
+    // dump request asked for a table and no frame has been frozen for it yet.
+    // Slots assigned meanwhile record. idsArmedFrames ends the recording when the
+    // compose stops asking (session retired, dump aborted). idsDeferred counts
+    // the composes this request has held back. A complete table normally
+    // needs one or two engine frames. Under multi-frame generation each
+    // engine frame is composed up to four times, so 32 composes cover about
+    // eight engine frames.
+    static constexpr unsigned DumpIdMaxDeferred = 32, DumpIdArmedFrames = 64;
+    bool idsArmed = false;
+    unsigned idsArmedFrames = 0, idsDeferred = 0;
+    struct DumpIdPipeline
+    {
+        std::uint64_t identity = 0, vertexHash = 0, pixelHash = 0;
+        GeometryGraftKind kind = GeometryGraftKind::Pending;
+        std::uint8_t variant = DumpVariantHistory;
+    };
+    // The frozen table of the frame being dumped. It holds plain copies, so the
+    // slot can be reused before the dump writer runs.
+    struct DumpIdSnapshot
+    {
+        std::uint32_t frame = 0, count = 0, pipelines = 0, deferred = 0;
+        bool valid = false, complete = false;
+        std::array<DumpId, MappingCapacity> ids;
+        std::array<DumpIdPipeline, ConstantCapacity> pipeline;
+    } idSnapshot;
 
     static void noteChunk(std::array<PackedMotionCaptureStatus::ChunkCount, 16>& list,
                           std::uint32_t chunk) noexcept
@@ -357,6 +403,16 @@ class Capture final : public GeometryDrawCaptureOwner
         frameSpanCount = 0;
         return true;
     }
+    // A newly assigned slot records its dump ids when the table is armed at
+    // its first draw (PackedMotionCapture.h). The armed state ends on its own
+    // if the compose stopped asking for a table.
+    void assignIds(Frame& value)
+    {
+        value.idCount = 0;
+        if (idsArmed && ++idsArmedFrames > DumpIdArmedFrames)
+            idsArmed = false;
+        value.idsRecording = idsArmed;
+    }
     Frame* frame(std::uint32_t number)
     {
         for (auto& value : frames)
@@ -373,6 +429,7 @@ class Capture final : public GeometryDrawCaptureOwner
                 value.syncFence.Reset();
                 value.producerValue = value.consumerValue = value.syncValue = value.graftDraws = 0;
                 value.clearSubmitted = value.syncPending = false;
+                assignIds(value);
                 return &value;
             }
         // Stale-slot reclaim. A recorded render list that is never reset again,
@@ -396,6 +453,7 @@ class Capture final : public GeometryDrawCaptureOwner
             value.syncFence.Reset();
             value.producerValue = value.consumerValue = value.syncValue = value.graftDraws = 0;
             value.clearSubmitted = value.syncPending = false;
+            assignIds(value);
             return &value;
         }
         ++counters.slotBusy;
@@ -565,6 +623,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     {
         std::unique_lock lock(mutex, std::try_to_lock);
         const bool gate = GateArmed();
+        // Per-pipeline coverage (GEOMETRY_PIPELINES, GeometryHost.cpp). It is
+        // counted only while the gate trace is armed, like the stage counters.
+        if (gate && pipeline)
+            pipeline->coverage.draws.fetch_add(1, std::memory_order_relaxed);
         if (!lock)
         {
             if (gate) GateNote(GatePrepareLock);
@@ -645,6 +707,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 else
                 {
                     NoteGeometryGraft(GraftArrayRejected);
+                    if (gate)
+                        pipeline->coverage.arrayRejected.fetch_add(1, std::memory_order_relaxed);
                     return false;
                 }
                 graftDraw = false;
@@ -801,6 +865,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     if (!pipeline->packedArray)
                     {
                         NoteGeometryGraft(GraftArrayRejected);
+                        if (gate)
+                            pipeline->coverage.arrayRejected.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
                     packedPipeline = pipeline->packedArray.Get();
@@ -849,6 +915,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     writeStaged();
                 staged[stagedCount++] = { span.first + ordinal, allocation.history.base, allocation.history.vertices,
                                           allocation.history.generation, allocation.boundaryId };
+                // Dump id table: this draw takes constant index constantsUsed
+                // below, once any element is admitted, and no other draw can
+                // take it first because this one holds the mutex.
+                if (frameSlot->idsRecording && frameSlot->idCount < frameSlot->ids.size())
+                    frameSlot->ids[frameSlot->idCount++] = { std::uint16_t(allocation.boundaryId),
+                                                             std::uint16_t(frameSlot->constantsUsed) };
                 any = true;
                 if (gate && log && gateAdmitLines < 64)
                 {
@@ -873,6 +945,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         }
         const auto constantIndex = frameSlot->constantsUsed++;
         frameSlot->pipelines[constantIndex] = pipeline;
+        if (frameSlot->idsRecording)
+            frameSlot->idVariants[constantIndex] = graftDraw        ? DumpVariantRoot
+                                                   : graftArrayDraw ? DumpVariantArray
+                                                                    : DumpVariantHistory;
         const auto depthFunction = pipeline->description.DepthStencilState.DepthFunc;
         const bool reverse = depthFunction == D3D12_COMPARISON_FUNC_GREATER ||
                              depthFunction == D3D12_COMPARISON_FUNC_GREATER_EQUAL;
@@ -900,6 +976,15 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
             ++frameSlot->graftDraws;
             ++counters.historyBypassed;
+        }
+        if (gate)
+        {
+            auto& coverage = pipeline->coverage;
+            coverage.captures.fetch_add(1, std::memory_order_relaxed);
+            if (graftDraw)
+                coverage.graft.fetch_add(1, std::memory_order_relaxed);
+            else if (graftArrayDraw)
+                coverage.array.fetch_add(1, std::memory_order_relaxed);
         }
         // Crash attribution for the replay path. Sparse on purpose: one line per
         // few hundred frames keeps the log bounded while still proving that the
@@ -1248,6 +1333,133 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                  selected->graftDraws };
     }
 
+    // Dump id table, compose side (PackedMotionCapture.h). The compose calls
+    // this on the frame generation thread when it would copy `number` for a
+    // pending dump. A slot that recorded from its first draw holds the complete
+    // table. The first call for a request arms the recording and holds the
+    // dump back. After DumpIdMaxDeferred calls the dump goes ahead with an
+    // empty, incomplete table, so a capture that never records again cannot
+    // stall a dump.
+    bool selectDumpFrame(std::uint32_t number)
+    {
+        std::lock_guard lock(mutex);
+        const Frame* slot = nullptr;
+        for (const auto& value : frames)
+            if (value.number == number)
+                slot = &value;
+        const bool complete = slot && slot->idsRecording;
+        if (!complete)
+        {
+            if (!idsArmed)
+            {
+                idsArmed = true;
+                idsArmedFrames = idsDeferred = 0;
+            }
+            if (idsDeferred < DumpIdMaxDeferred)
+            {
+                ++idsDeferred;
+                return false;
+            }
+        }
+        // Freeze: plain copies, since the slot is reused long before the
+        // health thread writes the dump.
+        auto& snapshot = idSnapshot;
+        snapshot.frame = number;
+        snapshot.complete = complete;
+        snapshot.deferred = idsDeferred;
+        snapshot.count = snapshot.pipelines = 0;
+        if (complete)
+        {
+            snapshot.count = slot->idCount;
+            snapshot.pipelines = slot->constantsUsed;
+            std::copy_n(slot->ids.data(), snapshot.count, snapshot.ids.data());
+            for (unsigned i = 0; i < snapshot.pipelines; ++i)
+            {
+                const auto& entry = slot->pipelines[i];
+                snapshot.pipeline[i] = entry ? DumpIdPipeline { entry->identity, entry->vertexHash, entry->pixelHash,
+                                                                entry->graftKind, slot->idVariants[i] }
+                                             : DumpIdPipeline {};
+            }
+        }
+        snapshot.valid = true;
+        idsArmed = false;
+        idsDeferred = 0;
+        if (log)
+        {
+            std::fprintf(log, "PACKED_IDS frozen frame=%u elements=%u draws=%u complete=%u deferred=%u\n", number,
+                         snapshot.count, snapshot.pipelines, complete ? 1u : 0u, snapshot.deferred);
+            std::fflush(log);
+        }
+        return true;
+    }
+
+    // Dump id table, writer side: the table frozen for `number`, as
+    // `id pipeline vs16 ps16 kind variant` rows, one per distinct
+    // (id, pipeline, variant). Runs where the dump files are written. The
+    // capture mutex covers only the copy out of the snapshot.
+    bool writeDumpIds(const wchar_t* path, unsigned serial, std::uint32_t number, PackedMotionDumpIdSummary* summary)
+    {
+        std::vector<DumpId> ids(MappingCapacity);
+        std::vector<DumpIdPipeline> pipelines(ConstantCapacity);
+        std::uint32_t count = 0, deferred = 0;
+        bool complete = false;
+        {
+            std::lock_guard lock(mutex);
+            if (!path || !idSnapshot.valid || idSnapshot.frame != number)
+                return false;
+            idSnapshot.valid = false;
+            count = idSnapshot.count;
+            deferred = idSnapshot.deferred;
+            complete = idSnapshot.complete;
+            std::copy_n(idSnapshot.ids.data(), count, ids.data());
+            std::copy_n(idSnapshot.pipeline.data(), idSnapshot.pipelines, pipelines.data());
+            pipelines.resize(idSnapshot.pipelines);
+        }
+        struct Row
+        {
+            std::uint32_t id;
+            const DumpIdPipeline* pipeline;
+        };
+        std::vector<Row> rows;
+        rows.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i)
+            if (ids[i].constant < pipelines.size())
+                rows.push_back({ ids[i].id, &pipelines[ids[i].constant] });
+        const auto before = [](const Row& a, const Row& b)
+        {
+            if (a.id != b.id)
+                return a.id < b.id;
+            if (a.pipeline->identity != b.pipeline->identity)
+                return a.pipeline->identity < b.pipeline->identity;
+            return a.pipeline->variant < b.pipeline->variant;
+        };
+        std::sort(rows.begin(), rows.end(), before);
+        rows.erase(std::unique(rows.begin(), rows.end(),
+                               [&](const Row& a, const Row& b) { return !before(a, b) && !before(b, a); }),
+                   rows.end());
+        std::uint32_t distinct = 0;
+        for (std::size_t i = 0; i < rows.size(); ++i)
+            distinct += i == 0 || rows[i].id != rows[i - 1].id ? 1u : 0u;
+        FILE* file = _wfopen(path, L"wb");
+        if (!file)
+            return false;
+        std::fprintf(file, "PIPELINES serial=%u frame=%u records=%zu ids=%u complete=%u deferred=%u\n", serial,
+                     number, rows.size(), distinct, complete ? 1u : 0u, deferred);
+        std::fprintf(file, "# id pipeline vs16 ps16 kind variant\n");
+        for (const auto& row : rows)
+            std::fprintf(file, "%u %llu %016llx %016llx %s %s\n", row.id,
+                         static_cast<unsigned long long>(row.pipeline->identity),
+                         static_cast<unsigned long long>(row.pipeline->vertexHash),
+                         static_cast<unsigned long long>(row.pipeline->pixelHash),
+                         GeometryGraftKindName(row.pipeline->kind), dumpVariantName(row.pipeline->variant));
+        const bool written = !std::ferror(file);
+        if (std::fclose(file) != 0 || !written)
+            return false;
+        if (summary)
+            *summary = { static_cast<std::uint32_t>(rows.size()), distinct, deferred, complete };
+        return true;
+    }
+
     void resetCounters()
     {
         std::lock_guard lock(mutex);
@@ -1269,6 +1481,34 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
 };
 
 std::atomic<Capture*> active = nullptr;
+
+// Dump id table hooks (PackedMotionCapture.h). A missing capture never holds a
+// dump back, and a failure in the table never blocks the dump either.
+bool SelectPackedMotionDumpFrame(std::uint32_t frame) noexcept
+{
+    try
+    {
+        auto* capture = active.load(std::memory_order_acquire);
+        return !capture || capture->selectDumpFrame(frame);
+    }
+    catch (...)
+    {
+        return true;
+    }
+}
+bool WritePackedMotionDumpIds(const wchar_t* path, unsigned serial, std::uint32_t frame,
+                              PackedMotionDumpIdSummary* summary) noexcept
+{
+    try
+    {
+        auto* capture = active.load(std::memory_order_acquire);
+        return capture && capture->writeDumpIds(path, serial, frame, summary);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
 } // namespace
 
 bool InitializePackedMotionCapture(ID3D12Device* device, std::uint32_t width, std::uint32_t height, FILE* log,
@@ -1289,6 +1529,8 @@ bool InitializePackedMotionCapture(ID3D12Device* device, std::uint32_t width, st
             return false;
         }
         active.store(capture, std::memory_order_release);
+        packedMotionDumpSelect.store(SelectPackedMotionDumpFrame, std::memory_order_release);
+        packedMotionDumpWrite.store(WritePackedMotionDumpIds, std::memory_order_release);
         if (log)
         {
             std::fprintf(log, "PACKED_CAPTURE ready=1 width=%u height=%u frames=%u mapping=%u history_vertices=%u\n",

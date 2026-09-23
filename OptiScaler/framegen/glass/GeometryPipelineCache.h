@@ -1,5 +1,6 @@
 #pragma once
 #include "GeometryPipeline.h"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -7,6 +8,25 @@
 
 namespace GlassFg
 {
+// Native graft outcome of one pipeline job. The compiler worker decides it once
+// per job (GeometryPipelineCache.cpp) and it is final for the entry. It exists
+// for the coverage report only: the draw path reads nativeGraft and the variant
+// pointers, never this value.
+enum class GeometryGraftKind : std::uint8_t
+{
+    Pending,       // The job has not finished.
+    VertexOnly,    // Explicit vertex-only capture entry; no graft lookup ran.
+    Missing,       // No graft record for the VS.
+    ClassDisabled, // Graft record whose supply class is disabled.
+    Rejected,      // Graft record whose packed variant failed to build.
+    CameraOnly,    // Camera-only graft: one variant serves every draw.
+    Root,          // Root graft plus the camera-only array variant.
+    RootNoArray,   // Root graft without an array variant.
+};
+// Lower-case log name: pending, vertex_only, missing, class_disabled, rejected,
+// camera_only, root, root_noarray.
+const char* GeometryGraftKindName(GeometryGraftKind kind) noexcept;
+
 struct GeometryPipelineEntry
 {
     std::shared_ptr<const GeometryRoot> root;
@@ -38,9 +58,34 @@ struct GeometryPipelineEntry
     // MotionMatrix supply once per draw proxy, so the packed capture admits a
     // root variant only for a single-instance draw with a non-array identity.
     bool nativeGraft = false;
+    // Coverage identity, written by the compiler worker before the entry is
+    // published and constant afterwards. Each holds the first eight bytes of the
+    // SHA-256 of the original VS or PS container, most significant byte first.
+    // %016llx therefore prints the 16-hex-digit prefix of the native catalog's
+    // programs[].sha256 (all-cache-techniques.json). Zero when hashing failed.
+    std::uint64_t vertexHash = 0, pixelHash = 0;
+    GeometryGraftKind graftKind = GeometryGraftKind::Pending;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputs;
+    // Per-pipeline coverage for the GEOMETRY_PIPELINES report. The packed
+    // capture adds to these with relaxed atomics, and only while the gate trace
+    // is armed (GateArmed). gate=on and gate=reset zero them. No render path
+    // reads them. They are kept last in the entry, away from the fields the
+    // draw path reads.
+    struct Coverage
+    {
+        // draws: prepare calls that carried this entry.
+        // captures: those recorded with a packed variant (root graft, camera-only
+        //   array or vertex history).
+        // graft, array: the captures that used the root graft and the
+        //   camera-only array variant.
+        // arrayRejected: array or multi-instance draws of a graft entry that has
+        //   neither an array nor a history variant. They keep the engine's
+        //   motion.
+        std::atomic<std::uint64_t> draws { 0 }, captures { 0 }, graft { 0 }, array { 0 }, arrayRejected { 0 };
+    };
+    mutable Coverage coverage;
 };
 
 struct GeometryCacheLimits
@@ -59,6 +104,18 @@ struct GeometryCacheStats
     // probe-eligible pipelines that were left out afterwards (registration cap).
     std::uint64_t packedOpaqueProbeReady = 0, packedOpaqueProbeRejected = 0;
     std::string lastError, lastPackedError;
+};
+
+// One published entry as the coverage report reads it. The counters are relaxed
+// snapshots of GeometryPipelineEntry::coverage.
+struct GeometryPipelineCoverage
+{
+    std::uint64_t identity = 0, vertexHash = 0, pixelHash = 0;
+    std::uint64_t draws = 0, captures = 0, graft = 0, array = 0, arrayRejected = 0;
+    GeometryGraftKind kind = GeometryGraftKind::Pending;
+    // A vertex-history variant exists: `packed` itself when no graft is
+    // usable, `packedHistory` for the array draws of a graft entry.
+    bool history = false;
 };
 
 // Process-wide publish of the diagnostic opaque probe counters. The control
@@ -97,6 +154,14 @@ class GeometryPipelineCache
     // May join the compiler thread. Do not call from a render/API callback.
     void stop();
     static bool compilerThread();
+    // Coverage report (diagnostics). The report thread cannot reach the cache
+    // that GeometryCreation owns, so every cache registers itself for the
+    // lifetime of the object. readCoverage appends one record per published
+    // entry of every live cache that has not stopped (in the product, the one
+    // GeometryCreation cache). It takes each cache's shared lock once.
+    // resetCoverage zeroes the per-entry counters (gate=on, gate=reset).
+    static void readCoverage(std::vector<GeometryPipelineCoverage>& entries);
+    static void resetCoverage() noexcept;
 
   private:
     struct Impl;
