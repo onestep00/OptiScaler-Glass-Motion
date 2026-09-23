@@ -8,16 +8,24 @@ namespace GlassFg
 {
 namespace
 {
-// Bounded, frame-scoped table. Entries are replaced by proxy, so a live object
-// never accumulates duplicates. The scene can show more than 64 grouped arrays
-// at once, and an evicted proxy only loses coverage (its elements stay
-// unresolved), never correctness.
-constexpr unsigned Capacity = 256;
+// Entries are replaced by proxy, so a live object never accumulates
+// duplicates, and an evicted proxy only loses coverage (its elements stay
+// unresolved), never correctness. The table must hold the whole live
+// population: a 2026-09-23 session had 1,526 live grouped arrays with a pool
+// start, and the grouped update republishes an array only when its selection
+// changes (about 1 of 580 updates per frame), so a still camera never
+// republishes an array that lost its slot. With 256 slots the order of the
+// post-load burst (300-400 new arrays) decided whether the spawn view stayed
+// resident, and the same scene hit 3% or 99.9% between otherwise identical
+// builds.
+constexpr unsigned Capacity = 4096;
 GlassArrayMappingEntry entries[Capacity] {};
-// Round-robin eviction cursor. Evicting a fixed slot kept whichever proxies
-// filled the table first for the whole session; a scene whose live arrays
-// were published later then missed every lookup (2026-09-23, hits=0 with
-// 1,259 evictions per 1,801 publishes).
+// Slots are replaced but never freed, so the occupied ones are [0, occupied).
+unsigned occupied = 0;
+// Round-robin eviction cursor, used only once every slot is occupied. Evicting
+// a fixed slot kept whichever proxies filled the table first for the whole
+// session; a scene whose live arrays were published later then missed every
+// lookup (2026-09-23, hits=0 with 1,259 evictions per 1,801 publishes).
 unsigned evictionCursor = 0;
 std::mutex mutex;
 std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 }, misses { 0 }, outOfRange { 0 },
@@ -29,6 +37,123 @@ std::atomic<std::uint64_t> publishGeneration { 0 };
 unsigned publishProbeCount = 0, lookupProbeCount = 0;
 GlassArrayMappingStats::Probe publishProbe[GlassArrayMappingStats::ProbeCapacity] {};
 GlassArrayMappingStats::Probe lookupProbe[GlassArrayMappingStats::ProbeCapacity] {};
+
+// Key -> slot indexes over `entries`, guarded by the same mutex, so neither
+// the proxy lookup nor the range-only fallback scans the table. Power-of-two
+// buckets, at most half full, linear probing. Deletion shifts the rest of the
+// probe run back instead of leaving a tombstone, so runs stay as short as the
+// resident keys alone make them, however long the eviction churn has run. A
+// bucket holds slot + 1 (0 = empty, so the arrays start zeroed); the key is
+// read back from the slot's entry.
+constexpr unsigned IndexSize = 2 * Capacity, IndexMask = IndexSize - 1;
+static_assert((IndexSize & IndexMask) == 0 && Capacity < 0xffff);
+
+// The module's usual 64-bit mix (as in GeometrySourceOwners.h). Heap pointers
+// with a fixed allocation stride and dense pool ordinals both spread like
+// random keys; plain Fibonacci hashing clustered on some strides (a 0x1c0
+// stride averaged 9 probes per hit at 4,096 keys).
+unsigned home(std::uint64_t key) noexcept
+{
+    key ^= key >> 33;
+    key *= 0xff51afd7ed558ccdull;
+    key ^= key >> 33;
+    return static_cast<unsigned>(key) & IndexMask;
+}
+std::uint64_t proxyKey(unsigned slot) noexcept { return entries[slot].proxy; }
+std::uint64_t startKey(unsigned slot) noexcept { return entries[slot].outputStart; }
+
+template <std::uint64_t (*KeyOf)(unsigned)>
+struct SlotIndex
+{
+    std::uint16_t buckets[IndexSize] {};
+
+    // Bucket holding `key`, or IndexSize when no indexed slot has it. The run
+    // always ends, because at least half of the buckets are empty.
+    unsigned find(std::uint64_t key) const noexcept
+    {
+        for (unsigned i = home(key); buckets[i]; i = (i + 1) & IndexMask)
+            if (KeyOf(buckets[i] - 1u) == key)
+                return i;
+        return IndexSize;
+    }
+    unsigned slotAt(unsigned bucket) const noexcept { return buckets[bucket] - 1u; }
+    // The slot's key must not be indexed yet.
+    void insert(unsigned slot) noexcept
+    {
+        unsigned i = home(KeyOf(slot));
+        while (buckets[i])
+            i = (i + 1) & IndexMask;
+        buckets[i] = static_cast<std::uint16_t>(slot + 1);
+    }
+    void erase(unsigned hole) noexcept
+    {
+        for (unsigned i = (hole + 1) & IndexMask; buckets[i]; i = (i + 1) & IndexMask)
+        {
+            // A later key moves into the hole when the hole lies on its probe
+            // run, i.e. its home bucket is not after the hole.
+            if (((i - home(KeyOf(buckets[i] - 1u))) & IndexMask) >= ((i - hole) & IndexMask))
+            {
+                buckets[hole] = buckets[i];
+                hole = i;
+            }
+        }
+        buckets[hole] = 0;
+    }
+};
+SlotIndex<proxyKey> byProxy;
+// Keyed by pool start; the bucket holds the head of that start's list below.
+SlotIndex<startKey> byStart;
+// Entries that claim one pool start, ascending by count. The ranged allocator
+// recycles slices, so a newer array can claim the start of an entry that is
+// still resident. The range-only candidates for a packet (count <= its count)
+// are a prefix of this order, so the fallback reads at most two nodes. Values
+// are slot + 1, 0 = none.
+std::uint16_t startNext[Capacity] {}, startPrev[Capacity] {};
+
+// The slot's entry must already be written.
+void linkStart(unsigned slot) noexcept
+{
+    const auto& entry = entries[slot];
+    const unsigned bucket = byStart.find(entry.outputStart);
+    unsigned prev = 0, next = 0;
+    if (bucket == IndexSize)
+        byStart.insert(slot);
+    else
+    {
+        next = byStart.buckets[bucket];
+        while (next && entries[next - 1].count <= entry.count)
+        {
+            prev = next;
+            next = startNext[next - 1];
+        }
+        if (!prev)
+            byStart.buckets[bucket] = static_cast<std::uint16_t>(slot + 1);
+    }
+    startPrev[slot] = static_cast<std::uint16_t>(prev);
+    startNext[slot] = static_cast<std::uint16_t>(next);
+    if (prev)
+        startNext[prev - 1] = static_cast<std::uint16_t>(slot + 1);
+    if (next)
+        startPrev[next - 1] = static_cast<std::uint16_t>(slot + 1);
+}
+
+// Must run while the slot still holds the entry it was linked with.
+void unlinkStart(unsigned slot) noexcept
+{
+    const unsigned prev = startPrev[slot], next = startNext[slot];
+    if (next)
+        startPrev[next - 1] = static_cast<std::uint16_t>(prev);
+    if (prev)
+    {
+        startNext[prev - 1] = static_cast<std::uint16_t>(next);
+        return;
+    }
+    const unsigned bucket = byStart.find(entries[slot].outputStart);
+    if (next)
+        byStart.buckets[bucket] = static_cast<std::uint16_t>(next);
+    else
+        byStart.erase(bucket);
+}
 
 // One grouped array is queried once per element draw, so a per-thread copy of
 // the last few looked-up arrays removes almost all lock acquisitions from the
@@ -49,17 +174,20 @@ struct ReaderCache
 constexpr unsigned ReaderCacheWays = 8;
 thread_local ReaderCache readerCache[ReaderCacheWays];
 
-std::uint32_t cachedIndex(const ReaderCache& cache, std::uint32_t ordinal) noexcept
+// Source index of `ordinal` in a published slice, UINT32_MAX outside the lanes
+// the recording wrote (count never exceeds 64, see PublishArrayMapping). The
+// locked and cached paths share it, so a cached entry answers exactly as the
+// table did.
+std::uint32_t mappedIndex(std::uint32_t start, std::uint32_t count, const std::uint32_t* indices,
+                          std::uint32_t ordinal) noexcept
 {
-    if (ordinal < cache.entryStart || ordinal - cache.entryStart >= cache.entryCount)
-        return UINT32_MAX;
-    const auto offset = ordinal - cache.entryStart;
-    return offset < 64 ? cache.indices[offset] : UINT32_MAX;
+    return ordinal >= start && ordinal - start < count ? indices[ordinal - start] : UINT32_MAX;
 }
 
-// A published entry resolved for one query. `entryFound` stays true when the
-// consumer's proxy was published at all, even if the ordinal fell outside its
-// range; `rangeOnly` marks a match that came from the pool-ordinal range alone.
+// A published entry resolved for one query. `entryFound` is true when an entry
+// owns the query, through the consumer's proxy or the range-only branch, even
+// if the ordinal fell outside its published count; `rangeOnly` marks a match
+// that came from the pool-ordinal range alone.
 struct Match
 {
     const GlassArrayMappingEntry* entry = nullptr;
@@ -72,42 +200,39 @@ Match findUnlocked(std::uintptr_t proxy, std::uint32_t ordinal, std::uint32_t pa
                    std::uint32_t packetCount) noexcept
 {
     Match match;
-    for (const auto& entry : entries)
+    const unsigned proxyBucket = byProxy.find(proxy);
+    if (proxyBucket != IndexSize)
     {
-        if (entry.proxy != proxy || !entry.count)
-            continue;
+        const auto& entry = entries[byProxy.slotAt(proxyBucket)];
         match.entryFound = true;
-        if (ordinal < entry.outputStart || ordinal >= entry.outputStart + entry.count)
-            continue;
-        match.entry = &entry;
-        return match;
+        if (ordinal >= entry.outputStart && ordinal - entry.outputStart < entry.count)
+        {
+            match.entry = &entry;
+            return match;
+        }
     }
     // The ranged allocator gives every grouped update its own ordinal slice, so
     // a query whose proxy pointer matches nothing can still be identified by an
-    // entry whose slice equals the packet's own [transformIndex, +count) range
-    // exactly. Two such entries mean the range was recycled and the lookup
-    // cannot tell which array owns it, so it fails closed.
-    if (packetCount == 0)
+    // entry whose slice starts at the packet's own transformIndex. The entry may
+    // cover only a prefix of the packet when more than 64 elements were
+    // appended (the recording cap), so any count up to the packet's is still
+    // the same allocation. Two such entries mean the range was recycled and the
+    // lookup cannot tell which array owns it, so it fails closed.
+    const unsigned startBucket = byStart.find(packetStart);
+    if (startBucket == IndexSize)
         return match;
-    for (const auto& entry : entries)
+    const unsigned head = byStart.slotAt(startBucket);
+    if (entries[head].count > packetCount)
+        return match;
+    const unsigned second = startNext[head];
+    if (second && entries[second - 1].count <= packetCount)
     {
-        if (!entry.count)
-            continue;
-        // The entry may cover only a prefix of the packet when more than 64
-        // elements were appended (the recording cap), so a subset is still the
-        // same allocation. A recycled slice that two entries claim fails closed
-        // through the ambiguity branch below.
-        if (entry.outputStart != packetStart || entry.count > packetCount)
-            continue;
-        if (match.entry)
-        {
-            match.entry = nullptr;
-            match.rangeAmbiguous = true;
-            return match;
-        }
-        match.entry = &entry;
-        match.rangeOnly = true;
+        match.rangeAmbiguous = true;
+        return match;
     }
+    match.entry = &entries[head];
+    match.entryFound = true;
+    match.rangeOnly = true;
     return match;
 }
 } // namespace
@@ -116,45 +241,49 @@ void PublishArrayMapping(const GlassArrayMappingEntry& source) noexcept
 {
     if (!source.proxy || !source.count)
         return;
-    GlassArrayMappingEntry entry = source;
-    if (entry.count > 64)
-        entry.count = 64;
+    const std::uint32_t count = source.count < 64 ? source.count : 64;
     std::lock_guard lock(mutex);
     if (publishProbeCount < GlassArrayMappingStats::ProbeCapacity)
     {
         auto& probe = publishProbe[publishProbeCount++];
-        probe.proxy = entry.proxy;
-        probe.ordinal = entry.count;
-        probe.value = entry.outputStart;
+        probe.proxy = source.proxy;
+        probe.ordinal = count;
+        probe.value = source.outputStart;
         probe.result = 3;
     }
-    for (auto& slot : entries)
+    // Pick the slot and detach it from the indexes it is in: the proxy's own
+    // slot keeps its proxy bucket, a free slot has none, an evicted one loses
+    // both.
+    unsigned slot;
+    const unsigned proxyBucket = byProxy.find(source.proxy);
+    if (proxyBucket != IndexSize)
     {
-        if (slot.proxy == entry.proxy && slot.count)
-        {
-            slot = entry;
-            ++replaced;
-            publishGeneration.fetch_add(1, std::memory_order_release);
-            return;
-        }
+        slot = byProxy.slotAt(proxyBucket);
+        unlinkStart(slot);
+        ++replaced;
     }
-    for (auto& slot : entries)
+    else if (occupied < Capacity)
     {
-        if (!slot.count)
-        {
-            slot = entry;
-            ++published;
-            publishGeneration.fetch_add(1, std::memory_order_release);
-            return;
-        }
+        slot = occupied++;
+        ++published;
     }
-    // Table full: replace the slot under the round-robin cursor, so every
-    // resident proxy is evicted in turn and the live scene's arrays become
-    // resident within one cycle of the table.
-    entries[evictionCursor] = entry;
-    evictionCursor = (evictionCursor + 1) % Capacity;
-    ++evictions;
-    ++replaced;
+    else
+    {
+        // Table full: replace the slot under the round-robin cursor, so every
+        // resident proxy is evicted in turn and the live scene's arrays become
+        // resident within one cycle of the table.
+        slot = evictionCursor;
+        evictionCursor = (evictionCursor + 1) % Capacity;
+        byProxy.erase(byProxy.find(entries[slot].proxy));
+        unlinkStart(slot);
+        ++evictions;
+        ++replaced;
+    }
+    entries[slot] = source;
+    entries[slot].count = count;
+    if (proxyBucket == IndexSize)
+        byProxy.insert(slot);
+    linkStart(slot);
     publishGeneration.fetch_add(1, std::memory_order_release);
 }
 
@@ -176,7 +305,7 @@ std::uint32_t LookupArrayMapping(std::uintptr_t proxy, std::uint32_t packetOrdin
         if (cache.generation == generation && cache.proxy == proxy && cache.packetStart == packetStart &&
             cache.packetCount == packetCount)
         {
-            const auto index = cachedIndex(cache, packetOrdinal);
+            const auto index = mappedIndex(cache.entryStart, cache.entryCount, cache.indices, packetOrdinal);
             if (index != UINT32_MAX)
             {
                 if (cache.rangeOnly)
@@ -191,12 +320,9 @@ std::uint32_t LookupArrayMapping(std::uintptr_t proxy, std::uint32_t packetOrdin
     }
     std::lock_guard lock(mutex);
     const auto match = findUnlocked(proxy, packetOrdinal, packetStart, packetCount);
-    std::uint32_t index = UINT32_MAX;
-    if (match.entry)
-    {
-        const auto offset = packetOrdinal - match.entry->outputStart;
-        index = offset < 64 ? match.entry->indices[offset] : UINT32_MAX;
-    }
+    const std::uint32_t index =
+        match.entry ? mappedIndex(match.entry->outputStart, match.entry->count, match.entry->indices, packetOrdinal)
+                    : UINT32_MAX;
     if (lookupProbeCount < GlassArrayMappingStats::ProbeCapacity)
     {
         auto& probe = lookupProbe[lookupProbeCount++];
@@ -253,9 +379,8 @@ GlassArrayMappingStats ReadArrayMappingStats() noexcept
     stats.rangeHits = rangeHits.load();
     stats.rangeAmbiguous = rangeAmbiguous.load();
     stats.evictions = evictions.load();
-    for (const auto& entry : entries)
-        if (entry.count)
-            ++stats.entries;
+    stats.entries = occupied;
+    stats.capacity = Capacity;
     stats.publishProbeCount = publishProbeCount;
     stats.lookupProbeCount = lookupProbeCount;
     for (unsigned i = 0; i < publishProbeCount; ++i)

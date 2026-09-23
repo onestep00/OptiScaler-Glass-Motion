@@ -1,7 +1,52 @@
 #include "../GlassArrayMapping.h"
 #include <cstdio>
+#include <source_location>
 #include <stdexcept>
-static void check(bool value) { if (!value) throw std::runtime_error("array mapping contract failed"); }
+#include <string>
+static void check(bool value, std::source_location where = std::source_location::current())
+{
+    if (!value)
+        throw std::runtime_error("array mapping contract failed at line " + std::to_string(where.line()));
+}
+// Hash-index case: pointer-like proxies (aligned like the engine's heap
+// objects), each with its own disjoint slice of 1 to 8 elements and unique
+// source indices, so a lookup can only resolve through its own entry.
+static GlassFg::GlassArrayMappingEntry liveEntry(unsigned i)
+{
+    GlassFg::GlassArrayMappingEntry entry;
+    entry.proxy = 0x40000000 + std::uintptr_t(i) * 0x1c0;
+    entry.outputStart = 0x10000 + i * 8;
+    entry.count = 1 + i % 8;
+    for (unsigned lane = 0; lane < entry.count; ++lane)
+        entry.indices[lane] = 100000 + i * 8 + lane;
+    return entry;
+}
+// Every lane of `entry`, queried through `proxy` with the entry's own packet range.
+static bool resolves(const GlassFg::GlassArrayMappingEntry& entry, std::uintptr_t proxy)
+{
+    for (unsigned lane = 0; lane < entry.count; ++lane)
+        if (GlassFg::LookupArrayMapping(proxy, entry.outputStart + lane, entry.outputStart, entry.count) !=
+            entry.indices[lane])
+            return false;
+    return true;
+}
+// Residency case: one lane per fresh proxy, each with its own pool slice and
+// source index, disjoint from every other publication in this test, so a
+// lookup can only resolve through its own entry for any capacity below 0x10000.
+static GlassFg::GlassArrayMappingEntry freshEntry(unsigned batch, unsigned i)
+{
+    GlassFg::GlassArrayMappingEntry entry;
+    entry.proxy = 0x20000000 + std::uintptr_t(batch) * 0x100000 + std::uintptr_t(i) * 0x10;
+    entry.outputStart = 0x100000 + batch * 0x10000 + i;
+    entry.count = 1;
+    entry.indices[0] = 0x200000 + batch * 0x10000 + i;
+    return entry;
+}
+static std::uint32_t lookupFresh(unsigned batch, unsigned i)
+{
+    const auto entry = freshEntry(batch, i);
+    return GlassFg::LookupArrayMapping(entry.proxy, entry.outputStart, entry.outputStart, entry.count);
+}
 int main()
 {
     try
@@ -67,20 +112,103 @@ int main()
         stats = GlassFg::ReadArrayMappingStats();
         check(stats.entries == 4 && stats.published == 4 && stats.rangeAmbiguous == 1);
         check(stats.lookups == 13 && stats.hits == 8 && stats.rangeHits == 1);
-        // Fill past the capacity: the oldest slot is evicted and counted.
-        for (unsigned i = 0; i < 260; ++i)
+        // More arrays resident at once than the old 256-slot table held. A live
+        // session had 1,526, and a still camera never republishes them, so each
+        // must stay resolvable through its own proxy.
+        constexpr unsigned live = 1500;
+        for (unsigned i = 0; i < live; ++i) GlassFg::PublishArrayMapping(liveEntry(i));
+        std::uint64_t lanes = 0;
+        for (unsigned i = 0; i < live; ++i)
         {
-            GlassFg::GlassArrayMappingEntry fill;
-            fill.proxy = 0x10000 + i;
-            fill.outputStart = i;
-            fill.count = 1;
-            fill.indices[0] = i;
-            GlassFg::PublishArrayMapping(fill);
+            check(resolves(liveEntry(i), liveEntry(i).proxy));
+            lanes += liveEntry(i).count;
         }
         stats = GlassFg::ReadArrayMappingStats();
-        check(stats.entries == 256 && stats.evictions >= 1);
-        check(GlassFg::LookupArrayMapping(0x10000 + 259, 259, 259, 1) == 259); // Newest entry stayed.
-        puts("ARRAY_MAPPING publish_lookup_replace_clamp_range=pass");
+        check(stats.entries == 4 + live && stats.published == 4 + live && stats.evictions == 0);
+        // Proxy hits, not range-only ones: every slice here is unique, so the
+        // range fallback alone would also answer.
+        check(stats.hits == 8 + lanes && stats.rangeHits == 1);
+        // Range-only fallback on the large table: a proxy pointer the update
+        // never published resolves through the packet's own slice. A packet
+        // longer than the entry leaves the lanes the recording never wrote
+        // unknown, as the reader cache already did.
+        std::uint64_t rangeLanes = 0;
+        for (const unsigned i : {0u, 777u, live - 1})
+        {
+            const auto target = liveEntry(i);
+            const std::uintptr_t foreign = 0x70000000 + std::uintptr_t(i) * 0x40;
+            check(resolves(target, foreign));
+            check(GlassFg::LookupArrayMapping(foreign, target.outputStart + target.count, target.outputStart,
+                                              target.count + 1) == UINT32_MAX);
+            rangeLanes += target.count;
+        }
+        stats = GlassFg::ReadArrayMappingStats();
+        check(stats.rangeHits == 1 + rangeLanes && stats.outOfRange == 1 + 3 && stats.hits == 8 + lanes);
+        // Two resident arrays claim one recycled slice. Only an entry that fits
+        // the packet's count is a candidate: the shorter one answers a short
+        // packet, and a packet both fit fails closed. The shorter one is
+        // published second, so it must take the head of that slice.
+        GlassFg::GlassArrayMappingEntry longer, shorter;
+        longer.proxy = 0x60000000;
+        shorter.proxy = 0x60000040;
+        longer.outputStart = shorter.outputStart = 0x8000;
+        longer.count = 5;
+        shorter.count = 2;
+        for (unsigned lane = 0; lane < longer.count; ++lane) longer.indices[lane] = 900 + lane;
+        for (unsigned lane = 0; lane < shorter.count; ++lane) shorter.indices[lane] = 950 + lane;
+        GlassFg::PublishArrayMapping(longer);
+        GlassFg::PublishArrayMapping(shorter);
+        check(GlassFg::LookupArrayMapping(0x61000000, 0x8001, 0x8000, 2) == 951);
+        check(GlassFg::LookupArrayMapping(0x61000040, 0x8001, 0x8000, 5) == UINT32_MAX);
+        // The shorter array moves to another slice. The old slice then belongs
+        // to the longer array alone, which a short packet still cannot claim.
+        shorter.outputStart = 0x9000;
+        GlassFg::PublishArrayMapping(shorter);
+        check(GlassFg::LookupArrayMapping(0x61000080, 0x8004, 0x8000, 5) == 904);
+        check(GlassFg::LookupArrayMapping(0x610000c0, 0x8001, 0x8000, 2) == UINT32_MAX);
+        check(GlassFg::LookupArrayMapping(0x61000100, 0x9001, 0x9000, 2) == 951);
+        stats = GlassFg::ReadArrayMappingStats();
+        check(stats.entries == 4 + live + 2 && stats.rangeAmbiguous == 2);
+        // Past the capacity: round-robin eviction takes the oldest slots, which
+        // hold everything published so far. Every newer array still resolves
+        // through its own proxy after that many index deletions, and the evicted
+        // ones resolve through neither their proxy nor their slice.
+        const unsigned capacity = stats.capacity;
+        const unsigned residentBefore = stats.entries;
+        const auto hitsBefore = stats.hits, rangeHitsBefore = stats.rangeHits;
+        for (unsigned i = live; i < live + capacity; ++i) GlassFg::PublishArrayMapping(liveEntry(i));
+        lanes = 0;
+        for (unsigned i = live; i < live + capacity; ++i)
+        {
+            check(resolves(liveEntry(i), liveEntry(i).proxy));
+            lanes += liveEntry(i).count;
+        }
+        for (unsigned i = 0; i < live; ++i)
+        {
+            const auto evicted = liveEntry(i);
+            check(GlassFg::LookupArrayMapping(evicted.proxy, evicted.outputStart, evicted.outputStart, evicted.count) ==
+                  UINT32_MAX);
+        }
+        stats = GlassFg::ReadArrayMappingStats();
+        check(stats.entries == capacity && stats.evictions == residentBefore);
+        check(stats.hits == hitsBefore + lanes && stats.rangeHits == rangeHitsBefore);
+        // A full table must keep serving the newest publications. Evicting one
+        // fixed slot let each new proxy stay only until the next publication, so
+        // every array but the latest one published after the table filled missed.
+        const auto evictionsBefore = stats.evictions;
+        for (unsigned i = 0; i < capacity; ++i) GlassFg::PublishArrayMapping(freshEntry(0, i));
+        for (unsigned i = 0; i < capacity; ++i) check(lookupFresh(0, i) == freshEntry(0, i).indices[0]);
+        // A second full batch wraps the eviction cursor again and evicts the
+        // first one whole. The evicted batch is queried first, while the reader
+        // cache still holds its answers from before the evictions.
+        for (unsigned i = 0; i < capacity; ++i) GlassFg::PublishArrayMapping(freshEntry(1, i));
+        for (unsigned i = 0; i < capacity; ++i) check(lookupFresh(0, i) == UINT32_MAX);
+        for (unsigned i = 0; i < capacity; ++i) check(lookupFresh(1, i) == freshEntry(1, i).indices[0]);
+        stats = GlassFg::ReadArrayMappingStats();
+        check(stats.entries == capacity && stats.evictions == evictionsBefore + 2 * capacity);
+        std::printf("ARRAY_MAPPING publish_lookup_replace_clamp_range=pass hash_index=pass range_fallback=pass "
+                    "evict_past_capacity=pass wraparound=pass capacity=%u\n",
+                    capacity);
         return 0;
     }
     catch (const std::exception& error)

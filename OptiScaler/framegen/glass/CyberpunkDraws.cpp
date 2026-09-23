@@ -90,6 +90,8 @@ struct EngineDrawState
     // The calling thread's row for this state. Never call from the report
     // thread expecting its own totals; use the summed status below.
     Row& row() noexcept;
+    // The first row() call of a thread for this state; see its definition.
+    Row& claimRow() noexcept;
     std::atomic<std::uint64_t> arrayProbeCompared = 0, arrayProbePermuted = 0, arrayProbeChanged = 0;
     std::atomic<std::uint64_t> arrayProbeSameAddress = 0, arrayProbeDistinctAddress = 0;
     std::atomic<std::uint64_t> arrayProbeGrouped = 0;
@@ -108,25 +110,29 @@ thread_local unsigned rowIndex = 0;
 // One row per thread, claimed by thread id. A thread that finds every row
 // taken shares row 0; that costs counter accuracy only, never safety, and
 // needs more than RowCount threads touching one state to happen.
-EngineDrawState::Row& EngineDrawState::row() noexcept
+__declspec(noinline) EngineDrawState::Row& EngineDrawState::claimRow() noexcept
 {
-    if (rowState != this)
+    const auto id = static_cast<std::uint32_t>(GetCurrentThreadId());
+    unsigned index = 0;
+    for (unsigned i = 0; i < RowCount; ++i)
     {
-        const auto id = static_cast<std::uint32_t>(GetCurrentThreadId());
-        unsigned index = 0;
-        for (unsigned i = 0; i < RowCount; ++i)
+        std::uint32_t expected = 0;
+        if (rows[i].owner.compare_exchange_strong(expected, id, std::memory_order_relaxed))
         {
-            std::uint32_t expected = 0;
-            if (rows[i].owner.compare_exchange_strong(expected, id, std::memory_order_relaxed))
-            {
-                index = i;
-                break;
-            }
+            index = i;
+            break;
         }
-        rowState = this;
-        rowIndex = index;
     }
-    return rows[rowIndex];
+    rowState = this;
+    rowIndex = index;
+    return rows[index];
+}
+// Every hook asks for its row, and the claim above runs once per thread and
+// state. With the claim out of line the check is three instructions, which
+// MSVC still kept as a call in each hook, so it is forced inline.
+__forceinline EngineDrawState::Row& EngineDrawState::row() noexcept
+{
+    return rowState == this ? rows[rowIndex] : claimRow();
 }
 
 // Owner-thread increment of a per-thread row counter. The row has a single
@@ -141,12 +147,18 @@ inline void add(std::atomic<std::uint64_t>& value, std::uint64_t count) noexcept
     value.store(value.load(std::memory_order_relaxed) + count, std::memory_order_relaxed);
 }
 
+// The range a guarded read accepts: above the null page and, for the whole
+// object, below the user-mode limit.
+constexpr bool readable(std::uint64_t address, std::size_t size) noexcept
+{
+    return address >= 0x10000 && address <= 0x7fffffffffff - size;
+}
 template <typename T> bool copyAt(std::uint64_t address, T& value) noexcept
 {
     static_assert(std::is_trivially_copyable_v<T>);
     __try
     {
-        if (address < 0x10000 || address > 0x7fffffffffff - sizeof(T))
+        if (!readable(address, sizeof(T)))
             return false;
         memcpy(&value, reinterpret_cast<const void*>(address), sizeof(T));
         return true;
@@ -414,47 +426,119 @@ bool renderer(EngineDrawState& state, std::uint64_t& result)
     return copyAt(reinterpret_cast<std::uint64_t>(state.rendererGlobal), root) && copyAt(root + 0x4628, result) &&
            result && result < 0x7fffffffffff - 0xb74380;
 }
-// Append-time half of the packet owner: the owner flag, the registry entry, the
-// geometry record and the lifetime ticket. The ticket is taken before the
-// engine consumes the packet, so a registration or array setter that runs
-// before the draw changes it and the draw refuses the owner (checkOwner).
-PacketOwner takeOwner(EngineDrawState& state, EngineDrawState::Row& row, const Batch& batch,
-                      const EngineContext& before, std::uint64_t word) noexcept
+// What an append reads before the engine consumes its packet: the context and
+// the packet words and, for an append of the batch's own context, the owner's
+// registry entry and geometry record. A guarded read is a non-inlined call;
+// this one call replaced the four copyAt calls the hook made, with the same
+// bytes and the same checks between them. The two guards keep a fault where
+// the separate reads put it: in the context or packet the append is not
+// tracked, in the entry or geometry record only the owner is lost (no_entry).
+struct AppendInputs
 {
-    PacketOwner owner;
-    if (!(word & (1ull << 51)))
-    {
-        bump(row.parentNoFlag);
-        return owner;
-    }
-    const auto index = static_cast<std::uint32_t>(word & 0x3ffff);
-    std::uint64_t encoded = 0;
+    EngineContext context;
+    std::array<std::uint64_t, 2> words {};
+    std::uint64_t entry = 0;
     EngineGeometry geometry;
-    if (index >= 131072 || before.entry != batch.renderer + 0x274248 + std::uint64_t(index) * 24 ||
-        !copyAt(before.entry, encoded) || !copyAt(before.geometry, geometry) || geometry.kind != 0)
+};
+enum class AppendRead
+{
+    Unreadable, // context or packet: the append is not tracked
+    Packet,     // context and packet only: an append of another context
+    NoFlag,     // no owner flag (bit 51)
+    NoEntry,    // slot index, entry address, entry, geometry record or its kind
+    Owner,      // entry and a kind 0 geometry record
+};
+AppendRead readAppend(std::uint64_t context, std::uint64_t packet, std::uint64_t renderer, bool owner,
+                      AppendInputs& value) noexcept
+{
+    __try
     {
-        bump(row.parentNoEntry);
-        return owner;
+        if (!readable(context, sizeof(value.context)) || !readable(packet, sizeof(value.words)))
+            return AppendRead::Unreadable;
+        memcpy(&value.context, reinterpret_cast<const void*>(context), sizeof(value.context));
+        memcpy(&value.words, reinterpret_cast<const void*>(packet), sizeof(value.words));
     }
-    const auto proxy = encoded & 0x00ffffffffffffffull;
-    try
+    __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        auto generation = state.registry->ticket(proxy, index);
-        if (!generation && seedObject(state, proxy))
-        {
-            generation = state.registry->ticket(proxy, index);
-            if (generation)
-                bump(row.parentSeeded);
-        }
-        if (!generation)
-            bump(row.parentNoTicket);
-        else
-            owner.parent = { proxy, geometry.mesh, index, generation };
+        return AppendRead::Unreadable;
     }
-    catch (...)
+    if (!owner)
+        return AppendRead::Packet;
+    if (!(value.words[1] & (1ull << 51)))
+        return AppendRead::NoFlag;
+    const auto index = value.words[1] & 0x3ffff;
+    const auto entry = value.context.entry, geometry = value.context.geometry;
+    if (index >= 131072 || entry != renderer + 0x274248 + index * 24)
+        return AppendRead::NoEntry;
+    __try
     {
+        if (!readable(entry, sizeof(value.entry)) || !readable(geometry, sizeof(value.geometry)))
+            return AppendRead::NoEntry;
+        memcpy(&value.entry, reinterpret_cast<const void*>(entry), sizeof(value.entry));
+        memcpy(&value.geometry, reinterpret_cast<const void*>(geometry), sizeof(value.geometry));
     }
-    return owner;
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return AppendRead::NoEntry;
+    }
+    return value.geometry.kind == 0 ? AppendRead::Owner : AppendRead::NoEntry;
+}
+// The context and geometry record a flush reads, under one guard as above.
+// The record is read only when it is the context's current one.
+bool readFlush(std::uint64_t context, std::uint64_t geometry, EngineContext& data, EngineGeometry& desc) noexcept
+{
+    __try
+    {
+        if (!readable(context, sizeof(data)))
+            return false;
+        memcpy(&data, reinterpret_cast<const void*>(context), sizeof(data));
+        if (data.geometry != geometry || !readable(geometry, sizeof(desc)))
+            return false;
+        memcpy(&desc, reinterpret_cast<const void*>(geometry), sizeof(desc));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+// Append-time half of the packet owner: the owner flag, the registry entry and
+// the geometry record (read by readAppend) and the lifetime ticket. The ticket
+// is taken before the engine consumes the packet, so a registration or array
+// setter that runs before the draw changes it and the draw refuses the owner
+// (checkOwner).
+//
+// Nothing here throws (the ticket is a lock-free read and seedObject is
+// noexcept), so there is no try block, which let MSVC inline this into the
+// hook. The owner is written field by field in place: a returned one was
+// built in a temporary and copied with 16-byte loads that store forwarding
+// cannot serve.
+void takeOwner(EngineDrawState& state, EngineDrawState::Row& row, AppendRead read, const AppendInputs& value,
+               GeometryDrawIdentity& parent) noexcept
+{
+    if (read != AppendRead::Owner)
+    {
+        bump(read == AppendRead::NoFlag ? row.parentNoFlag : row.parentNoEntry);
+        return;
+    }
+    const auto index = static_cast<std::uint32_t>(value.words[1] & 0x3ffff);
+    const auto proxy = value.entry & 0x00ffffffffffffffull;
+    auto generation = state.registry->ticket(proxy, index);
+    if (!generation && seedObject(state, proxy))
+    {
+        generation = state.registry->ticket(proxy, index);
+        if (generation)
+            bump(row.parentSeeded);
+    }
+    if (!generation)
+    {
+        bump(row.parentNoTicket);
+        return;
+    }
+    parent.proxy = proxy;
+    parent.mesh = value.geometry.mesh;
+    parent.slot = index;
+    parent.generation = generation;
 }
 enum class OwnerCheck
 {
@@ -591,7 +675,7 @@ struct Flush
     EngineDrawState* state = nullptr;
     Batch* batch = nullptr;
     GeometryDrawBatch* records = nullptr;
-    std::uint64_t context = 0, source = 0, geometry = 0, mesh = 0;
+    std::uint64_t source = 0, mesh = 0;
     std::uint32_t count = 0, chunk = 0, stride = 0, indexCount = 0, origin = UINT32_MAX;
     bool uploaded = false, consumed = false, invalid = false;
 };
@@ -637,19 +721,29 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
     }
     auto& row = state->row();
     const HookCostScope cost(AppendHookCost(), true);
-    HookStageTimer stages(cost.Sampled() && HookStageTiming());
-    EngineContext before;
-    std::array<std::uint64_t, 2> words {};
+    // The stage split is a diagnostic. HookStageTimer::Split is an out-of-line
+    // call even when the timer is off, so the hook calls it only in a timed
+    // sample of a stage-timing run.
+    const bool staged = cost.Sampled() && HookStageTiming();
+    HookStageTimer stages(staged);
+    const auto address = reinterpret_cast<std::uint64_t>(context);
+    // A batch keeps one engine context. An append of another context
+    // invalidates the batch below, so its owner is not read.
+    const bool foreign = batch->context && batch->context != address;
+    AppendInputs in;
     GeometryBatchSpan record;
     PacketOwner owner;
-    bool tracked = batch->frame == *state->tick &&
-                   copyAt(reinterpret_cast<std::uint64_t>(context), before) &&
-                   copyAt(reinterpret_cast<std::uint64_t>(packet), words);
-    stages.Split(HookStageAppendRead);
+    const auto read = batch->frame == *state->tick
+                          ? readAppend(address, reinterpret_cast<std::uint64_t>(packet), batch->renderer, !foreign, in)
+                          : AppendRead::Unreadable;
+    bool tracked = read != AppendRead::Unreadable;
+    if (staged)
+        stages.Split(HookStageAppendRead);
+    const auto& words = in.words;
     const bool skin = (words[1] & (1ull << 50)) != 0;
     if (tracked)
     {
-        if (batch->context && batch->context != reinterpret_cast<std::uint64_t>(context))
+        if (foreign)
         {
             batch->rigid.invalidate();
             batch->skinned.invalidate();
@@ -657,14 +751,15 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
         }
         else
         {
-            batch->context = reinterpret_cast<std::uint64_t>(context);
+            batch->context = address;
             record.count = (words[1] >> 18) & 0x7fff;
             record.transformIndex = (words[1] >> 33) & 0x1ffff;
             record.global = (words[0] & (1ull << 59)) != 0;
-            owner = takeOwner(*state, row, *batch, before, words[1]);
+            takeOwner(*state, row, read, in, owner.parent);
             owner.single = record.count == 1 && batch->renderer + 0x574280 + std::uint64_t(record.transformIndex) * 48 ==
                                                     reinterpret_cast<std::uint64_t>(transforms);
-            stages.Split(HookStageAppendTicket);
+            if (staged)
+                stages.Split(HookStageAppendTicket);
             if (batch->eager && owner.parent.generation)
             {
                 // Array probe run: the probe below needs the element order now,
@@ -676,7 +771,8 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                     switch (checkOwner(*state, owner.parent, fields))
                     {
                     case OwnerCheck::Owner:
-                        stages.Split(HookStageAppendFields);
+                        if (staged)
+                            stages.Split(HookStageAppendFields);
                         record.parent = owner.parent;
                         selectOwner(record, fields, owner.single, skin, ReadControls(), row);
                         break;
@@ -689,7 +785,8 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
                 {
                 }
             }
-            stages.Split(HookStageAppendSelect);
+            if (staged)
+                stages.Split(HookStageAppendSelect);
         }
     }
     HookCostPause pause(cost);
@@ -725,9 +822,9 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
         return;
     EngineContext after;
     auto& records = skin ? batch->skinned : batch->rigid;
-    if (!tracked || batch != currentBatch || batch->frame != *state->tick ||
-        !copyAt(reinterpret_cast<std::uint64_t>(context), after) || before.entry != after.entry ||
-        before.geometry != after.geometry)
+    const auto& before = in.context;
+    if (!tracked || batch != currentBatch || batch->frame != *state->tick || !copyAt(address, after) ||
+        before.entry != after.entry || before.geometry != after.geometry)
     {
         // If the packet could not be read, even its destination family is unknown.
         batch->rigid.invalidate();
@@ -741,35 +838,35 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
     if (const auto kept = records.view(instances); !kept.empty())
         (skin ? batch->skinnedOwners : batch->rigidOwners)[kept.size() - 1] = owner;
     bump(row.appends);
-    stages.Split(HookStageAppendTail);
+    if (staged)
+        stages.Split(HookStageAppendTail);
     if (record.identity)
         bump(row.identities);
 }
-Flush prepare(void* geometry, void* context, std::uint32_t stride, bool half)
+// Fills a default `result` for a flush of the batch's own context and a kind 0
+// geometry record, and leaves it empty otherwise. The hooks keep the Flush on
+// their own frame; filling it in place spares the copy of a returned one.
+void prepare(Flush& result, void* geometry, void* context, std::uint32_t stride, bool half)
 {
-    Flush result;
     auto* state = activeDrawState.load(std::memory_order_acquire);
     auto* batch = currentBatch;
     EngineContext data;
     EngineGeometry desc;
     if (!state || !batch || batch->context != reinterpret_cast<std::uint64_t>(context) ||
-        batch->frame != *state->tick || !copyAt(batch->context, data) ||
-        data.geometry != reinterpret_cast<std::uint64_t>(geometry) || !copyAt(data.geometry, desc) || desc.kind != 0)
-        return result;
+        batch->frame != *state->tick ||
+        !readFlush(batch->context, reinterpret_cast<std::uint64_t>(geometry), data, desc) || desc.kind != 0)
+        return;
     result.state = state;
     result.batch = batch;
-    result.context = batch->context;
     result.records = stride == 48 ? &batch->rigid : &batch->skinned;
     result.count = stride == 48 ? data.rigidCount : data.skinCount;
     result.source = stride == 48 ? data.rigid : data.skinned;
-    result.geometry = data.geometry;
     result.mesh = desc.mesh;
     result.chunk = desc.chunk;
     result.stride = stride;
     result.indexCount = desc.indexCount >> ((desc.flags & 4) && half ? 1 : 0);
     if (result.records->view(result.count).empty())
         result.invalid = true;
-    return result;
 }
 void finish(Flush& value)
 {
@@ -786,7 +883,8 @@ void rigid(void* a, void* b, void* c, std::uint32_t globalOrigin, bool half)
         originalRigid(a, b, c, globalOrigin, half);
         return;
     }
-    auto value = prepare(b, c, 48, half);
+    Flush value;
+    prepare(value, b, c, 48, half);
     if (value.records && globalOrigin != UINT32_MAX)
     {
         value.origin = globalOrigin;
@@ -808,7 +906,8 @@ void skinned(void* a, void* b, void* c, bool half)
         originalSkinned(a, b, c, half);
         return;
     }
-    auto value = prepare(b, c, 64, half);
+    Flush value;
+    prepare(value, b, c, 64, half);
     FlushScope scope(value);
     HookCostPause pause(cost);
     originalSkinned(a, b, c, half);
@@ -908,6 +1007,30 @@ bool completeOwners(const Flush& flush, std::span<GeometryBatchSpan> spans)
     }
     return true;
 }
+// Owner work of a consumed draw: a draw that reads owners completes them, or
+// revalidates those an array probe run completed at the append; a draw that
+// does not read them clears what such a run completed. False refuses the draw.
+// Kept out of the read below, so its exception frame does not make every draw
+// keep its locals on the stack.
+bool admitOwners(const Flush& flush, std::span<GeometryBatchSpan> spans, bool owners) noexcept
+{
+    try
+    {
+        if (owners)
+            return flush.batch->eager ? validateOwners(flush, spans) : completeOwners(flush, spans);
+        for (auto& span : spans)
+        {
+            span.identity = span.parent = {};
+            span.orderKind = 0;
+            span.originalFirst = 0;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
 } // namespace
 
 GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
@@ -915,44 +1038,39 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std:
                                            std::int32_t baseVertex, std::uint32_t startInstance,
                                            bool owners) noexcept
 {
+    // Every return is this one object, so the view is built in the caller's
+    // result instead of in a temporary that is then copied out.
+    GeometryDrawView view;
     auto* value = currentFlush;
     if (!value || !value->state || value->invalid || value->consumed || !value->uploaded ||
         currentBatch != value->batch || value->batch->frame != *value->state->tick ||
         sourceReturnAddress != value->state->drawReturn || indexCount != value->indexCount ||
         instanceCount != value->count || startIndex || baseVertex || startInstance != value->origin)
-        return {};
+        return view;
     const auto records = value->records->view(value->count);
     if (records.empty())
-        return {};
+        return view;
     // The view lends the batch's own span storage, which only this flush
-    // reads, so the owner fields are completed (or cleared) in place.
-    const std::span spans(const_cast<GeometryBatchSpan*>(records.data()), records.size());
-    try
+    // reads, so the owner fields are completed (or cleared) in place. Only a
+    // draw that reads owners or an array probe run has owner work to do.
+    if ((owners || value->batch->eager) &&
+        !admitOwners(*value, std::span(const_cast<GeometryBatchSpan*>(records.data()), records.size()), owners))
     {
-        if (!owners)
-        {
-            if (value->batch->eager)
-                for (auto& span : spans)
-                {
-                    span.identity = span.parent = {};
-                    span.orderKind = 0;
-                    span.originalFirst = 0;
-                }
-        }
-        else if (value->batch->eager ? !validateOwners(*value, records) : !completeOwners(*value, spans))
-        {
-            value->invalid = true; // A repeated read refuses the same draw.
-            return {};
-        }
-    }
-    catch (...)
-    {
-        value->invalid = true;
-        return {};
+        value->invalid = true; // A repeated read refuses the same draw.
+        return view;
     }
     value->consumed = true;
     bump(value->state->row().draws);
-    return { records, value->mesh, value->batch->frame, value->chunk, value->stride, value->origin, value->count };
+    // Built from its parts: assigning the span object made MSVC spill it and
+    // reload it with one 16-byte load, which store forwarding cannot serve.
+    view.objects = std::span(records.data(), records.size());
+    view.mesh = value->mesh;
+    view.frame = value->batch->frame;
+    view.chunk = value->chunk;
+    view.stride = value->stride;
+    view.startInstanceLocation = value->origin;
+    view.instances = value->count;
+    return view;
 }
 GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
                                            std::uint32_t instanceCount, std::uint32_t startIndex,

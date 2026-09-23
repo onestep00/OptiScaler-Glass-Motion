@@ -15,11 +15,44 @@ namespace GlassFg
 {
 namespace
 {
-std::atomic<std::uint64_t> resolvedCount = 0, rejectedCount = 0, noOwnerCount = 0, noViewCount = 0,
-                           noLifetimeCount = 0, noElementIndexCount = 0, noViewStateCount = 0,
-                           noViewUnknownCount = 0, noViewDescriptorCount = 0, noElementParentCount = 0,
-                           noElementOrderCount = 0, noViewNoRecordCount = 0, noViewNullResourceCount = 0,
-                           elementMappedCount = 0, elementUnmappedCount = 0;
+// Diagnostic counters. resolve counts into the draw's scratch and flush adds
+// the totals once per draw, so the element loop executes no locked instruction
+// for them. A locked instruction also drains the write-combined upload heap
+// the capture fills.
+enum Counter : unsigned
+{
+    Resolved,
+    Rejected,
+    NoOwner,
+    NoView,
+    NoLifetime,
+    NoElementIndex,
+    NoViewState,
+    NoViewUnknown,
+    NoViewDescriptor,
+    NoElementParent,
+    NoElementOrder,
+    NoViewNoRecord,
+    NoViewNullResource,
+    ElementMapped,
+    ElementUnmapped,
+    CounterCount
+};
+static_assert(CounterCount <= std::tuple_size_v<decltype(PackedMotionIdentityScratch::counts)>);
+std::atomic<std::uint64_t> counters[CounterCount] {};
+
+// The draw's view, established by the first element that needs it. The
+// command's raster state belongs to this recording thread and its view
+// records are immutable, so the answer is the same for every element.
+enum ViewState : std::uint32_t
+{
+    ViewUnset = 0,
+    ViewReady,
+    ViewNoState,
+    ViewUnknown,
+    ViewNoRecord,
+    ViewNullResource
+};
 
 // Deterministic mesh-topology identity. The shape has no topology id of its own
 // and VertexHistoryKey requires a nonzero topology value.
@@ -40,92 +73,119 @@ std::uint64_t topologyHash(const CyberpunkMeshShape& shape) noexcept
     return h ? h : 1;
 }
 
-// Diagnostics only: relaxed atomics, no allocation and no lock.
-void reject(std::atomic<std::uint64_t>& reason) noexcept
+// Diagnostics only: counted in the draw's scratch, published by flush.
+void reject(PackedMotionIdentityScratch& scratch, Counter reason) noexcept
 {
-    rejectedCount.fetch_add(1, std::memory_order_relaxed);
-    reason.fetch_add(1, std::memory_order_relaxed);
+    ++scratch.counts[Rejected];
+    ++scratch.counts[reason];
 }
 
-bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const GeometryDrawView& draw,
-                     const CyberpunkMeshShape& shape, const GeometryPipelineEntry& pipeline,
-                     std::uint32_t spanIndex, std::uint32_t ordinal, VertexHistoryKey& key) noexcept
+// The command's tracked raster state already carries resolved view records, so
+// this is a pointer read. Depth is preferred; a colour target is used only when
+// the draw has no depth binding.
+ViewState resolveView(ID3D12GraphicsCommandList* command, std::uint64_t& view) noexcept
+{
+    view = 0;
+    const auto* raster = ReadGeometryRasterState(command);
+    bool namedViewRecord = false;
+    if (raster && raster->targetsKnown)
+    {
+        if (raster->depthView)
+        {
+            namedViewRecord = true;
+            if (raster->depthView->resource)
+                view = raster->depthView->resource;
+        }
+        for (UINT i = 0; i < raster->targetCount && !view; ++i)
+        {
+            if (!raster->targetViews[i])
+                continue;
+            namedViewRecord = true;
+            if (raster->targetViews[i]->resource)
+                view = raster->targetViews[i]->resource;
+        }
+    }
+    if (view)
+        return ViewReady;
+    if (!raster)
+        return ViewNoState;
+    if (!raster->targetsKnown)
+        return ViewUnknown;
+    // The targets are known but no view record gave a resource: either the
+    // draw named no view record, or its records' resource field is still zero.
+    return namedViewRecord ? ViewNullResource : ViewNoRecord;
+}
+
+bool resolveIdentity(const void*, PackedMotionIdentityScratch& scratch, ID3D12GraphicsCommandList* command,
+                     const GeometryDrawView& draw, const CyberpunkMeshShape& shape,
+                     const GeometryPipelineEntry& pipeline, std::uint32_t spanIndex, std::uint32_t ordinal,
+                     VertexHistoryKey& key) noexcept
 {
     key = {};
     try
     {
         if (!command || !shape || !pipeline.identity || spanIndex >= draw.objects.size())
         {
-            reject(rejectedCount);
+            reject(scratch, Rejected);
             return false;
         }
         const auto& span = draw.objects[spanIndex];
         if (!span.count || ordinal >= span.count)
         {
-            reject(rejectedCount);
+            reject(scratch, Rejected);
             return false;
         }
         const auto& owner = span.parent ? span.parent : span.identity;
         if (!owner)
         {
-            reject(noOwnerCount);
+            reject(scratch, NoOwner);
             return false;
         }
-        // The command's tracked raster state already carries resolved view
-        // records, so this is a pointer read. Depth is preferred; a colour target
-        // is used only when the draw has no depth binding.
-        const auto* raster = ReadGeometryRasterState(command);
-        std::uint64_t view = 0;
-        bool namedViewRecord = false;
-        if (raster && raster->targetsKnown)
+        if (scratch.viewState == ViewUnset)
+            scratch.viewState = resolveView(command, scratch.view);
+        if (scratch.viewState != ViewReady)
         {
-            if (raster->depthView)
+            switch (scratch.viewState)
             {
-                namedViewRecord = true;
-                if (raster->depthView->resource)
-                    view = raster->depthView->resource;
+            case ViewNoState:
+                ++scratch.counts[NoViewState];
+                break;
+            case ViewUnknown:
+                ++scratch.counts[NoViewUnknown];
+                break;
+            default:
+                // The aggregate hides whether the draw named no view record or
+                // named records whose resource field is still zero.
+                ++scratch.counts[NoViewDescriptor];
+                ++scratch.counts[scratch.viewState == ViewNullResource ? NoViewNullResource : NoViewNoRecord];
+                break;
             }
-            for (UINT i = 0; i < raster->targetCount && !view; ++i)
-            {
-                if (!raster->targetViews[i])
-                    continue;
-                namedViewRecord = true;
-                if (raster->targetViews[i]->resource)
-                    view = raster->targetViews[i]->resource;
-            }
-        }
-        if (!view)
-        {
-            if (!raster)
-                noViewStateCount.fetch_add(1, std::memory_order_relaxed);
-            else if (!raster->targetsKnown)
-                noViewUnknownCount.fetch_add(1, std::memory_order_relaxed);
-            else
-            {
-                noViewDescriptorCount.fetch_add(1, std::memory_order_relaxed);
-                // The aggregate above hides whether the draw named no view
-                // record or named records whose resource field is still zero.
-                if (namedViewRecord)
-                    noViewNullResourceCount.fetch_add(1, std::memory_order_relaxed);
-                else
-                    noViewNoRecordCount.fetch_add(1, std::memory_order_relaxed);
-            }
-            reject(noViewCount);
+            reject(scratch, NoView);
             return false;
         }
-        // The registry is process-resident. Keep one reference instead of copying
-        // a shared_ptr for every element of every draw.
-        static const auto registry = GetCyberpunkObjects();
-        if (!registry)
-        {
-            reject(noLifetimeCount);
-            return false;
-        }
-        const auto lifetime = registry->lifetime(owner.proxy, owner.slot);
+        // Registration lifetime of the span's owner. Every element of a span has
+        // the same owner, so the first verified value serves the rest of the
+        // span; a zero (no such proxy, or mid-update) is read again by the next
+        // element, exactly as before.
+        std::uint32_t lifetime = scratch.span == spanIndex ? scratch.lifetime : 0;
         if (!lifetime)
         {
-            reject(noLifetimeCount);
-            return false;
+            // The registry is process-resident. Keep one reference instead of
+            // copying a shared_ptr for every span of every draw.
+            static const auto registry = GetCyberpunkObjects();
+            if (!registry)
+            {
+                reject(scratch, NoLifetime);
+                return false;
+            }
+            lifetime = registry->lifetime(owner.proxy, owner.slot);
+            if (!lifetime)
+            {
+                reject(scratch, NoLifetime);
+                return false;
+            }
+            scratch.span = spanIndex;
+            scratch.lifetime = lifetime;
         }
         std::uint32_t sourceIndex = 0;
         if (span.count != 1)
@@ -140,21 +200,21 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
             {
                 // The parent packet identity never resolved, so no element of
                 // this array can be indexed.
-                reject(noElementIndexCount);
-                reject(noElementParentCount);
+                reject(scratch, NoElementIndex);
+                reject(scratch, NoElementParent);
                 return false;
             }
             if (span.orderKind == 0)
             {
                 // Parent known, but the engine's own source order for this
                 // packet was not verified.
-                reject(noElementIndexCount);
-                reject(noElementOrderCount);
+                reject(scratch, NoElementIndex);
+                reject(scratch, NoElementOrder);
                 return false;
             }
             if (!span.originalIndex(ordinal, sourceIndex))
             {
-                reject(noElementIndexCount);
+                reject(scratch, NoElementIndex);
                 return false;
             }
             if (span.orderKind == 2)
@@ -172,26 +232,29 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
                 if (member != UINT32_MAX)
                 {
                     sourceIndex = member;
-                    elementMappedCount.fetch_add(1, std::memory_order_relaxed);
+                    ++scratch.counts[ElementMapped];
                 }
                 else
-                    elementUnmappedCount.fetch_add(1, std::memory_order_relaxed);
+                    ++scratch.counts[ElementUnmapped];
             }
         }
+        // The shape is the draw's, so its hash is the same for every element.
+        if (!scratch.topology)
+            scratch.topology = topologyHash(shape);
         key.object = {owner.proxy, owner.mesh, owner.slot, lifetime};
-        key.view = view;
+        key.view = scratch.view;
         key.pipeline = pipeline.identity;
-        key.topology = topologyHash(shape);
+        key.topology = scratch.topology;
         key.chunk = draw.chunk;
         key.vertexFactory = shape.vertexFactory;
         key.arrayGeneration = span.count != 1 ? lifetime : 0;
         key.sourceIndex = sourceIndex;
         if (!key)
         {
-            reject(rejectedCount);
+            reject(scratch, Rejected);
             return false;
         }
-        resolvedCount.fetch_add(1, std::memory_order_relaxed);
+        ++scratch.counts[Resolved];
         return true;
     }
     catch (...)
@@ -200,31 +263,40 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
         return false;
     }
 }
+
+void flushIdentity(const void*, PackedMotionIdentityScratch& scratch) noexcept
+{
+    for (unsigned i = 0; i < CounterCount; ++i)
+        if (scratch.counts[i])
+            counters[i].fetch_add(scratch.counts[i], std::memory_order_relaxed);
+    scratch.counts = {};
+}
 } // namespace
 
 PackedMotionIdentityProvider MakeGlassMotionIdentityProvider() noexcept
 {
-    return {nullptr, &resolveIdentity};
+    return {nullptr, &resolveIdentity, &flushIdentity};
 }
 
 GlassMotionIdentityStats ReadGlassMotionIdentityStats() noexcept
 {
+    const auto read = [](Counter counter) { return counters[counter].load(std::memory_order_relaxed); };
     GlassMotionIdentityStats value;
-    value.resolved = resolvedCount.load(std::memory_order_relaxed);
-    value.rejected = rejectedCount.load(std::memory_order_relaxed);
-    value.noOwner = noOwnerCount.load(std::memory_order_relaxed);
-    value.noView = noViewCount.load(std::memory_order_relaxed);
-    value.noViewState = noViewStateCount.load(std::memory_order_relaxed);
-    value.noViewUnknown = noViewUnknownCount.load(std::memory_order_relaxed);
-    value.noViewDescriptor = noViewDescriptorCount.load(std::memory_order_relaxed);
-    value.noViewNoRecord = noViewNoRecordCount.load(std::memory_order_relaxed);
-    value.noViewNullResource = noViewNullResourceCount.load(std::memory_order_relaxed);
-    value.noLifetime = noLifetimeCount.load(std::memory_order_relaxed);
-    value.noElementIndex = noElementIndexCount.load(std::memory_order_relaxed);
-    value.noElementParent = noElementParentCount.load(std::memory_order_relaxed);
-    value.noElementOrder = noElementOrderCount.load(std::memory_order_relaxed);
-    value.elementMapped = elementMappedCount.load(std::memory_order_relaxed);
-    value.elementUnmapped = elementUnmappedCount.load(std::memory_order_relaxed);
+    value.resolved = read(Resolved);
+    value.rejected = read(Rejected);
+    value.noOwner = read(NoOwner);
+    value.noView = read(NoView);
+    value.noViewState = read(NoViewState);
+    value.noViewUnknown = read(NoViewUnknown);
+    value.noViewDescriptor = read(NoViewDescriptor);
+    value.noViewNoRecord = read(NoViewNoRecord);
+    value.noViewNullResource = read(NoViewNullResource);
+    value.noLifetime = read(NoLifetime);
+    value.noElementIndex = read(NoElementIndex);
+    value.noElementParent = read(NoElementParent);
+    value.noElementOrder = read(NoElementOrder);
+    value.elementMapped = read(ElementMapped);
+    value.elementUnmapped = read(ElementUnmapped);
     return value;
 }
 } // namespace GlassFg

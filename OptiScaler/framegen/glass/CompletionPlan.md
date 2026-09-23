@@ -237,3 +237,16 @@ TDR 원인은 새 GPU 작업과 FG 입력 교체를 분리해서 판정한다. `
 6. C13(1ms). 통합 빌드의 compose GPU는 `gpu_ms` 0.128(mask 1)이다(`research/ACTIVE.md:130`). CPU 훅 비용은 2026-09-19 측정(3.62ms/frame, `research/requirements-and-evidence-20260923.md` §3) 뒤 다시 재지 않았다. 진단 off CPU+GPU 합계(P6 통과 기준)는 미측정이다.
 7. 공식 최신 OptiScaler 이식과 RR→NR→SR→FG 검토. 마지막 단계다(`research/objective.md:27`).
 8. 구세대 코드·문서 정리: `Experiment*`, `plugins/`, `GlassPluginHost`, 이전 단계 문서(`research/ACTIVE.md:27`, `136`).
+
+### C13 1·2차 결과와 우선순위 조정 (2026-09-23 18:16~20:10)
+
+위 "남은 것" 6항(C13)과 7항(이식 순서)을 갱신한다. 근거는 워크스페이스 `research/ACTIVE.md` 139-145행(1차)과 147-195행(2차 이후, 이 절을 쓴 판의 줄 번호), `research/c13-hook-cost-plan-20260923.md` "결과" 절이다. 수치 단위는 ms/engine frame이다.
+
+1. 1차 `4042cbbfa`: draw 훅 PSO 조회 memo, append 훅 owner 해석을 소비 draw로 지연, no-op ResourceBarrier 훅 제거. 훅 p50 3.01→1.99, 훅+host 3.16→2.15(`perf-budget-20260923b`→`c`). 검토 5건 중 FAIL 1건(합성 GPU 시험이 reverse depth 전환 뒤 저불투명 경계 선택을 검증하지 못함)은 forward-depth 프레임을 추가해 고쳤다(`5bd32eabf`, `research/ACTIVE.md:149`).
+2. 2차 1부 `5bd32eabf`: observer Reset 전달을 세션 리스트로 제한, indexed 훅 경로 축소, 배열 매핑 축출 수정, forward-depth 시험 추가. 훅 p50 1.99→1.89, 훅+host 2.15→2.04(`perf-budget-20260923c`→`e`). 감소분은 observer(0.55→0.28)에서 나왔다. 두 측정 창의 작업량이 달라(admitted draw 135→210/frame) 계열별 효과는 확정하지 않았다. 검토 5건 PASS(`research/ACTIVE.md:150-155`, `168`, `181`).
+3. 배열 매핑(`GlassArrayMapping.cpp`): 256칸 표가 차면 `entries[0]`만 교체해 세션 초기 proxy만 남는 결함이 1차 이전부터 있었다. 라운드로빈으로 고친 뒤 정지 장면 hits 0→99.97%. 상주 회귀 시험은 `tests/ArrayMapping.cpp`(미커밋)다. P6 slow·fast360 구간의 hits 7.5%·50.1%는 구간 내 축출 없이 나타났고 원인 미확인이다(`research/ACTIVE.md:156-162`). 창 내 identity rejected도 0.94%→2.14%로 늘었고 원인 미확인이다(`research/ACTIVE.md:182`).
+4. 2차 2부(미커밋): append 계열 훅(`CyberpunkDraws.cpp`)과 후보 prepare WC 쓰기 스테이징(`PackedMotionCapture.{cpp,h}`, `GlassMotionIdentity.cpp`). `CyberpunkDraws.cpp` 변경이 배열 매핑 hits를 3%로 떨어뜨려 수정 중이다. CPU 효과는 미측정이다(`research/ACTIVE.md:163-167`).
+5. 현재 비용(`perf-budget-20260923e`): 훅 1.89(indexed 0.75, append 0.34, setters 0.33, observer 0.28, rigid+skinned 0.18), host 0.16, compose GPU 0.17. 스레드 시간 합계 약 2.2ms로 C13(1ms)에 미달한다. indexed 중 약 0.4는 수락 캡처 약 140회의 prepare·bind·replay·restore다(1차 HOOK_STAGE 추정).
+6. 벽시계 A/B(`glass-live-tools/perf-wallclock-20260923.json`, `hookskip=full`/`all` 20초×3 교대, DLL `b8c132fa`): present fps 차이는 present당 약 0.10ms, 엔진 프레임당 약 0.4ms이고 창 사이 변동과 같은 크기다. 세 번째 쌍은 장면 변화로 제외했다. all에서도 observer·host 콜백은 동작한다. 정상 빌드의 A/B는 미측정이다(`research/ACTIVE.md:184-190`).
+7. 2026-09-23 20:01 사용자 결정: C13은 다른 투명 재질 게임 검증, 문서, 공식 최신 OptiScaler 이식 뒤로 미룬다. 따라서 7항 이식을 C13보다 먼저 한다. C13 판정 기준은 바꾸지 않았다(`research/ACTIVE.md:191`).
+8. 3차 후보(미구현): Run 인자의 stage index로 투명 stage만 기록하는 게이트(추론 절감 약 0.45, stage 값 대응 미확인)와 연속 캡처 사이 root·PSO 복원 지연(상한 약 0.42, 연속 캡처 비율 미측정). 둘 다 전제 측정에 새 카운터가 필요하다(`research/ACTIVE.md:192-194`).

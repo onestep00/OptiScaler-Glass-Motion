@@ -10,15 +10,33 @@ struct GeometryDrawView;
 struct CyberpunkMeshShape;
 struct GeometryPipelineEntry;
 struct VertexHistoryKey;
+// One draw's provider scratch. prepare value-initializes one per draw, passes
+// the same instance to every resolve of that draw and then to flush. Every
+// element of a draw has the same command, shape and pipeline, so the provider
+// establishes the draw-wide inputs (view, topology) and each span's owner
+// lifetime once, not once per element. It also counts its diagnostics here
+// until flush publishes them.
+struct PackedMotionIdentityScratch
+{
+    std::uint64_t view = 0, topology = 0;
+    // Provider-defined view resolution; zero until the provider established it.
+    std::uint32_t viewState = 0;
+    std::uint32_t span = UINT32_MAX, lifetime = 0;
+    // Provider-defined diagnostic counts for this draw.
+    std::array<std::uint32_t, 16> counts {};
+};
 // Process-resident source adapter. It must establish view/topology and original
 // source lifetimes for this borrowed draw; addresses/counts alone do not qualify.
 struct PackedMotionIdentityProvider
 {
     const void* context = nullptr;
-    bool (*resolve)(const void*, ID3D12GraphicsCommandList*, const GeometryDrawView&,
+    bool (*resolve)(const void*, PackedMotionIdentityScratch&, ID3D12GraphicsCommandList*, const GeometryDrawView&,
                     const CyberpunkMeshShape&, const GeometryPipelineEntry&, std::uint32_t span,
                     std::uint32_t ordinal, VertexHistoryKey&) noexcept = nullptr;
-    explicit operator bool() const { return resolve != nullptr; }
+    // Publishes what resolve counted into the scratch. Called once per draw,
+    // after its last resolve.
+    void (*flush)(const void*, PackedMotionIdentityScratch&) noexcept = nullptr;
+    explicit operator bool() const { return resolve != nullptr && flush != nullptr; }
 };
 struct PackedMotionFrame
 {

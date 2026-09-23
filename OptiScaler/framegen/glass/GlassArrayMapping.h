@@ -21,9 +21,10 @@ void PublishArrayMapping(const GlassArrayMappingEntry& entry) noexcept;
 // Packet ordinal -> source element index. UINT32_MAX when unknown.
 // `packetStart`/`packetCount` are the draw packet's own pool range
 // (transformIndex and count). They are only used when the proxy pointer does
-// not match any published entry: an entry whose range equals the packet's
-// range exactly is the same array, because the ranged allocator hands each
-// grouped update its own slice.
+// not resolve the ordinal: an entry whose slice starts at the packet's start
+// and covers at most its count (a prefix, when the 64-lane recording cap cut
+// it) is the same array, because the ranged allocator hands each grouped
+// update its own slice. Lanes past an entry's count stay unknown.
 std::uint32_t LookupArrayMapping(std::uintptr_t proxy, std::uint32_t packetOrdinal, std::uint32_t packetStart,
                                  std::uint32_t packetCount) noexcept;
 struct GlassArrayMappingStats
@@ -31,9 +32,9 @@ struct GlassArrayMappingStats
     std::uint64_t published = 0, replaced = 0, lookups = 0, hits = 0;
     // Hits that only the pool-ordinal range could resolve because the consumer
     // queried a different proxy pointer than the update published. The match
-    // requires the entry's slice to equal the packet's own [transformIndex,
-    // +count) range exactly, so the counter also shows whether the proxy domain
-    // agrees between the hook and the draw packet. rangeAmbiguous counts
+    // requires the entry's slice to start at the packet's own transformIndex
+    // and fit inside its count, so the counter also shows whether the proxy
+    // domain agrees between the hook and the draw packet. rangeAmbiguous counts
     // recycled ranges that two published entries claim, which fail closed.
     std::uint64_t rangeHits = 0, rangeAmbiguous = 0;
     // Split lookup misses: no entry for the proxy versus an ordinal outside the
@@ -42,7 +43,9 @@ struct GlassArrayMappingStats
     std::uint64_t misses = 0, outOfRange = 0;
     // Table-full evictions: a live proxy lost its slot to a newly published one.
     std::uint64_t evictions = 0;
-    unsigned entries = 0;
+    // Occupied slots and table size. Once entries reaches capacity, each newly
+    // published proxy evicts one resident entry (round-robin by slot).
+    unsigned entries = 0, capacity = 0;
     // Bounded diagnostics: the first few published and queried keys, so a live
     // session can show whether the module queries the proxy and ordinal range
     // the plugin actually published. Never grows past these capacities.

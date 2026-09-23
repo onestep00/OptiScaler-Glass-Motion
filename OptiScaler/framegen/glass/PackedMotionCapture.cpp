@@ -100,6 +100,9 @@ class Capture final : public GeometryDrawCaptureOwner
         GeometryInstance* mappings = nullptr;
         std::byte* constants = nullptr;
         ComPtr<ID3D12Resource> mapping, constantBuffer, capture;
+        // GPU addresses of the three buffers above, which live as long as the
+        // capture; prepare binds them for every admitted draw.
+        D3D12_GPU_VIRTUAL_ADDRESS mappingAddress = 0, constantAddress = 0, captureAddress = 0;
         ComPtr<ID3D12CommandAllocator> clearAllocator;
         ComPtr<ID3D12GraphicsCommandList> clearCommand;
         std::array<Recording, RecordingCount> recordings {};
@@ -139,6 +142,7 @@ class Capture final : public GeometryDrawCaptureOwner
     ComPtr<ID3D12RootSignature> clearRoot;
     ComPtr<ID3D12PipelineState> clearPipeline;
     ComPtr<ID3D12Resource> history[2];
+    D3D12_GPU_VIRTUAL_ADDRESS historyAddress[2] {};
     ComPtr<ID3D12CommandAllocator> historyClearAllocator;
     ComPtr<ID3D12GraphicsCommandList> historyClearCommand;
     ComPtr<ID3D12CommandQueue> historyQueue;
@@ -206,7 +210,12 @@ class Capture final : public GeometryDrawCaptureOwner
         smallest->count = 1;
     }
 
-    void noteSpanFamily(std::uint32_t chunk, std::uint32_t mesh, std::uint32_t vertices) noexcept
+    // Counts `elements` admitted elements of one family, exactly as that many
+    // single calls would: the first places the family (or is counted as an
+    // eviction) and the rest find the same entry, because nothing else writes
+    // the table in between.
+    void noteSpanFamily(std::uint32_t chunk, std::uint32_t mesh, std::uint32_t vertices,
+                        std::uint32_t elements) noexcept
     {
         if (!chunk || !mesh) return;
         const auto base = unsigned(((std::uint64_t(mesh) * 0x9E3779B97F4A7C15ull) ^
@@ -219,7 +228,7 @@ class Capture final : public GeometryDrawCaptureOwner
             {
                 if (entry.chunk == chunk && entry.mesh == mesh)
                 {
-                    ++entry.count;
+                    entry.count += elements;
                     return;
                 }
                 continue;
@@ -228,10 +237,10 @@ class Capture final : public GeometryDrawCaptureOwner
         }
         if (!free)
         {
-            ++spanFamilyEvictions;
+            spanFamilyEvictions += elements;
             return;
         }
-        *free = { chunk, mesh, vertices, 1 };
+        *free = { chunk, mesh, vertices, elements };
     }
 
     bool completed(ID3D12Fence* fence, std::uint64_t value)
@@ -514,6 +523,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         history[1] = buffer(device.Get(), UINT64(HistoryCapacity) * 32, D3D12_HEAP_TYPE_DEFAULT,
                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        historyAddress[0] = history[0]->GetGPUVirtualAddress();
+        historyAddress[1] = history[1]->GetGPUVirtualAddress();
         checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&producerFence)),
                 "Packed producer fence creation failed");
         checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&consumerFence)),
@@ -538,6 +549,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     "Packed mapping map failed");
             checked(frame.constantBuffer->Map(0, &noRead, reinterpret_cast<void**>(&frame.constants)),
                     "Packed constants map failed");
+            frame.mappingAddress = frame.mapping->GetGPUVirtualAddress();
+            frame.constantAddress = frame.constantBuffer->GetGPUVirtualAddress();
+            frame.captureAddress = frame.capture->GetGPUVirtualAddress();
             recordClear(frame.capture.Get(), pixels * 2, frame.clearAllocator, frame.clearCommand);
         }
         recordHistoryClear();
@@ -688,7 +702,52 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         }
         const auto mappingBase = frameSlot->mappingUsed;
         auto* mapping = frameSlot->mappings + mappingBase;
-        std::memset(mapping, 0, args.instances * sizeof(GeometryInstance));
+        // The mapping and constant buffers are write-combined upload memory, and
+        // a locked instruction (identity and array-mapping counters, reference
+        // counts, the mutex release) waits until pending write-combined lines
+        // have drained. Written in the element loop, every admitted element paid
+        // one such drain, which cost more than the rest of its work. Admitted
+        // elements are therefore staged in cacheable memory and the upload
+        // writes are made together, as whole 64-byte records, after the last
+        // locked instruction before the mutex release. The bytes are unchanged:
+        // zeroes over the draw's range, then each admitted record in admission
+        // order. A draw that admits nothing leaves the upload memory untouched;
+        // its range is not reserved and the next draw clears it again.
+        struct StagedElement
+        {
+            std::uint32_t index, historyBase, vertices, generation, boundaryId;
+        };
+        std::array<StagedElement, 64> staged;
+        unsigned stagedCount = 0;
+        bool cleared = false;
+        const auto writeStaged = [&]() noexcept
+        {
+            if (!cleared)
+            {
+                std::memset(mapping, 0, args.instances * sizeof(GeometryInstance));
+                cleared = true;
+            }
+            GeometryInstance item {};
+            item.width = configuredWidth; item.height = configuredHeight;
+            item.pixelBase = 1; item.stride = configuredWidth;
+            item.pixelCapacity = configuredWidth * configuredHeight + 1;
+            for (unsigned i = 0; i < stagedCount; ++i)
+            {
+                const auto& element = staged[i];
+                item.historyBase = element.historyBase;
+                item.vertices = element.vertices;
+                item.generation = element.generation;
+                item.reserved[0] = element.boundaryId;
+                mapping[element.index] = item;
+            }
+            stagedCount = 0;
+        };
+        // One identity scratch per draw: the provider resolves the draw-wide
+        // inputs once and publishes its counters in flush below.
+        PackedMotionIdentityScratch identityScratch;
+        // Consecutive admitted elements of one owner mesh; the family table is
+        // updated once per run.
+        std::uint32_t familyMesh = 0, familyRun = 0;
         bool any = false;
         for (unsigned spanIndex = 0; spanIndex < draw.objects.size(); ++spanIndex)
         {
@@ -707,7 +766,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             for (unsigned ordinal = 0; ordinal < span.count; ++ordinal)
             {
                 VertexHistoryKey key;
-                if (!identitySource.resolve(identitySource.context, command, draw, shape, *pipeline,
+                if (!identitySource.resolve(identitySource.context, identityScratch, command, draw, shape, *pipeline,
                     spanIndex, ordinal, key) || !key || !key.object.generation)
                 {
                     if (gate) GateNote(GatePrepareSpan);
@@ -777,19 +836,19 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 // The family table is a bounded diagnostic key, not an identity
                 // check (the hash still mixes the full mesh address), so the low
                 // 32 bits printed in the status line are enough here.
-                noteSpanFamily(draw.chunk, std::uint32_t(key.object.mesh), vertices);
+                const auto familyKey = std::uint32_t(key.object.mesh);
+                if (familyRun && familyKey != familyMesh)
+                {
+                    noteSpanFamily(draw.chunk, familyMesh, vertices, familyRun);
+                    familyRun = 0;
+                }
+                familyMesh = familyKey;
+                ++familyRun;
                 ++frameSpanCount;
-                auto& item = mapping[span.first + ordinal];
-                item.historyBase = allocation.history.base;
-                item.vertices = allocation.history.vertices;
-                item.vertexOrigin = 0;
-                item.generation = allocation.history.generation;
-                item.left = item.top = 0;
-                item.width = configuredWidth; item.height = configuredHeight;
-                item.pixelBase = 1; item.stride = configuredWidth;
-                item.pixelCapacity = configuredWidth * configuredHeight + 1;
-                item.statusIndex = 0;
-                item.reserved[0] = allocation.boundaryId;
+                if (stagedCount == staged.size())
+                    writeStaged();
+                staged[stagedCount++] = { span.first + ordinal, allocation.history.base, allocation.history.vertices,
+                                          allocation.history.generation, allocation.boundaryId };
                 any = true;
                 if (gate && log && gateAdmitLines < 64)
                 {
@@ -804,6 +863,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 }
             }
         }
+        identitySource.flush(identitySource.context, identityScratch);
+        if (familyRun)
+            noteSpanFamily(draw.chunk, familyMesh, vertices, familyRun);
         if (!any)
         {
             if (gate) GateNote(GatePrepareNoElement);
@@ -833,16 +895,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             // keeps the nearest covered record ahead of any uncovered one.
             controls.opacityThreshold(), 0.f, 0.f, 0.f
         };
-        std::memcpy(frameSlot->constants + constantIndex * 256, &constants, sizeof(constants));
-        frameSlot->mappingUsed += args.instances;
-        prepared.pipeline = packedPipeline;
-        prepared.history = { mappingBase, MappingCapacity, HistoryCapacity, 0, args.instances, 0,
-                             frameNumber, frameNumber - 1 };
-        prepared.previous = history[(frameNumber - 1) & 1]->GetGPUVirtualAddress();
-        prepared.current = history[frameNumber & 1]->GetGPUVirtualAddress();
-        prepared.material = frameSlot->constantBuffer->GetGPUVirtualAddress() + UINT64(constantIndex) * 256;
-        prepared.capture = frameSlot->capture->GetGPUVirtualAddress();
-        prepared.mapping = frameSlot->mapping->GetGPUVirtualAddress();
+        if (historyFree)
+        {
+            NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
+            ++frameSlot->graftDraws;
+            ++counters.historyBypassed;
+        }
         // Crash attribution for the replay path. Sparse on purpose: one line per
         // few hundred frames keeps the log bounded while still proving that the
         // packed raster was drawn after the last load.
@@ -852,12 +910,19 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", frameNumber, draw.chunk);
             std::fflush(log);
         }
-        if (historyFree)
-        {
-            NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
-            ++frameSlot->graftDraws;
-            ++counters.historyBypassed;
-        }
+        // Upload writes last (see the staging note above): only the mutex
+        // release follows them.
+        writeStaged();
+        std::memcpy(frameSlot->constants + constantIndex * 256, &constants, sizeof(constants));
+        frameSlot->mappingUsed += args.instances;
+        prepared.pipeline = packedPipeline;
+        prepared.history = { mappingBase, MappingCapacity, HistoryCapacity, 0, args.instances, 0,
+                             frameNumber, frameNumber - 1 };
+        prepared.previous = historyAddress[(frameNumber - 1) & 1];
+        prepared.current = historyAddress[frameNumber & 1];
+        prepared.material = frameSlot->constantAddress + UINT64(constantIndex) * 256;
+        prepared.capture = frameSlot->captureAddress;
+        prepared.mapping = frameSlot->mappingAddress;
         return true;
     }
 
