@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -91,6 +92,41 @@ bool sameOwner(const GeometryDrawIdentity& a, const GeometryDrawIdentity& b)
 {
     return a.proxy == b.proxy && a.mesh == b.mesh && a.slot == b.slot;
 }
+
+// Diagnostic lines a capture-mutex holder formats under the mutex and writes
+// once the mutex is released: the holder declares it before its lock, so the
+// lock is destroyed first. A slow log write, or another thread inside the FILE
+// lock, then never stalls a recording thread that waits for the mutex. Fixed
+// storage; a line that does not fit is dropped.
+struct DeferredLog
+{
+    FILE* file;
+    bool flush = false;
+    std::size_t used = 0;
+    char text[1024];
+    explicit DeferredLog(FILE* target) noexcept : file(target) {}
+    DeferredLog(const DeferredLog&) = delete;
+    DeferredLog& operator=(const DeferredLog&) = delete;
+    ~DeferredLog()
+    {
+        if (file == nullptr || used == 0)
+            return;
+        std::fwrite(text, 1, used, file);
+        if (flush)
+            std::fflush(file);
+    }
+    void add(const char* format, ...) noexcept
+    {
+        if (file == nullptr)
+            return;
+        va_list arguments;
+        va_start(arguments, format);
+        const int written = std::vsnprintf(text + used, sizeof(text) - used, format, arguments);
+        va_end(arguments);
+        if (written > 0 && std::size_t(written) < sizeof(text) - used)
+            used += std::size_t(written);
+    }
+};
 
 class Capture final : public GeometryDrawCaptureOwner
 {
@@ -364,7 +400,7 @@ class Capture final : public GeometryDrawCaptureOwner
                 newest = value.number;
         return newest;
     }
-    bool beginMappings(std::uint32_t number)
+    bool beginMappings(std::uint32_t number, DeferredLog& deferred)
     {
         if (objectMappings.frame() == number) return true;
         if (!number || number < objectMappings.frame()) return false;
@@ -397,9 +433,9 @@ class Capture final : public GeometryDrawCaptureOwner
                 if (log != nullptr && staleSlotReports < 8)
                 {
                     ++staleSlotReports;
-                    std::fprintf(log, "PACKED_SLOT_RECOVER frame=%u stale=%u gap=%u\n", number, value.number,
+                    deferred.add("PACKED_SLOT_RECOVER frame=%u stale=%u gap=%u\n", number, value.number,
                                  number - value.number);
-                    std::fflush(log);
+                    deferred.flush = true;
                 }
                 continue;
             }
@@ -418,15 +454,14 @@ class Capture final : public GeometryDrawCaptureOwner
         {
             static std::atomic<unsigned> markerLines { 0 };
             const auto& stats = objectMappings.historyStats();
-            std::fprintf(log,
-                         "PACKED_CAPTURE_FRAME frame=%u next=%u hits=%llu inserted=%llu spans=%llu evictions=%llu "
+            deferred.add("PACKED_CAPTURE_FRAME frame=%u next=%u hits=%llu inserted=%llu spans=%llu evictions=%llu "
                          "live=%u\n",
                          objectMappings.historyFrame(), number, static_cast<unsigned long long>(stats.hits),
                          static_cast<unsigned long long>(stats.inserted),
                          static_cast<unsigned long long>(frameSpanCount),
                          static_cast<unsigned long long>(spanFamilyEvictions), objectMappings.liveHistories());
             if ((markerLines.fetch_add(1, std::memory_order_relaxed) & 31u) == 31u)
-                std::fflush(log);
+                deferred.flush = true;
         }
         if (failed || !objectMappings.beginFrame(number, completedThrough)) return false;
         // The family table describes the frame that is being captured now; a
@@ -758,14 +793,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     // it: capture state, frame slot, mapping frame, capacity, recording.
     // GateStageCount when the draw may admit elements into `slot`.
     unsigned openDraw(ID3D12GraphicsCommandList* command, std::uint64_t epoch, std::uint32_t frameNumber,
-                      std::uint32_t instances, Frame*& slot)
+                      std::uint32_t instances, Frame*& slot, DeferredLog& deferred)
     {
         if (failed)
             return GatePrepareFailed;
         slot = frame(frameNumber);
         if (!slot)
             return GatePrepareFrameSlot;
-        if (!beginMappings(frameNumber))
+        if (!beginMappings(frameNumber, deferred))
         {
             ++counters.orderingRejected;
             return GatePrepareOrdering;
@@ -1027,6 +1062,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         while (count)
         {
             bool acquired = false;
+            // Lines of this batch's holders (beginMappings), written after the
+            // lock below is released.
+            DeferredLog deferred(log);
             {
                 std::unique_lock lock(mutex, std::try_to_lock);
                 if (!lock)
@@ -1042,7 +1080,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 if (!opened)
                 {
                     opened = true;
-                    refusal = openDraw(command, epoch, frameNumber, args.instances, frameSlot);
+                    refusal = openDraw(command, epoch, frameNumber, args.instances, frameSlot, deferred);
                     if (refusal != GateStageCount)
                         break;
                     slotSerial = frameSlot->serial;
@@ -1421,6 +1459,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     PackedMotionFrame acquire(ID3D12GraphicsCommandList* command, std::uint32_t width, std::uint32_t height,
                               std::uint64_t fgFrame, bool reset)
     {
+        DeferredLog deferred(log); // Written after the lock below is released.
         std::lock_guard lock(mutex);
         if (failed || !command || fgFrame == UINT64_MAX || width != configuredWidth || height != configuredHeight)
         {
@@ -1478,17 +1517,16 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             static std::atomic<unsigned> rejected { 0 };
             if (log != nullptr && rejected.fetch_add(1, std::memory_order_relaxed) < 6)
             {
-                std::fprintf(log, "PACKED_ACQUIRE reject fgFrame=%llu engineFrame=%llu fgSubmitBatch=%llu\n",
+                deferred.add("PACKED_ACQUIRE reject fgFrame=%llu engineFrame=%llu fgSubmitBatch=%llu\n",
                              static_cast<unsigned long long>(fgFrame),
                              static_cast<unsigned long long>(framePair.engineFrame()),
                              static_cast<unsigned long long>(fg->submitBatch));
                 for (const auto& value : frames)
-                    std::fprintf(log,
-                                 "PACKED_ACQUIRE frame number=%u producer=%llu clear=%u submitBatch=%llu ordered=%u\n",
+                    deferred.add("PACKED_ACQUIRE frame number=%u producer=%llu clear=%u submitBatch=%llu ordered=%u\n",
                                  value.number, static_cast<unsigned long long>(value.producerValue),
                                  value.clearSubmitted ? 1u : 0u, static_cast<unsigned long long>(value.submitBatch),
                                  value.orderedQueue ? 1u : 0u);
-                std::fflush(log);
+                deferred.flush = true;
             }
             return {};
         }
@@ -1597,6 +1635,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     // inline compose needs. A frame the substitution already took is skipped.
     PackedMotionFrame acquireSecondConsumer(std::uint32_t width, std::uint32_t height, std::uint64_t engineFrame)
     {
+        DeferredLog deferred(log); // Written after the lock below is released.
         std::lock_guard lock(mutex);
         if (failed || width != configuredWidth || height != configuredHeight)
             return {};
@@ -1607,14 +1646,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             static std::atomic<unsigned> logged { 0 };
             if (log != nullptr && logged.fetch_add(1, std::memory_order_relaxed) < 6)
             {
-                std::fprintf(log, "PACKED_SECOND reject engineFrame=%llu pair=%llu\n",
+                deferred.add("PACKED_SECOND reject engineFrame=%llu pair=%llu\n",
                              static_cast<unsigned long long>(engineFrame),
                              static_cast<unsigned long long>(framePair.engineFrame()));
                 for (const auto& value : frames)
-                    std::fprintf(log, "PACKED_SECOND frame number=%u producer=%llu clear=%u consumed=%u\n",
+                    deferred.add("PACKED_SECOND frame number=%u producer=%llu clear=%u consumed=%u\n",
                                  value.number, static_cast<unsigned long long>(value.producerValue),
                                  value.clearSubmitted ? 1u : 0u, value.consumerCommand ? 1u : 0u);
-                std::fflush(log);
+                deferred.flush = true;
             }
             return {};
         }
@@ -1638,6 +1677,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     // stall a dump.
     bool selectDumpFrame(std::uint32_t number)
     {
+        DeferredLog deferred(log); // Written after the lock below is released.
         std::lock_guard lock(mutex);
         const Frame* slot = nullptr;
         for (const auto& value : frames)
@@ -1680,12 +1720,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         snapshot.valid = true;
         idsArmed = false;
         idsDeferred = 0;
-        if (log)
-        {
-            std::fprintf(log, "PACKED_IDS frozen frame=%u elements=%u draws=%u complete=%u deferred=%u\n", number,
-                         snapshot.count, snapshot.pipelines, complete ? 1u : 0u, snapshot.deferred);
-            std::fflush(log);
-        }
+        deferred.add("PACKED_IDS frozen frame=%u elements=%u draws=%u complete=%u deferred=%u\n", number,
+                     snapshot.count, snapshot.pipelines, complete ? 1u : 0u, snapshot.deferred);
+        deferred.flush = true;
         return true;
     }
 
