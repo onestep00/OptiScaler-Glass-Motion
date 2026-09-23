@@ -40,6 +40,13 @@ previous-clip graph only:
                      attributes only
 A root graft without a union entry is refused.
 
+--skinned-previous-world current reads <workspace>/native-grafted-skinned-current
+(graft_native_motion.py and verify_native_grafts.py with the same flag). There a
+class-2 root graft may carry previous_world "current": it reads the target's own
+current INSTANCE_TRANSFORM rows instead of the MotionMatrix and is exported with
+required engine motion rows [] instead of [24, 25, 26]; its supply class must be
+2. All other records follow the rules above.
+
 The output contains extracted game shader code. Write it to an ignored local
 directory;
 never commit or publish it. GlassFg.props copies <repo>/artifacts/glass-grafts/
@@ -98,9 +105,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--workspace', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--skinned-previous-world', choices=('motion', 'current'), default='motion',
+                        help='current exports <workspace>/native-grafted-skinned-current')
     args = parser.parse_args()
     workspace = args.workspace.resolve(strict=True)
-    grafted = workspace / 'native-grafted'
+    variant = args.skinned_previous_world == 'current'
+    grafted = workspace / ('native-grafted-skinned-current' if variant else 'native-grafted')
     index = json.loads((grafted / 'index.json').read_text(encoding='utf-8'))
     checked = json.loads((grafted / 'verification.json').read_text(encoding='utf-8'))
     verification = {row['sha256']: row for row in checked['results']}
@@ -119,7 +129,8 @@ def main():
         if not row or not all(row.get(check) is True for check in CHECKS):
             refused['verification'] += 1
             return None
-        if shader['required_engine_motion_rows'] != ROWS:
+        current_world = variant and shader.get('previous_world') == 'current'
+        if shader['required_engine_motion_rows'] != ([] if current_world else ROWS):
             refused['rows'] += 1
             return None
         current, previous = int(shader['current_output']), int(shader['previous_output'])
@@ -129,6 +140,9 @@ def main():
         native = union.get(shader['native_sha256'])
         if native is None:
             refused['supply-union'] += 1
+            return None
+        if current_world and supply_class(native) != 2:
+            refused['previous-world class'] += 1
             return None
         source = grafted / f'{sha}.dxil'
         if source.read_bytes()[:4] != b'DXBC':
@@ -149,6 +163,8 @@ def main():
         if root:
             records.append((bytes.fromhex(sha), *root, camera))
             kinds['root+camera' if camera else 'root only'] += 1
+            if variant and shader.get('previous_world') == 'current':
+                kinds['root with current previous world'] += 1
         elif camera:
             records.append((bytes.fromhex(sha), NO_OUTPUT, NO_OUTPUT, int(shader['camera_supply_class']), None, camera))
             kinds['camera only (native twin, root not exported)'] += 1

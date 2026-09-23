@@ -27,6 +27,21 @@ engine's own velocity route for that factory and stays eligible even when it is
 root-only, as do twins reading skinning inputs/t10 (class 2) or preskinned t9/b3
 history (class 4). If none validates, the root status is factory_mismatch and
 only the camera-only variant is written.
+
+--skinned-previous-world current (default motion) writes an experimental catalog
+to <workspace>/native-grafted-skinned-current instead of native-grafted. A root
+graft whose twin's previous graph is class 2 (skinning inputs or t10 bones) then
+reads the target's own current world transform instead of the engine
+MotionMatrix: every use of MotionMatrix row start+k (b7, relocated to 24..26 by
+default) reads INSTANCE_TRANSFORM k, the input row its current position reads.
+The previous translation chain of each row (w bitcast, b1 row 38 subtraction when
+present, sitofp, 2^-17) must equal the current path's chain. Previous bones (t10
+at the previous skinning offset) and the previous camera stay the twin's. Such a
+record needs no engine motion row (required_engine_motion_rows []); its b7
+declaration is neither enlarged nor added unless the previous graph reads another
+b7 modifier row. It records previous_world "current" and previous_world_rows
+[[b7 row, "INSTANCE_TRANSFORM", k], ...]. Class 1 root grafts and camera variants
+are unchanged.
 """
 from pathlib import Path
 from collections import Counter,defaultdict
@@ -40,8 +55,12 @@ _parser.add_argument('--workspace', type=Path, required=True)
 _parser.add_argument('--generic-extra', type=Path, action='append', default=[],
     help='JSON list of {sha256, vertex_factory} observed VS outside the transparent inventory; '
          'their disassembly is read from <workspace>/extended-position-inputs')
+_parser.add_argument('--skinned-previous-world', choices=('motion','current'), default='motion',
+    help='previous world of class-2 (skinning) root grafts: motion = engine MotionMatrix (b7 rows 24..26), '
+         'current = the target\'s own INSTANCE_TRANSFORM rows; current writes <workspace>/native-grafted-skinned-current')
 _args=_parser.parse_args()
 p=_args.workspace.resolve(strict=True);_extra=_args.generic_extra
+GRAFTED='native-grafted-skinned-current' if _args.skinned_previous_world=='current' else 'native-grafted'
 
 def emit_clip_outputs(a,text,native,node,lines,metadata,previous,input_cols,used_calls,dejittered=False):
     """Append de-jittered current clip and the given previous clip as two new outputs.
@@ -98,7 +117,68 @@ def emit_clip_outputs(a,text,native,node,lines,metadata,previous,input_cols,used
     text+='\n'+'\n'.join(metadata)+'\n'
     return text,first,len(lines)
 
-def graft(target,native,clip,target_contract=None,native_contract=None,specializations=None,coverage_guard=None):
+FIXED_POINT='0x3EE0000000000000'   # 2^-17: fixed-point world translation (INSTANCE_TRANSFORM/MotionMatrix w)
+
+def cone_values(s,roots):
+    seen=set();todo=list(roots)
+    while todo:
+        v=todo.pop()
+        if v in seen or v not in s.defs:continue
+        seen.add(v);todo.extend(var.findall(s.defs[v]))
+    return seen
+
+def translation_chain(s,values,w):
+    """Ops from a world row's w component to its float translation inside values: bitcast,
+    the b1 row 38 subtraction when present, sitofp, 2^-17. Other operands are digests."""
+    steps=[]
+    while not re.fullmatch(r'fmul fast float %[\w.]+, '+FIXED_POINT,s.defs.get(w,'')):
+        users=[u for u in values if w in var.findall(s.defs[u])]
+        if len(users)!=1 or len(steps)==4:raise ValueError('world translation is not one fixed-point chain')
+        steps.append(var.sub(lambda m,w=w:'@' if m[0]==w else s.digest(m[0]),s.defs[users[0]]));w=users[0]
+    return steps
+
+def current_world_rows(b,native,roots,motion_rows):
+    """Native text whose previous clip reads the current world transform instead of the MotionMatrix.
+
+    The engine MotionMatrix (b7 motion_rows) is the previous-frame object-to-world
+    transform in the INSTANCE_TRANSFORM layout: row k = xyz and a fixed-point
+    translation in w. Every use of MotionMatrix row motion_rows[k] component c
+    becomes the INSTANCE_TRANSFORM k component c load of the native's current
+    position, which the identical current graph shares with the target. Each
+    row's previous translation chain must equal the current path's chain.
+    Returns the text and [[b7 row, 'INSTANCE_TRANSFORM', k], ...].
+    """
+    oid=next(i for i,f in b.outs.items() if f[1]=='!"SV_Position"')
+    current=cone_values(b,[b.roots[oid][i] for i in range(4)])
+    world={}
+    for v in current:
+        m=re.search(r'@dx.op.loadInput\.\w+\(i32 4, i32 (\d+), i32 (\d+), i8 (\d+),',b.defs[v])
+        if not m or b.ins[int(m[1])][1]!='!"INSTANCE_TRANSFORM"':continue
+        f=b.ins[int(m[1])];k=int(re.findall(r'i32 (\d+)',b.md[f[4][1:]])[int(m[2])])
+        if world.setdefault((k,int(m[3])),v)!=v:raise ValueError('current world component loaded twice')
+    substitute={}
+    for v in cone_values(b,roots):
+        m=re.fullmatch(r'extractvalue %dx.types.CBufRet.f32 (%\d+), (\d)',b.defs[v])
+        load=m and re.search(r'@dx.op.cbufferLoadLegacy.f32\(i32 59, %dx.types.Handle (%\d+), i32 (\d+)\)',b.defs.get(m[1],''))
+        if not load or b.handles.get(load[1],())[:1]!=(2,) or b.handles[load[1]][2]!=7 or int(load[2]) not in motion_rows:continue
+        key=(motion_rows.index(int(load[2])),int(m[2]))
+        if key not in world:raise ValueError('motion matrix component without a current world input')
+        substitute[v]=world[key]
+    def replace(line):
+        head=re.match(r'  %[\w.]+ = ',line);head=head[0] if head else ''
+        return head+var.sub(lambda m:substitute.get(m[0],m[0]),line[len(head):])
+    text='\n'.join(map(replace,native.split('\n')))
+    c=Shader(text,b.modifiers,b.specializations)
+    if any(binding==7 and row in motion_rows for binding,row in c.dependencies_values(roots)['cb_rows']):
+        raise ValueError('previous clip still reads the motion matrix')
+    previous=cone_values(c,roots)
+    for k in range(3):
+        if (k,3) not in world:raise ValueError('current world has no fixed-point translation row')
+        if translation_chain(c,previous,world[k,3])!=translation_chain(c,current,world[k,3]):
+            raise ValueError('previous world translation differs from the current path')
+    return text,[[row,'INSTANCE_TRANSFORM',k] for k,row in enumerate(motion_rows)]
+
+def graft(target,native,clip,target_contract=None,native_contract=None,specializations=None,coverage_guard=None,previous_world='motion'):
     a,b=Shader(target,target_contract),Shader(native,native_contract,specializations)
     geometric_roots=None
     if coverage_guard:
@@ -117,6 +197,10 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
         motion_rows=sorted(set(motion_rows))
     if len(motion_rows)!=3 or motion_rows!=list(range(motion_rows[0],motion_rows[0]+3)):
         raise ValueError('native previous dependency is not a three-row motion matrix')
+    world_rows=None
+    if previous_world=='current':
+        native,world_rows=current_world_rows(b,native,roots,motion_rows)
+        b=Shader(native,native_contract,specializations)
     text=target.rstrip('\0\r\n')+'\n'
     if text.count('  ret void')!=1:raise ValueError('target needs a single exit')
     node=max(map(int,re.findall(r'^!(\d+) = ',text,re.M)))+1
@@ -131,6 +215,7 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
         key=modifier_key(native_contract,row)
         candidates=[r for r in range(28) if modifier_key(target_contract,r)==key]
         if len(candidates)!=1:raise ValueError('unresolved previous-only material modifier')
+        if 16*candidates[0]+16>material_bytes:raise ValueError('previous-only material modifier outside the declared b7')
         return candidates[0]
     def uses_motion(v):
         if v in material_dependent:return material_dependent[v]
@@ -145,12 +230,13 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
             todo.extend(var.findall(rhs))
         material_dependent[v]=result;return result
     motion_handle=next((v for v,h in a.handles.items() if h[0]==2 and h[2]==7),None)
-    original_material_bytes=0
+    original_material_bytes=0;material_bytes=448
     if motion_handle:
         h=a.handles[motion_handle]
         original_material_bytes=int(a.resources[h[0],h[1]][3][4:])
         if not 0<original_material_bytes<=448:raise ValueError('existing b7 storage exceeds native uploader')
-        if original_material_bytes!=448:
+        if world_rows:material_bytes=original_material_bytes
+        elif original_material_bytes!=448:
             resources=re.search(r'!dx.resources = !\{!(\d+)\}',text)[1]
             cblist=a.md[resources].split(', ')[2][1:]
             candidates=[ref for ref in re.findall(r'!(\d+)',a.md[cblist])
@@ -160,6 +246,7 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
             fields[1]='%GraftedMotionConstants* undef';fields[6]='i32 448'
             text=text.replace(f'!{ref} = !{{{a.md[ref]}}}',f'!{ref} = !{{'+', '.join(fields)+'}')
             text=text.replace('define void @','%GraftedMotionConstants = type { [28 x <4 x float>] }\n\ndefine void @',1)
+    elif world_rows and not any(binding==7 for binding,_ in b.dependencies_values(roots)['cb_rows']):material_bytes=0
     else:
         rid=max((rid for kind,rid in a.resources if kind==2),default=-1)+1
         resources=re.search(r'!dx.resources = !\{!(\d+)\}',text)[1]
@@ -197,7 +284,9 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
         if rhs.startswith('phi '):raise ValueError('native prior position needs new control-flow graft')
         if v in b.handles:
             h=b.handles[v]
-            if h[0]==2 and h[2]==7:mapping[v]=motion_handle;return motion_handle
+            if h[0]==2 and h[2]==7:
+                if not motion_handle:raise ValueError('previous graph reads b7 without a b7 declaration')
+                mapping[v]=motion_handle;return motion_handle
             candidates=[x for x,q in a.handles.items() if q[0]==h[0] and q[2:]==h[2:] and a.resources[q[0],q[1]]==b.resources[h[0],h[1]]]
             if not candidates:raise ValueError('missing native resource contract')
             mapping[v]=candidates[0];return mapping[v]
@@ -231,7 +320,9 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
                 mapping[v]=b.specializations[v];reused.add(v)
             elif v in b.handles:
                 h=b.handles[v]
-                if h[0]==2 and h[2]==7:mapping[v]=motion_handle
+                if h[0]==2 and h[2]==7:
+                    if not motion_handle:raise ValueError('previous graph reads b7 without a b7 declaration')
+                    mapping[v]=motion_handle
                 else:
                     matches=[x for x,q in a.handles.items() if q[0]==h[0] and q[2:]==h[2:] and a.resources[q[0],q[1]]==b.resources[h[0],h[1]]]
                     if not matches:raise ValueError('missing native control-flow resource')
@@ -263,9 +354,10 @@ def graft(target,native,clip,target_contract=None,native_contract=None,specializ
     text,first,added=emit_clip_outputs(a,text,native,node,lines,metadata,previous,input_cols,used_calls)
     return text,dict(current_output=first,previous_output=first+1,added_instructions=added,
         shared_native_values=sum(v in shared.values() for v in mapping.values()),
-        original_motion_rows=motion_rows,required_engine_motion_rows=[24,25,26],graft_mode=mode,
+        original_motion_rows=motion_rows,required_engine_motion_rows=[] if world_rows else [24,25,26],graft_mode=mode,
         coverage_guard=coverage_guard,original_material_bytes=original_material_bytes,
-        required_material_bytes=448,gpu_verified=False)
+        required_material_bytes=material_bytes,gpu_verified=False,
+        **(dict(previous_world='current',previous_world_rows=world_rows) if world_rows else {}))
 
 CAMERA_LOAD=re.compile(r'@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle (%(?:\d+|graft[\w.]*)), i32 (\d+)\)')
 COMMUTATIVE=('fmul fast float ','fadd fast float ','call float @dx.op.tertiary.f32(i32 46,')
@@ -636,7 +728,7 @@ def main():
             b=Shader((p/'opaque-velocity-audit'/(n['sha256']+'.ll')).read_text())
             previous_classes[n['sha256']]=cone_supply_class(b,[b.roots[o][col] for o,col in n['previous'][0]['components']])
         return previous_classes[n['sha256']]
-    out=p/'native-grafted';out.mkdir(exist_ok=True)
+    out=p/GRAFTED;out.mkdir(exist_ok=True)
     tool=p.parent/'glass-native-material-buildcheck/GeometryShaderTool.exe'
     compiler=p.parent/'glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll'
     def assemble(ll,text):
@@ -653,17 +745,19 @@ def main():
         skinned=any('Skinned' in f for f in families)
         twins=[n for n in candidates if not skinned or previous_class(n)!=1
                or not factories.get(n['sha256'],set()).isdisjoint(families)]
-        def attempt(build,path,candidates):
+        def attempt(build,path,candidates,options=lambda n:{}):
             errors=[]
             for n in candidates:
                 try:
                     text,info=build(target,(p/'opaque-velocity-audit'/(n['sha256']+'.ll')).read_text(),n['previous'][0],
-                        contracts.get(r['sha256']),contracts.get(n['sha256']),n.get('specializations'),r.get('coverage_guard'))
+                        contracts.get(r['sha256']),contracts.get(n['sha256']),n.get('specializations'),r.get('coverage_guard'),**options(n))
                     assemble(path,text);return n,info,[]
                 except (ValueError,KeyError,StopIteration,AssertionError) as e:errors.append(str(e))
             for stale in (path,path.with_suffix('.dxil')):stale.unlink(missing_ok=True)
             return None,None,sorted(set(errors))
-        n,info,errors=attempt(graft,out/(r['sha256']+'.ll'),twins)
+        # --skinned-previous-world current: class-2 twins graft with the target's current world rows.
+        n,info,errors=attempt(graft,out/(r['sha256']+'.ll'),twins,lambda n:dict(previous_world=
+            'current' if _args.skinned_previous_world=='current' and previous_class(n)==2 else 'motion'))
         if n:row=dict(sha256=r['sha256'],families=families,native_sha256=n['sha256'],status='validated',
                       specializations=n.get('specializations',{}),**info)
         elif len(twins)<len(candidates):
@@ -682,6 +776,8 @@ def main():
         camera_statuses=dict(Counter(r['camera_status'] for r in results)),
         camera_rows=dict(Counter(str(r['camera_rows']) for r in results if r['camera_status']=='validated')),
         copied_from_original_native_mv=True,live_admitted=False)
+    if _args.skinned_previous_world=='current':
+        summary['previous_world']=dict(Counter(r.get('previous_world','motion') for r in results if r['status']=='validated'))
     generic,generic_summary=generic_phase(rows,results,out,assemble)
     summary['generic_camera']=generic_summary
     (out/'index.json').write_text(json.dumps(dict(summary=summary,shaders=results,generic_camera=generic),indent=2))

@@ -3,6 +3,25 @@ import re
 from match_shared_native_motion import Shader, modifier_key
 
 
+def current_world_reference(native,rows):
+    """Native text whose MotionMatrix components load the recorded current world input rows.
+
+    For a --skinned-previous-world current graft: every extractvalue of a b7 load of
+    row r in rows [[r, semantic, index], ...] becomes a load of input semantic
+    index, same column."""
+    s=Shader(native)
+    element={(f[1].strip('!"'),int(index)):(sid,row) for sid,f in s.ins.items()
+             for row,index in enumerate(re.findall(r'i32 (\d+)',s.md[f[4][1:]]))}
+    source={row:element[name,index] for row,name,index in rows}
+    def replace(m):
+        load=re.search(r'@dx.op.cbufferLoadLegacy.f32\(i32 59, %dx.types.Handle (%\d+), i32 (\d+)\)',s.defs.get(m[2],''))
+        h=s.handles.get(load[1]) if load else None
+        if not h or h[0]!=2 or h[2]!=7 or int(load[2]) not in source:return m[0]
+        sid,row=source[int(load[2])]
+        return f'  {m[1]} = call float @dx.op.loadInput.f32(i32 4, i32 {sid}, i32 {row}, i8 {m[3]}, i32 undef)'
+    return re.sub(r'^  (%\d+) = extractvalue %dx.types.CBufRet.f32 (%\d+), (\d)$',replace,native,flags=re.M)
+
+
 def verify_graft(original, grafted, native, r, route, contracts):
     a,b=Shader(original),Shader(grafted)
     # Original definitions are unchanged, and each original store still exports
@@ -21,6 +40,10 @@ def verify_graft(original, grafted, native, r, route, contracts):
     try:a.before_jitter_subtraction(geometry)
     except ValueError:pass
     else:raise AssertionError('original already subtracts jitter; graft would subtract twice')
+    # A skinned-current graft reads the target's current world rows in place of
+    # the MotionMatrix; its reference is the native graph with that substitution.
+    world=r.get('previous_world_rows')
+    if world:native=current_world_reference(native,world)
     src=Shader(native)
     handles={v for v,h in src.handles.items() if h[0]==2 and h[2]==7}
     def relocate(m):
@@ -50,7 +73,7 @@ def verify_graft(original, grafted, native, r, route, contracts):
         assert len(seen)<=100000,'expression comparison bound exceeded'
     return dict(sha256=r['sha256'], original_outputs_unchanged=True,
                 original_branches_unchanged=True, native_previous_expression_identical=True,
-                current_clip_convention_verified=True)
+                current_clip_convention_verified=True, **({'previous_world':'current'} if world else {}))
 
 
 def verify_camera_graft(original, grafted, r):
