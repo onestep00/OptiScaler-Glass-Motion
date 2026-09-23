@@ -1683,10 +1683,15 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             }
             return original(command, handle, parameters, callback);
         }
-        // A proven handle is remembered by pointer, so an evaluation of the
-        // same handle that reaches the provider hook without the seam's
-        // feature check is recognised there; both release paths forget it.
-        RememberFrameGenerationHandle(static_cast<const void*>(handle), handle != nullptr ? handle->Id : 0u);
+        // A handle proven by the provider (OptiScaler's feature-checked seam or
+        // the create hook) is remembered by pointer, so an evaluation of the
+        // same handle that reaches the provider hook without the seam's check is
+        // recognised there; both release paths forget it. A caller proof is not
+        // remembered: it is re-checked on every call, and the live `fgcaller=any`
+        // experiment would otherwise leave upscaler and Ray Reconstruction
+        // pointers proven after the mode is switched back.
+        if (providerFrameGeneration)
+            RememberFrameGenerationHandle(static_cast<const void*>(handle), handle != nullptr ? handle->Id : 0u);
         frameGenerationEvaluation = true;
         {
             std::lock_guard lock(r.mutex);
