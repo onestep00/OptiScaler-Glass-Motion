@@ -47,4 +47,21 @@ std::optional<NativeGraft> FindNativeGraft(const void* vertexShader, std::size_t
 bool HashShaderSha256(const void* bytes, std::size_t size, std::array<std::uint8_t, 32>& digest) noexcept;
 // Records in the loaded index; 0 when the index is absent or malformed.
 std::size_t NativeGraftCount() noexcept;
+// Why the catalog export gave a VS no record although it had a camera-only
+// candidate (<module>/Glass/grafts/refused.bin, "GGREFS01", written by
+// tools/export_native_grafts.py). VehicleObjectMotion: the VS draws vehicle
+// geometry, which moves with its vehicle's transform; the engine's supply for
+// that motion (MotionMatrix) does not reach this VS, and camera motion alone is
+// wrong on a moving vehicle, so its draws keep the engine's motion.
+enum class NativeGraftRefusal : std::uint32_t
+{
+    None = 0,
+    VehicleObjectMotion = 1,
+};
+// Refusal for the VS digest FindNativeGraft reported; None when the VS is not
+// listed or refused.bin is absent or malformed. Same threading rule as
+// FindNativeGraft.
+NativeGraftRefusal FindNativeGraftRefusal(const std::array<std::uint8_t, 32>& hash) noexcept;
+// Refusals in the loaded refused.bin; 0 when absent or malformed.
+std::size_t NativeGraftRefusalCount() noexcept;
 } // namespace GlassFg

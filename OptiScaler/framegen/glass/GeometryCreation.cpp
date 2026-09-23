@@ -251,7 +251,10 @@ bool RequestGeometryVertexCapture(ID3D12PipelineState* original) noexcept
         if (!state || !original) return false;
         auto capture = state->active.load(std::memory_order_acquire);
         if (!capture) return false;
-        if (capture->cache.find(original)) return true;
+        // A published entry is already prepared unless it is refusal-only: that
+        // one never gets a capture variant, so the request fails.
+        if (const auto prepared = capture->cache.find(original))
+            return !prepared->refusalOnly();
         const auto observed = capture->observations.find(original);
         return observed && capture->cache.pipelineCreated(original, observed->description, true);
     }

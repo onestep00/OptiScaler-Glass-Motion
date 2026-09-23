@@ -236,6 +236,14 @@ It passes with `VERTEX_RECOVERY_OK` and `GEOMETRY_OBSERVATION_OK` under `/O2 /W4
 This compiles real D3D12 PSOs but does not submit game draws or prove live recovery.
 Local binary: `glass-observation-general-v1/retry.exe`.
 
+A VS listed in the graft catalog's `refused.bin` is the exception. When its
+material rewrite fails, its pipeline is still published for the coverage report
+(kind `refused`), with no capture variant. An explicit vertex-only request for it
+fails instead of requeueing it (`GeometryPipelineEntry::refusalOnly`). A
+vertex-only job for a refused VS on a pipeline the cache never admitted is
+accepted, fails on the compiler worker and is not published. Later requests for
+it fail as well. `PipelineCacheMemo.cpp` covers both cases.
+
 ## Batch native preparation
 
 The replaceable binding recorder also accepts `prepare-all-v1 <process-id>`.

@@ -177,19 +177,25 @@ inline void PublishGeometryMotionDegraded(bool value)
 }
 
 // Native graft path outcomes (engine MotionMatrix supply through a grafted VS).
-// Compile outcomes are counted once per packed pipeline on the cache worker:
-// ready + camera only + missing + rejected + class disabled = pipelines that
-// asked for a packed variant; array ready + array missing = ready. Draw outcomes are
-// counted by the packed capture's prepare, and NativePreviousEvaluations by the
-// FG host for a substituted evaluation whose frame drew at least one graft
-// variant while the vertex-history fallback was off. Diagnostics only; no
-// render path reads them.
+// Compile outcomes are counted once per pipeline job on the cache worker:
+// ready + camera only + missing + refused + rejected + class disabled =
+// pipelines that asked for a packed variant, plus the explicit vertex-only jobs
+// refused for a refused VS; array ready + array missing = ready. Draw outcomes
+// are counted by the packed capture's prepare, and
+// NativePreviousEvaluations by the FG host for a substituted evaluation whose
+// frame drew at least one graft variant while the vertex-history fallback was
+// off. Diagnostics only; no render path reads them.
 enum GeometryGraftCounter : unsigned
 {
     GraftReady,
     GraftMissing,
     GraftRejected,
     GraftClassDisabled,
+    // Pipelines whose VS the catalog refused (NativeGraftRefusal, refused.bin):
+    // vehicle geometry without the engine's object-motion supply. No packed
+    // graft variant; the draws keep the engine's motion. Also counts explicit
+    // vertex-only jobs for such a VS, which fail unpublished.
+    GraftRefused,
     // Pipelines whose VS has a camera-only catalog record (no native
     // current-position twin) and whose camera variant compiled: it is both
     // `packed` and `packedArray`. A failed compile counts GraftRejected.

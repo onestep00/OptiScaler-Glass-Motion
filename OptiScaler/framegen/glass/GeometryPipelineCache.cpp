@@ -301,7 +301,7 @@ struct GeometryPipelineCache::Impl
                         // Coverage identity (report only). The PS container is
                         // hashed once per job. The VS hash comes from the graft
                         // lookup below, or from the same helper on the
-                        // vertex-only path, which runs no lookup.
+                        // vertex-only path, which runs only the refusal lookup.
                         std::array<std::uint8_t, 32> pixelHash {};
                         HashShaderSha256(entry.description.PS.pShaderBytecode, entry.description.PS.BytecodeLength,
                                          pixelHash);
@@ -312,9 +312,23 @@ struct GeometryPipelineCache::Impl
                             HashShaderSha256(entry.description.VS.pShaderBytecode,
                                              entry.description.VS.BytecodeLength, vertexHash);
                             entry.vertexHash = hashWord(vertexHash);
-                            entry.graftKind = GeometryGraftKind::VertexOnly;
-                            status = compiler.createVertexCapture(device.Get(), *work.root->result, entry.description,
-                                                                  entry.instrumented, error);
+                            if (FindNativeGraftRefusal(vertexHash) != NativeGraftRefusal::None)
+                            {
+                                // A refused VS never gets a vertex-only capture
+                                // variant: the job fails unpublished, and
+                                // pipelineCreated does not queue a failed
+                                // vertex-only entry again.
+                                NoteGeometryGraft(GraftRefused);
+                                entry.graftKind = GeometryGraftKind::Refused;
+                                error = "Vertex-only capture refused for vertex shader " + hashPrefix(vertexHash) +
+                                        ": vehicle object motion without engine supply";
+                            }
+                            else
+                            {
+                                entry.graftKind = GeometryGraftKind::VertexOnly;
+                                status = compiler.createVertexCapture(device.Get(), *work.root->result,
+                                                                      entry.description, entry.instrumented, error);
+                            }
                         }
                         else
                         {
@@ -413,6 +427,17 @@ struct GeometryPipelineCache::Impl
                                 else
                                     NoteGeometryGraft(GraftArrayMissing);
                             }
+                            else if (FindNativeGraftRefusal(vertexHash) != NativeGraftRefusal::None)
+                            {
+                                // Vehicle VS whose object-motion supply (the
+                                // engine MotionMatrix) this VS does not receive:
+                                // the catalog refused its camera-only record, so
+                                // its draws keep the engine's motion.
+                                NoteGeometryGraft(GraftRefused);
+                                graftKind = GeometryGraftKind::Refused;
+                                packedError = "Native graft refused for vertex shader " + hashPrefix(vertexHash) +
+                                              ": vehicle object motion without engine supply";
+                            }
                             else
                             {
                                 NoteGeometryGraft(GraftMissing);
@@ -461,7 +486,15 @@ struct GeometryPipelineCache::Impl
                                         ++counters.packedDeltaMissing;
                                 }
                             }
-                            status = SUCCEEDED(materialStatus) || (SUCCEEDED(packedStatus) && !packedPairMissing)
+                            // A refused VS is published even when only the packed
+                            // rewrite could have taken this PSO: the entry has no
+                            // capture variant (prepare rejects it, the draw stays
+                            // the engine's) but keeps its identity and kind for the
+                            // per-pipeline coverage report. It never gets one later
+                            // either: pipelineCreated refuses a vertex-only request
+                            // for it (GeometryPipelineEntry::refusalOnly).
+                            status = SUCCEEDED(materialStatus) || (SUCCEEDED(packedStatus) && !packedPairMissing) ||
+                                             graftKind == GeometryGraftKind::Refused
                                          ? S_OK
                                          : packedStatus;
                             if (FAILED(status) && !packedError.empty())
@@ -536,6 +569,8 @@ const char* GeometryGraftKindName(GeometryGraftKind kind) noexcept
         return "vertex_only";
     case GeometryGraftKind::Missing:
         return "missing";
+    case GeometryGraftKind::Refused:
+        return "refused";
     case GeometryGraftKind::ClassDisabled:
         return "class_disabled";
     case GeometryGraftKind::Rejected:
@@ -651,6 +686,11 @@ bool GeometryPipelineCache::pipelineCreated(ID3D12PipelineState* identity,
         if (const auto existing = r.pipelines.find(identity); existing != r.pipelines.end())
         {
             auto& work = *existing->second;
+            // Published without a capture variant because the catalog refused
+            // the VS: a vertex-only request is refused, not reported prepared,
+            // and the entry stays as published.
+            if (vertexOnly && work.ready && work.entry->refusalOnly())
+                return reject(GateCandidateLimits);
             if (work.ready || !work.completed)
             {
                 GateNoteCreatedPipeline(GateCandidateRoot, transparentLooking);
