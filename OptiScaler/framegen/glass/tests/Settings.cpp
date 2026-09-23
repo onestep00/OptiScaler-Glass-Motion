@@ -174,7 +174,7 @@ int wmain(int argc, wchar_t** argv)
                     "legacy names honored");
         }
         require(GlassFg::save({ true, 37 }) && GlassFg::load(), "restore renamed");
-        require(GlassFg::ReadControls().packedRows == 240 && GlassFg::ReadControls().groupedOrder &&
+        require(GlassFg::ReadControls().packedRows == 32768 && GlassFg::ReadControls().groupedOrder &&
                     GlassFg::ReadControls().farSkipStep == 0,
                 "renamed restored");
         {

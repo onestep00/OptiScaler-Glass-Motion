@@ -78,17 +78,17 @@ bool load()
     // session values outside the full controls word, like OpaqueProbe.
     SetVertexHistoryFallback(ini.GetBoolValue("GlassFG", "VertexHistoryFallback", false));
     SetGraftClassMask(static_cast<unsigned>(
-        std::clamp(ini.GetLongValue("GlassFG", "GraftClassMask", long(GraftClassRootOnly | 2u)), 0L, long(GraftClassAll))));
-    controls.store(Controls { ini.GetBoolValue("GlassFG", "Enabled", false),
+        std::clamp(ini.GetLongValue("GlassFG", "GraftClassMask", long(GraftClassRootOnly)), 0L, long(GraftClassAll))));
+    controls.store(Controls { ini.GetBoolValue("GlassFG", "Enabled", true),
                               static_cast<unsigned>(std::clamp(opacityPercent, 0L, 100L)),
                               ini.GetBoolValue("GlassFG", "MeasureGpuTime", true),
                               static_cast<unsigned>(std::clamp(edgeWidth, 1L, 4L)),
                               flag("ComposePass", "PackedDispatch", true),
                               static_cast<unsigned>(std::clamp(
                                   ini.GetLongValue("GlassFG", "ComposeRows",
-                                                   ini.GetLongValue("GlassFG", "PackedRows", 240)),
+                                                   ini.GetLongValue("GlassFG", "PackedRows", 32768)),
                                   1L, 32768L)),
-                              flag("ReplaceFrameGenerationInputs", "PackedSubstitute", false),
+                              flag("ReplaceFrameGenerationInputs", "PackedSubstitute", true),
                               flag("StepTrace", "Trace", false),
                               flag("StagedRamp", "AutoStage", false),
                               flag("ComposeCompute", "PackedCompute", true),
@@ -399,7 +399,7 @@ void RenderSettings()
             describe("Off removes the correction stage entirely; only the game's own motion is left. "
                      "INI: ComposePass.");
             int packedRows = static_cast<int>(value.packedRows);
-            changed |= ImGui::SliderInt("Rows to correct (staging limit)", &packedRows, 1, 1440, "%d rows");
+            changed |= ImGui::SliderInt("Rows to correct (staging limit)", &packedRows, 1, 32768, "%d rows");
             value.packedRows = static_cast<unsigned>(packedRows);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Safety limit: only the top rows receive the packed correction.\n"

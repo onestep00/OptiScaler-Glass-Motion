@@ -7,7 +7,10 @@ namespace GlassFg
 {
 struct Controls
 {
-    bool enabled = false;
+    // Product defaults (2026-09-23): the module is on, the compose covers the
+    // whole render height and the FG inputs are replaced. A missing INI must
+    // give the shipped behaviour, not a staging configuration.
+    bool enabled = true;
     // Interior opacity threshold in percent. A covered pixel takes the object's
     // own motion and depth when its material opacity reaches this value; below
     // it the engine's motion and depth stay untouched. The visible boundary
@@ -15,13 +18,15 @@ struct Controls
     unsigned opacityPercent = 50;
     bool measureGpuTime = true;
     unsigned edgeWidth = 2;
-    // Safety staging for the full-screen packed object-motion dispatch.
+    // Safety staging for the full-screen packed object-motion dispatch. The
+    // compose clamps packedRows to the render height, so the default covers
+    // every row at any resolution (C15); the staging ladder lowers it.
     bool packedDispatch = true;
-    unsigned packedRows = 240;
-    // Isolation staging: run the packed dispatch without swapping the FG
-    // inputs, so a driver reset can be attributed to the new GPU work or to
-    // the NGX input replacement instead of both at once.
-    bool packedSubstitute = false;
+    unsigned packedRows = 32768;
+    // Isolation staging: running the packed dispatch without swapping the FG
+    // inputs attributes a driver reset to the new GPU work or to the NGX input
+    // replacement. Off only during that ladder.
+    bool packedSubstitute = true;
     // Diagnostic stage: per-step trace lines for attribution. Costs one
     // fprintf/fflush per step and is off by default.
     bool trace = false;
@@ -259,7 +264,7 @@ inline bool VertexHistoryFallbackEnabled() noexcept
     return VertexHistoryFallbackFlag().load(std::memory_order_relaxed);
 }
 // Graft supply classes admitted at pipeline compile time (INI
-// GlassFG/GraftClassMask, live graftclass=<n>, default 3). Bit 0: the previous
+// GlassFG/GraftClassMask, live graftclass=<n>, default 1). Bit 0: the previous
 // graph reads only the MotionMatrix and camera rows (root transform). Bit 1: it
 // also reads skinning inputs / the t10 bone buffer. Bit 2: it reads t9/b3
 // preskinned previous vertices. A graft is admitted when every bit of its class
@@ -269,10 +274,11 @@ inline constexpr unsigned GraftClassRootOnly = 1u, GraftClassSkinning = 2u, Graf
                           GraftClassAll = 7u;
 inline std::atomic<unsigned>& GraftClassMaskValue() noexcept
 {
-    // Default root+skinning (3) since 2026-09-23: skinned targets only take a
-    // root graft from a native twin of the same vertex factory, so the class-2
-    // grafts are the engine's own skinned velocity arithmetic.
-    static std::atomic<unsigned> value { GraftClassRootOnly | 2u };
+    // Root-only by default. Class 2 (skinning) was tried as the default on
+    // 2026-09-23 (build 0c5bb34e): the transparent pass does not carry the
+    // velocity pass's previous skinning supply, so a skinned hair/glasses draw
+    // delivered ~77 px where the engine had ~3.5 px (p6-20260923b-on/still).
+    static std::atomic<unsigned> value { GraftClassRootOnly };
     return value;
 }
 inline void SetGraftClassMask(unsigned mask) noexcept
