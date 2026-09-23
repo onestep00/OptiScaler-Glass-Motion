@@ -731,7 +731,8 @@ void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
 // clamps linear HDR into an 8-bit texture -- wrong brightness until something forces a rebuild -- or
 // hands CopyResource mismatched formats, which fails silently and makes the whole pass appear to do
 // nothing. So the set is torn down whenever the format it was built for is not the format needed now.
-// Retired model features and surfaces are parked and freed a comfortable number of evaluates later.
+// Retired model features and surfaces are parked and freed 32 calls into the pass later (the tick at the
+// top of DlssNr_Dx12::Dispatch).
 // Releasing them immediately was the device hang: with frame generation the GPU runs several frames
 // behind, this work rides the game's own queue that no module fence covers, and an NGX feature or
 // scratch texture freed under in-flight work kills the device.
@@ -1901,6 +1902,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
+    // The retirement clock: one tick per call that gets this far, before anything below parks. What is
+    // parked here -- a feature, the scratch set, the compact colour surface, a guide clone -- was last
+    // used by work recorded in an earlier call, and is released 32 ticks later (NrRetired). A call is one
+    // upscaler evaluate the game recorded on its own list, the unit the count always used; it used to tick
+    // only beside the evaluate, and the creation and resize frames return before that. A game whose
+    // picture size moved every frame then parked a whole set per frame and never aged one.
+    TickNrRetired();
+
     g_nr.wroteTarget = false;
 
     // The picture the model is shown, against the picture the edit lands on. Equal on the pass that
@@ -2383,7 +2392,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // 1.8 and 185 have all been seen in this one game.
     ++g_frames;
     ObservePresent();
-    TickNrRetired();
     CheckCaptureTrigger();
 
     if (g_captureWriteAtFrame != 0 && g_frames >= g_captureWriteAtFrame)
@@ -2399,8 +2407,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The extra passes, one feature apiece, each built a frame before it is first evaluated.
     //
     // Creating and evaluating a feature on one command list is the dice-roll that hung the GPU, so a
-    // build is the last thing this frame records and the evaluate below is never reached on it. Sited
-    // under TickNrRetired so the retirement clock still runs on the frames it returns from.
+    // build is the last thing this frame records and the evaluate below is never reached on it.
     const unsigned int livePasses = std::min(wantPasses, g_nr.passCeiling);
 
     // Retiring costs no frame, so it happens whether or not a build is due.
