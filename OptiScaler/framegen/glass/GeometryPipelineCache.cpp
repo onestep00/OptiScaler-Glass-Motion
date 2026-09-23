@@ -472,7 +472,13 @@ struct GeometryPipelineCache::Impl
                                         ++counters.packedDeltaMissing;
                                 }
                             }
-                            status = SUCCEEDED(materialStatus) || (SUCCEEDED(packedStatus) && !packedPairMissing)
+                            // A refused VS is published even when only the packed
+                            // rewrite could have taken this PSO: the entry has no
+                            // capture variant (prepare rejects it, the draw stays
+                            // the engine's) but keeps its identity and kind for the
+                            // per-pipeline coverage report.
+                            status = SUCCEEDED(materialStatus) || (SUCCEEDED(packedStatus) && !packedPairMissing) ||
+                                             graftKind == GeometryGraftKind::Refused
                                          ? S_OK
                                          : packedStatus;
                             if (FAILED(status) && !packedError.empty())
