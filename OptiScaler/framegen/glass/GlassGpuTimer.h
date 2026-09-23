@@ -84,6 +84,11 @@ class GpuTimer
 
     // Call only on sampled rendered frames, before input copies and correction.
     // Do not time each MFG phase or include the provider's FG evaluation here.
+    // One range per recording: a slot still held by this list belongs to a
+    // recording that has been reset since. The compose list is reset inside the
+    // host's internal D3D12 scope, which the observer never forwards to
+    // onReset, so without the release below the first eight composes kept every
+    // slot and gpu_ms stayed at the eighth sample for the rest of the session.
     Ticket begin(ID3D12GraphicsCommandList* command)
     {
         // Both direct and compute lists can carry timestamp queries. The compose
@@ -93,6 +98,7 @@ class GpuTimer
         if (failed || !mapped || !command ||
             (type != D3D12_COMMAND_LIST_TYPE_COMPUTE && type != D3D12_COMMAND_LIST_TYPE_DIRECT))
             return {};
+        discardRecording(command);
         for (unsigned i = 0; i < Capacity; ++i)
             if (!slots[i].sequence)
             {
