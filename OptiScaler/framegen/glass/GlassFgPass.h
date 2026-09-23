@@ -25,6 +25,9 @@ struct Inputs
     ID3D12Resource* color = nullptr;
     ID3D12Resource* depth = nullptr;
     unsigned index = 0, count = 0, reset = 0;
+    // Frame depth convention the provider declares (DLSSG.DepthInverted).
+    // Cyberpunk declares 1 (reverse-Z); absent key keeps that default.
+    unsigned depthInverted = 1;
     float scaleX = 0, scaleY = 0, jitterX = 0, jitterY = 0;
     std::array<float, 16> clipToPrevious {};
     // Parameter key names the two textures were read from. The game-level block
@@ -106,6 +109,7 @@ struct Inputs
             params->Get("DLSSG.HUDLess", &value.color) != 1 || !value.color ||
             params->Get(value.depthKey, &value.depth) != 1 || !value.depth ||
             params->Get("DLSSG.MultiFrameIndex", &value.index) != 1 ||
+            (params->Get("DLSSG.DepthInverted", &value.depthInverted), false) ||
             params->Get("DLSSG.MultiFrameCount", &value.count) != 1 || params->Get("DLSSG.Reset", &value.reset) != 1 ||
             params->Get("DLSSG.MvecScaleX", &value.scaleX) != 1 ||
             params->Get("DLSSG.MvecScaleY", &value.scaleY) != 1 ||

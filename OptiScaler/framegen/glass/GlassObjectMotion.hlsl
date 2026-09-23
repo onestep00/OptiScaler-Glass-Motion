@@ -259,8 +259,13 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     // surface is the opaque one, so the pixel keeps the engine's motion and
     // depth byte for byte. Four record quanta of tolerance keep a surface that
     // wrote its own depth from rejecting itself. Counter slot 15.
+    // Direction comes from the frame's declared convention (DebugMode bit 7,
+    // DLSSG.DepthInverted), not from the record's comparator stamp: a draw
+    // with depth test disabled carries no comparator and would otherwise be
+    // compared in the wrong direction.
     const float occlusionEps = 4.0 / 131071.0;
-    const bool engineNearer = reverseDepth ? (originalDepth > objectDepth + occlusionEps)
+    const bool frameReverse = (DebugMode & 128u) != 0u;
+    const bool engineNearer = frameReverse ? (originalDepth > objectDepth + occlusionEps)
                                            : (originalDepth < objectDepth - occlusionEps);
     if (engineNearer && (DebugMode & 64u) == 0u)
     {

@@ -224,6 +224,20 @@ inline std::atomic<bool>& DepthKeepFlag() noexcept
 }
 inline void SetDepthKeep(bool enabled) noexcept { DepthKeepFlag().store(enabled, std::memory_order_relaxed); }
 inline bool DepthKeepEnabled() noexcept { return DepthKeepFlag().load(std::memory_order_relaxed); }
+// Frame depth convention declared by the frame generation provider
+// (DLSSG.DepthInverted), published by the FG host before each compose so the
+// opaque-occlusion test compares the object's record and the engine depth in
+// the same direction. Default 1: Cyberpunk declares reverse-Z.
+inline std::atomic<unsigned>& FrameDepthInvertedValue() noexcept
+{
+    static std::atomic<unsigned> value { 1u };
+    return value;
+}
+inline void SetFrameDepthInverted(unsigned inverted) noexcept
+{
+    FrameDepthInvertedValue().store(inverted ? 1u : 0u, std::memory_order_relaxed);
+}
+inline bool FrameDepthInverted() noexcept { return FrameDepthInvertedValue().load(std::memory_order_relaxed) != 0; }
 // Diagnostic opaque-pipeline probe, off by default and persisted in the INI as
 // GlassFG/OpaqueProbe. Session value only: not part of the packed control word,
 // whose 64 bits are all assigned. When on, the pipeline cache admits the

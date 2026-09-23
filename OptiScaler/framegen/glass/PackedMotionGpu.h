@@ -1704,7 +1704,11 @@ class PackedMotionGpu
         const unsigned debugMode = (dumpRequests.load(std::memory_order_relaxed) ? 1u : 0u) |
                                    (controls.packedSkipRead ? 2u : 0u) | (controls.zeroMotion ? 4u : 0u) |
                                    (controls.engineGate ? 0u : 8u) | (DepthKeepEnabled() ? 16u : 0u) |
-                                   (StripeProbeEnabled() ? 32u : 0u);
+                                   (StripeProbeEnabled() ? 32u : 0u) |
+                                   // Bit 7: frame depth convention for the opaque-occlusion test
+                                   // (DLSSG.DepthInverted). The record's own reverse stamp comes from the
+                                   // draw's depth comparator and is absent for depth-disabled draws.
+                                   (FrameDepthInverted() ? 128u : 0u);
         lastDebugMode = debugMode;
         const Constants constants { width, height, scaleX, scaleY, (std::min)(controls.edgeWidth, 4u),
                        controls.opacityThreshold(), debugMode,

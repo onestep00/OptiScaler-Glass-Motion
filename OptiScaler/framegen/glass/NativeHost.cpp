@@ -1590,6 +1590,8 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     }
     if (Inputs::read(parameters, inputs))
     {
+        // Frame depth convention for the compose's opaque-occlusion test.
+        SetFrameDepthInverted(inputs.depthInverted);
         // Path 0: the evaluation carries the DLSS-G names (DLSSG.MVecs/Depth and
         // the frame indices), so it is the frame generator. Path 1: only
         // MotionVectors/Depth are named, which is also how the upscaler and Ray
