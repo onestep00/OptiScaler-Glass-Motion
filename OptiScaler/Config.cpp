@@ -335,7 +335,21 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
-            DlssNrPreUpscale.set_from_config(readBool("DlssNr", "PreUpscale"));
+
+            // PreUpscale is this tree's name for the setting and RunBeforeSR the one wilsjo2's builds
+            // read and write, so an ini from either carries over. Either key set to true switches it on;
+            // both absent (or auto) leaves the default.
+            {
+                const auto preUpscale = readBool("DlssNr", "PreUpscale");
+                const auto runBeforeSr = readBool("DlssNr", "RunBeforeSR");
+                std::optional<bool> beforeSr;
+
+                if (preUpscale.has_value() || runBeforeSr.has_value())
+                    beforeSr = preUpscale.value_or(false) || runBeforeSr.value_or(false);
+
+                DlssNrPreUpscale.set_from_config(beforeSr);
+            }
+
             DlssNrDualFeature.set_from_config(readBool("DlssNr", "DualFeature"));
             DlssNrDualEnlarger.set_from_config(readString("DlssNr", "DualEnlarger", true).transform(CodeToUpscalerFfx));
             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
@@ -1230,7 +1244,15 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "PreUpscale", GetBoolValue(Instance()->DlssNrPreUpscale.value_for_config()).c_str());
+
+    // Under both names, always with the same value. Either key set to true switches it on at the next
+    // load, so a stale RunBeforeSR=true left beside PreUpscale=false would undo turning it off.
+    {
+        const auto beforeSr = GetBoolValue(Instance()->DlssNrPreUpscale.value_for_config());
+        ini.SetValue("DlssNr", "PreUpscale", beforeSr.c_str());
+        ini.SetValue("DlssNr", "RunBeforeSR", beforeSr.c_str());
+    }
+
     ini.SetValue("DlssNr", "DualFeature", GetBoolValue(Instance()->DlssNrDualFeature.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DualEnlarger",
                  Instance()->DlssNrDualEnlarger.value_for_config().transform(UpscalerToCode).value_or("auto").c_str());

@@ -410,7 +410,7 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nWith ray reconstruction this makes the first half a denoiser and nothing else,"
                        "\nwhich is the arrangement worth having: the frame the model sees is clean, and it"
                        "\nis a quarter of the pixels at Performance."
-                       "\n\nUnlike 'Run before the upscaler', the frame here has already been through"
+                       "\n\nUnlike 'Apply before Super Resolution', the frame here has already been through"
                        "\ntemporal accumulation, so the subpixel jitter the model cannot be told about is"
                        "\nresolved before it sees anything."
                        "\n\nThe enlargement is the output scaler, not the upscaler's own. Takes effect when"
@@ -462,7 +462,7 @@ void RenderMenu(Config* config, float menuResScale)
             if (dual)
                 ImGui::BeginDisabled();
 
-            if (ImGui::Checkbox("Run before the upscaler", &preUpscale))
+            if (ImGui::Checkbox("Apply before Super Resolution", &preUpscale))
                 config->DlssNrPreUpscale = preUpscale;
 
             if (dual)
@@ -481,7 +481,11 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nUntested territory. Colour at this point is jittered by a different subpixel"
                        "\noffset every frame and the model is given no way to know that, so its history"
                        "\nmay reproject against an offset it cannot see. Look for shimmer and swimming on"
-                       "\nfine detail while the camera moves.");
+                       "\nfine detail while the camera moves."
+                       "\n\nA picture rendered into the corner of a larger colour texture stays here at its"
+                       "\nown size. A colour layout this seam cannot take runs after the upscaler instead."
+                       "\n\nSaved as RunBeforeSR, the name wilsjo2's builds use, and as PreUpscale. Either"
+                       "\nkey set to true in the ini turns this on.");
         }
 
         // Only meaningful below 100%: at the same rate the residual collapses to the model's own
