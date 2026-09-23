@@ -88,7 +88,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // stage there expects, because nothing else in the chain knows this pass ran.
     // frame.ActiveWidth / ActiveHeight, when they name a smaller origin-zero rectangle of colour and
     // output, make that rectangle the whole picture: the pass runs on it at its own size, on a compact
-    // surface of its own, and copies only it into output. The rest of output is left as it was.
+    // surface of its own, and copies it into output with colour's own margin around it.
     void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
                   ID3D12CommandQueue* timingQueue = nullptr,

@@ -256,9 +256,9 @@ struct NrState
     DXGI_FORMAT preFormat = DXGI_FORMAT_UNKNOWN;
 
     // The picture alone, when the game renders into the corner of a larger colour texture. The pass
-    // before the upscaler works on this at the picture's own size, and the finished rectangle is then
-    // copied into preOut; the rest of preOut is never written. UNORDERED_ACCESS at rest, like the other
-    // work surfaces, and rebuilt whenever the picture's size changes.
+    // before the upscaler works on this at the picture's own size; the finished rectangle is then copied
+    // into preOut, and the margin around it from the game's own colour texture. UNORDERED_ACCESS at
+    // rest, like the other work surfaces, and rebuilt whenever the picture's size changes.
     ID3D12Resource* activeColor = nullptr;
 
     // Whether the last Dispatch reached its composite. Cleared on entry and set after the resolve, so
@@ -1340,6 +1340,37 @@ ID3D12Resource* EnsureActiveColourSurface(ID3D12Device* device, DXGI_FORMAT form
     return g_nr.activeColor;
 }
 
+// The game's own pixels around the picture, copied into the surface the upscaler is handed in place of
+// Color. DLSS reads only the picture, but not every upscaler does -- FSR 4's linear auto-exposure reads
+// the whole allocation (FFXFeature_Dx12.cpp:163) -- so the stand-in has to carry the margin the game's
+// texture carries, not zeros or a larger picture from an earlier frame. The picture is origin-zero (an
+// offset falls back after SR), so the margin is at most two boxes: the strip to its right at full
+// height, and the strip below it. destination is preOut, built to the game's allocation, so both are
+// allocWidth x allocHeight; they must be in COPY_DEST and COPY_SOURCE.
+void CopyColourMargin(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* destination, ID3D12Resource* source,
+                      DlssNr::ColorExtent active, unsigned int allocWidth, unsigned int allocHeight)
+{
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = source;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = destination;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+    if (active.width < allocWidth)
+    {
+        const D3D12_BOX right { active.width, 0, 0, allocWidth, allocHeight, 1 };
+        cmdList->CopyTextureRegion(&dst, active.width, 0, 0, &src, &right);
+    }
+
+    if (active.height < allocHeight)
+    {
+        const D3D12_BOX below { 0, active.height, 0, active.width, allocHeight, 1 };
+        cmdList->CopyTextureRegion(&dst, 0, active.height, 0, &src, &below);
+    }
+}
+
 // A typeless resource cannot be viewed, and NGX builds its own views with nothing to tell it which
 // format to use. Depth is very often declared typeless, so the typed member of the same family is
 // substituted; CopyResource accepts that as a destination for the typeless original.
@@ -1958,8 +1989,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Before the upscaler the picture may fill only the top-left corner of the colour texture (see
     // DlssNrFrameInfo::ActiveWidth). The pass then works on a compact surface of the picture's own
     // size: the encode reads just that rectangle of the colour buffer, which is the crop, the model and
-    // every work surface are sized from it, and once the edit is composed the rectangle alone is copied
-    // into output. The rest of output is never written. Everywhere else the target is output itself.
+    // every work surface are sized from it, and once the edit is composed the rectangle is copied into
+    // output with the game's own margin around it. Everywhere else the target is output itself.
     const D3D12_RESOURCE_DESC outputDesc = output->GetDesc();
     const bool cropColor = frame.ActiveWidth != 0 && frame.ActiveHeight != 0 &&
                            (frame.ActiveWidth != outputDesc.Width || frame.ActiveHeight != outputDesc.Height);
@@ -3007,15 +3038,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                             nullptr, target, nullptr);
         setWork(answer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        // The picture goes into output, and only the picture: the box is the rectangle the game
-        // rendered, so output's margin keeps whatever it held. The target's own transitions double as
-        // the wait for the resolve's writes.
+        // The picture goes into output from the pass and the margin around it from the game's own colour
+        // texture (CopyColourMargin), so outside the picture the upscaler reads exactly what Color holds.
+        // Only on frames the edit is handed over; on any other the upscaler reads Color itself. Inside the
+        // timed interval, like the rest of the pass. The target's own transitions double as the wait for
+        // the resolve's writes.
         if (cropColor)
         {
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Barrier(cmdList, source, sourceIdle, D3D12_RESOURCE_STATE_COPY_SOURCE);
             Barrier(cmdList, output, outputArrival, D3D12_RESOURCE_STATE_COPY_DEST);
             DlssNr::CopyActiveColor(cmdList, output, target, { width, height });
+            CopyColourMargin(cmdList, output, source, { width, height }, (unsigned int) outputDesc.Width,
+                             outputDesc.Height);
             Barrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_DEST, outputArrival);
+            Barrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceIdle);
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 

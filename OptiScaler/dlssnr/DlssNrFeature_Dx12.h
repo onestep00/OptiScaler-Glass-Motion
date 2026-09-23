@@ -73,7 +73,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 // own buffer back afterwards.
 //
 // A game may render into the top-left corner of a larger colour texture. The pass then runs on that
-// rectangle alone, at its own size, and only the rectangle is copied into the surface.
+// rectangle alone, at its own size; the surface gets the edited rectangle and the game's own margin.
 //
 // Answers whether the pass belongs before the upscaler on this evaluate, and the caller runs the pass
 // after the upscaler only when it does not: no colour texture, or a layout this seam cannot take (a
