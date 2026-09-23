@@ -9,6 +9,208 @@
 
 namespace GlassFg
 {
+// Work the second consumer (DLSS-NR) leaves on command lists the session does
+// not own: the compose recorded on the upscaler's list and the composed pair
+// that pass then reads there. A closed list can be executed again, so a list
+// references the session's textures, descriptors and pipeline until the game
+// resets or destroys it, and each execution of it until its queue has passed
+// a fence signalled right behind the batch that carried it. The fences are per
+// queue, so the values one fence receives stay ordered on the queue that
+// signals them. An execution that could not be fenced keeps the session like a
+// device-removal sentinel does: completion is never inferred from elapsed time.
+class InlineRecordings
+{
+    static constexpr unsigned kLists = 8, kQueues = 4;
+    struct List
+    {
+        const void* command = nullptr;
+        CommandLifetime lifetime;
+        // Holds session work that can still be submitted.
+        bool held = false;
+    };
+    struct Queue
+    {
+        ID3D12CommandQueue* queue = nullptr;
+        ID3D12Fence* fence = nullptr;
+        std::uint64_t value = 0;
+    };
+    List lists[kLists];
+    Queue queues[kQueues];
+    bool unfenced = false;
+
+    List* find(const void* command)
+    {
+        for (auto& list : lists)
+            if (list.command != nullptr && list.command == command)
+                return &list;
+        return nullptr;
+    }
+    static bool completed(const Queue& slot)
+    {
+        if (slot.value == 0)
+            return true;
+        const auto done = slot.fence->GetCompletedValue();
+        return done != UINT64_MAX && done >= slot.value;
+    }
+    // The queue's own fence, else one whose last value completed: a fence moves
+    // to another queue only when nothing it was signalled for is pending.
+    Queue* fenceFor(ID3D12CommandQueue* queue)
+    {
+        for (auto& slot : queues)
+            if (slot.queue == queue)
+                return &slot;
+        for (auto& slot : queues)
+        {
+            if (slot.queue != nullptr && !completed(slot))
+                continue;
+            if (slot.fence == nullptr)
+            {
+                ID3D12Device* device = nullptr;
+                if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))))
+                    return nullptr;
+                const auto created = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&slot.fence));
+                device->Release();
+                if (FAILED(created))
+                {
+                    slot.fence = nullptr;
+                    return nullptr;
+                }
+            }
+            if (slot.queue != nullptr)
+                slot.queue->Release();
+            queue->AddRef();
+            slot.queue = queue;
+            return &slot;
+        }
+        return nullptr;
+    }
+
+  public:
+    InlineRecordings() = default;
+    InlineRecordings(const InlineRecordings&) = delete;
+    InlineRecordings& operator=(const InlineRecordings&) = delete;
+
+    // Called before anything reaches the list. A list whose Reset, destruction
+    // and submissions cannot be followed never receives session work.
+    bool track(ID3D12GraphicsCommandList* command)
+    {
+        if (command == nullptr || unfenced)
+            return false;
+        if (const auto* list = find(command))
+            return !list->lifetime.wasDestroyed();
+        List* slot = nullptr;
+        for (auto& list : lists)
+            if (list.command == nullptr)
+            {
+                slot = &list;
+                break;
+            }
+        // A list without session work only loses its destruction watch; the
+        // callback token stays with that list, as for an evicted frame
+        // generation list.
+        for (auto& list : lists)
+            if (slot == nullptr && !list.held)
+            {
+                list.lifetime.forget();
+                list.command = nullptr;
+                slot = &list;
+            }
+        if (slot == nullptr || !slot->lifetime.attach(command))
+            return false;
+        slot->command = command;
+        return true;
+    }
+    // The list now holds session work: the compose, or the pair the caller
+    // reads on it.
+    void hold(const void* command)
+    {
+        if (auto* list = find(command))
+            list->held = true;
+    }
+    // Successful Reset or destruction: the list can no longer execute it.
+    void discard(const void* command)
+    {
+        if (auto* list = find(command))
+            list->held = false;
+    }
+    // Stopped session, successful Reset: the list is alive during that
+    // callback, so its destruction watch can be unregistered.
+    void detachLive(ID3D12GraphicsCommandList* command)
+    {
+        auto* list = find(command);
+        if (list != nullptr && !list->held && list->lifetime.detachLive(command))
+            list->command = nullptr;
+    }
+    const void* takeDestroyed()
+    {
+        for (auto& list : lists)
+            if (const auto command = list.lifetime.takeDestroyed())
+            {
+                list.command = nullptr;
+                list.held = false;
+                return command;
+            }
+        return nullptr;
+    }
+    // After the real ExecuteCommandLists, still serialized with the queue's
+    // later native Signal/Wait: the fence lands right behind the batch.
+    bool submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands)
+    {
+        bool held = false;
+        for (const auto& list : lists)
+            held |= list.held;
+        if (!held)
+            return true;
+        bool carried = false;
+        for (UINT i = 0; i < count && !carried; ++i)
+        {
+            const auto* list = find(static_cast<ID3D12GraphicsCommandList*>(commands[i]));
+            carried = list != nullptr && list->held;
+        }
+        if (!carried)
+            return true;
+        auto* slot = fenceFor(queue);
+        if (slot == nullptr || FAILED(queue->Signal(slot->fence, slot->value + 1)))
+        {
+            unfenced = true;
+            return false;
+        }
+        ++slot->value;
+        return true;
+    }
+    bool idle() const
+    {
+        if (unfenced)
+            return false;
+        for (const auto& list : lists)
+            if (list.held)
+                return false;
+        for (const auto& slot : queues)
+            if (!completed(slot))
+                return false;
+        return true;
+    }
+    // Only after idle() or an explicit device teardown.
+    void release()
+    {
+        for (auto& list : lists)
+        {
+            list.lifetime.forget();
+            list.command = nullptr;
+            list.held = false;
+        }
+        for (auto& slot : queues)
+        {
+            if (slot.queue != nullptr)
+                slot.queue->Release();
+            if (slot.fence != nullptr)
+                slot.fence->Release();
+            slot = {};
+        }
+        unfenced = false;
+    }
+};
+
 // One native FG feature. The platform adapter holds its lock across real queue
 // calls plus these callbacks, and suppresses callbacks only while recording
 // this module's own commands.
@@ -68,6 +270,8 @@ class NativeSession
     // Producer queue of the acquired frame; a wait for it on the same queue is a
     // self wait and has to be skipped.
     void* pendingProducerQueue = nullptr;
+    // Lists the second consumer composed on or handed the composed pair to.
+    InlineRecordings inlineRecordings;
 
     void discardRecording(const void* command, bool destroyed = false)
     {
@@ -75,6 +279,7 @@ class NativeSession
         if (objectProvider)
             objectProvider.discard(command, destroyed);
         timer.discardRecording(command);
+        inlineRecordings.discard(command);
         if (knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command))))
             outputRecording = false;
     }
@@ -143,6 +348,10 @@ class NativeSession
             discardRecording(command, true);
             forgetFgCommand(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command)));
         }
+        // A destroyed list can no longer execute what the second consumer left
+        // on it.
+        while (const auto command = inlineRecordings.takeDestroyed())
+            discardRecording(command, true);
     }
 
   public:
@@ -254,6 +463,8 @@ class NativeSession
             for (auto& lifetime : fgLifetimes)
                 if (lifetime.identity() == command)
                     lifetime.detachLive(command);
+        if (stopped)
+            inlineRecordings.detachLive(command);
     }
 
     // Includes Close and every applicable state setter, including predication.
@@ -275,7 +486,20 @@ class NativeSession
     bool afterSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands)
     {
         collectDestroyed();
-        if (!initialized || failed || !queue || !commands || !count)
+        if (!initialized || !queue || !commands || !count)
+            return false;
+        // The second consumer's lists are fenced whatever the session state: a
+        // stopped or failed session still owns what they reference.
+        if (!inlineRecordings.submitted(queue, count, commands))
+        {
+            static std::atomic<unsigned> unfenced { 0 };
+            if (log != nullptr && unfenced.fetch_add(1, std::memory_order_relaxed) < 4)
+            {
+                std::fprintf(log, "NATIVE_SESSION inline_unfenced queue=%p\n", static_cast<void*>(queue));
+                std::fflush(log);
+            }
+        }
+        if (failed)
             return false;
         bool usesOutput = false;
         ID3D12GraphicsCommandList* matched = nullptr;
@@ -505,6 +729,21 @@ class NativeSession
                                                          description.Height, engineFrame);
         if (!frame)
             return false;
+        // A list the game destroyed can have left its address to this one, so
+        // destructions are collected before the identity is trusted. Session
+        // work may only reach a list whose Reset, destruction and submissions
+        // the session follows until the GPU is done with it.
+        collectDestroyed();
+        if (!inlineRecordings.track(command))
+        {
+            static std::atomic<unsigned> untracked { 0 };
+            if (log != nullptr && untracked.fetch_add(1, std::memory_order_relaxed) < 4)
+            {
+                std::fprintf(log, "PACKED_SECOND skip reason=list_untracked\n");
+                std::fflush(log);
+            }
+            return false;
+        }
         // The compose copies from the game's own motion and depth, so it starts
         // from the states the caller declares for them. The composed pair it
         // hands back is left in the frame generation input convention
@@ -512,6 +751,9 @@ class NativeSession
         if (!objectPass.composeInline(command, frame, motion, depth, motionArrival, depthArrival, jitterX, jitterY,
                                       scaleX, scaleY, controls))
             return false;
+        // The list now holds the compose or, on a repeat evaluation, the pair
+        // the caller reads on it; both reference this session.
+        inlineRecordings.hold(command);
         if (outMotion != nullptr)
             *outMotion = objectPass.motionOutput();
         if (outDepth != nullptr)
@@ -560,6 +802,14 @@ class NativeSession
     bool readyToRelease()
     {
         collectDestroyed();
+        // Work the second consumer left on lists the session does not own is
+        // gone only once every such list was reset or destroyed and every
+        // execution of it passed its fence; only then may the packed pass stop
+        // counting its inline composes.
+        if (!inlineRecordings.idle())
+            return false;
+        if (initialized)
+            objectPass.retireInline();
         // The completion fence only covers a compose once the batch that carried
         // the FG command was submitted, so the packed fence is the direct proof
         // that our own GPU work finished. Checking it first also releases the
@@ -587,6 +837,7 @@ class NativeSession
         objectPass.cancelPending();
         objectPass.releaseAfterGpuDrain();
         timer.releaseAfterGpuDrain();
+        inlineRecordings.release();
         for (unsigned i = 0; i < kFgCommandSlots; ++i)
         {
             fgLifetimes[i].forget();

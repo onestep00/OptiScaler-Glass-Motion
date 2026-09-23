@@ -896,7 +896,8 @@ bool SecondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* mo
         std::lock_guard lock(r.mutex);
         if (!r.active)
             return false;
-        // The inline compose is keyed by this list, so its Reset has to reach
+        // A served list holds session work until its Reset or destruction, and
+        // the session fences every submission of it, so its Reset has to reach
         // the session from now on (see TrackedLists).
         const bool served = r.active->session.secondConsumerGuides(command, motion, depth, motionArrival,
                                                                    depthArrival, jitterX, jitterY, scaleX, scaleY,

@@ -422,6 +422,8 @@ class PackedMotionGpu
             noteComposeSkip("inline");
             return false;
         }
+        // Before the first command reaches the caller's list.
+        inlineUnretired = true;
         if (!dispatch(command, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
                       jitterX, jitterY, controls))
             return false;
@@ -431,8 +433,15 @@ class PackedMotionGpu
     }
     bool inlineComposed(std::uint64_t frame) const { return inlineValid && inlineFrame == frame; }
     void clearInline() { inlineValid = false; }
+    // The owner of the caller's lists reports that every list recordInline
+    // wrote to was reset or destroyed and every execution of it completed.
+    void retireInline() { inlineUnretired = false; }
 
   private:
+    // A recordInline compose sits on a list this object does not own and
+    // cannot see execute; the teardown gate waits for retireInline().
+    bool inlineUnretired = false;
+
   public:
     PackedMotionGpu() = default;
     PackedMotionGpu(const PackedMotionGpu&) = delete;
@@ -1033,7 +1042,8 @@ class PackedMotionGpu
             }
             complete = false;
         }
-        return complete;
+        // A compose recorded on a caller's list counts until its owner retired it.
+        return complete && !inlineUnretired;
     }
 
     // Records the input copies, the compose dispatch and the optional engine
