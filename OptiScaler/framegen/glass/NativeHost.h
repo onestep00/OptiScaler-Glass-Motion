@@ -28,6 +28,9 @@ void RequestNativeSoftReload() noexcept;
 // Live diagnostics: one-frame motion/depth dump and its deferred write-out.
 void RequestPackedDump() noexcept;
 void ServiceNativeDiagnostics() noexcept;
+// Live diagnostic fgdump=N: copy the frame generation output texture of the
+// next N executed evaluations (FgOutputDump.h). False while a batch is running.
+bool RequestNativeFgOutputDump(unsigned count) noexcept;
 // Snapshot for the live status response: whether the native host is consuming
 // FG frames at all, independent of the log.
 struct NativeHostStatus

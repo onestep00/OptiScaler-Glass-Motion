@@ -87,6 +87,8 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)D3D12Observer.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NativeHost.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)NativeHost.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)FgOutputDump.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)FgOutputDump.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)TaggedInputs.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.cpp" />

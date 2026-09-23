@@ -4,6 +4,7 @@
 #include "GeometryHealth.h"
 #include "NativeHost.h"
 #include "NativeSession.h"
+#include "FgOutputDump.h"
 #include "D3D12Observer.h"
 #include "StreamlineTagBridge.h"
 #include "PackedMotionCapture.h"
@@ -296,6 +297,30 @@ std::filesystem::path packedShaderPath()
     return Util::DllPath().parent_path() / L"Glass" / L"GlassObjectMotion.hlsl";
 }
 
+// Module log sink for the output dump. Takes the host mutex itself; the dump
+// never calls it while holding its own lock.
+void fgDumpLog(const char* text) noexcept
+{
+    try
+    {
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fputs(text, r.log);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
 // Crash forensics: this marker exists only while the batch that carries our
 // compose is in flight. After a driver reset the file is still there, which
 // proves the reset happened in a batch that contained our work.
@@ -385,6 +410,7 @@ D3D12Callbacks makeCallbacks()
     {
         auto& r = *static_cast<Runtime*>(p);
         InternalD3D12Scope ownCalls;
+        NoteFgOutputDumpReset(c);
         r.each([&](Entry& e) { e.session.onReset(c, okay, initial); });
         r.reap();
     };
@@ -488,6 +514,7 @@ D3D12Callbacks makeCallbacks()
         auto& r = *static_cast<Runtime*>(p);
         InternalD3D12Scope ownSignals;
         NotifyGeometryCaptureSubmit(q, count, lists);
+        NoteFgOutputDumpSubmit(q, count, lists, fgDumpLog);
         // One-time, off-thread: the packed object-motion HLSL compile measured
         // 153ms when it ran inside the frame generation callback, which is the
         // exact moment the engine rebuilds its lists (focus regain).
@@ -795,6 +822,11 @@ void RequestNativeSoftReload() noexcept
 void RequestPackedDump() noexcept
 {
     dumpRequested.store(true, std::memory_order_release);
+}
+
+bool RequestNativeFgOutputDump(unsigned count) noexcept
+{
+    return RequestFgOutputDump(count, fgDumpLog);
 }
 
 // Second consumer (DLSS 5 neural rendering). Called from the neural rendering
@@ -1304,21 +1336,26 @@ void ServiceNativeDiagnostics() noexcept
     // call would need.
     InstallLoadedNgxHooks();
     auto& r = runtime();
-    std::lock_guard lock(r.mutex);
-    if (attachPending.exchange(false, std::memory_order_acq_rel))
     {
-        if (!r.logAttempted)
+        std::lock_guard lock(r.mutex);
+        if (attachPending.exchange(false, std::memory_order_acq_rel))
         {
-            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
-            r.logAttempted = r.log != nullptr;
+            if (!r.logAttempted)
+            {
+                r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+                r.logAttempted = r.log != nullptr;
+            }
+            if (r.log)
+            {
+                std::fprintf(r.log, "GLASS_PROCESS attach=1 pid=%lu\n", GetCurrentProcessId());
+                std::fflush(r.log);
+            }
         }
-        if (r.log)
-        {
-            std::fprintf(r.log, "GLASS_PROCESS attach=1 pid=%lu\n", GetCurrentProcessId());
-            std::fflush(r.log);
-        }
+        r.each([&](Entry& e) { e.session.serviceDump(); });
     }
-    r.each([&](Entry& e) { e.session.serviceDump(); });
+    // Outside the host lock: readback allocation and the file write of the
+    // output dump must not hold up the frame generation evaluation.
+    ServiceFgOutputDump(fgDumpLog);
 }
 
 NativeHostStatus ReadNativeHostStatus() noexcept
@@ -1582,6 +1619,9 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     // the read block because the trace, the counters and the report all use it
     // after the block closes.
     unsigned pathIndex = 0;
+    // Set once the identity gate admitted this evaluation as the frame
+    // generator; the output dump records nothing for any other feature.
+    bool frameGenerationEvaluation = false;
     auto controls = ReadControls();
     if (controls.autoStage)
     {
@@ -1687,6 +1727,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             }
             return original(command, handle, parameters, callback);
         }
+        frameGenerationEvaluation = true;
         if (providerIdentity)
         {
             // The provider hook only wraps DLSS-G providers, and it reports the
@@ -1913,6 +1954,26 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         }
         throw;
     }
+    // Live diagnostic (fgdump=N): copy the output the provider just wrote,
+    // into the same command list, whether or not the inputs were substituted.
+    if (frameGenerationEvaluation && result == NVSDK_NGX_Result_Success && FgOutputDumpWanted())
+    {
+        std::lock_guard lock(r.mutex);
+        FgDumpPhase phase;
+        // The driver-level table carries no usable index in Inputs (it is
+        // filled with 1/1), so the multi-frame keys are read directly.
+        phase.index = inputs.index;
+        phase.count = inputs.count;
+        unsigned value = 0;
+        if (parameters != nullptr && parameters->Get("DLSSG.MultiFrameIndex", &value) == NVSDK_NGX_Result_Success)
+            phase.index = value;
+        if (parameters != nullptr && parameters->Get("DLSSG.MultiFrameCount", &value) == NVSDK_NGX_Result_Success)
+            phase.count = value;
+        phase.packedFrame = inputs.frame != UINT64_MAX;
+        phase.frame = phase.packedFrame ? inputs.frame : r.evaluations;
+        phase.applied = applied;
+        RecordFgOutputDump(command, parameters, phase, fgDumpLog);
+    }
     if (entry)
     {
         std::lock_guard lock(r.mutex);
@@ -2022,6 +2083,10 @@ void RetireNativeFG(const NVSDK_NGX_Handle* handle)
     std::lock_guard lock(r.mutex);
     if (r.active && r.active->handle == handle)
         r.retire();
+    // Only a released frame generation feature ends an output dump; the
+    // upscaler and Ray Reconstruction are released through the same call.
+    if (handle != nullptr && frameGenerationHandle(handle->Id, false))
+        RetireFgOutputDump(fgDumpLog);
     r.reap();
 }
 void StopNativeFG()
@@ -2036,6 +2101,7 @@ void StopNativeFG()
     }
     r.stopped = true;
     r.retire();
+    RetireFgOutputDump(fgDumpLog);
     r.reap();
 }
 void CreatedNativeFG()

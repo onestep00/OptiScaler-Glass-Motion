@@ -1371,72 +1371,15 @@ class PackedMotionGpu
     // mean nothing.
     void writeColor(const std::wstring& path, const std::byte* data)
     {
-        FILE* file = _wfopen(path.c_str(), L"wb");
-        if (!file)
-            return;
-        const auto colorWidth = unsigned(dumpColorDescription.Width);
-        const auto colorHeight = unsigned(dumpColorDescription.Height);
-        std::fprintf(file, "P6\n%u %u\n255\n", colorWidth, colorHeight);
-        const auto stride = readbackFootprint[6].Footprint.RowPitch;
-        const auto offset = readbackFootprint[6].Offset;
-        unsigned unknownFormat = 0;
-        for (unsigned y = 0; y < colorHeight; ++y)
-        {
-            const auto* row = data + offset + UINT64(y) * stride;
-            for (unsigned x = 0; x < colorWidth; ++x)
-            {
-                std::byte pixel[3] { std::byte(128), std::byte(128), std::byte(128) };
-                switch (dumpColorDescription.Format)
-                {
-                case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-                case DXGI_FORMAT_R8G8B8A8_UNORM:
-                case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-                    pixel[0] = row[x * 4 + 0];
-                    pixel[1] = row[x * 4 + 1];
-                    pixel[2] = row[x * 4 + 2];
-                    break;
-                case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-                case DXGI_FORMAT_B8G8R8A8_UNORM:
-                case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-                    pixel[0] = row[x * 4 + 2];
-                    pixel[1] = row[x * 4 + 1];
-                    pixel[2] = row[x * 4 + 0];
-                    break;
-                case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-                case DXGI_FORMAT_R10G10B10A2_UNORM:
-                {
-                    unsigned value = 0;
-                    std::memcpy(&value, row + x * 4, sizeof(value));
-                    pixel[0] = std::byte((value & 0x3ffu) >> 2);
-                    pixel[1] = std::byte(((value >> 10) & 0x3ffu) >> 2);
-                    pixel[2] = std::byte(((value >> 20) & 0x3ffu) >> 2);
-                    break;
-                }
-                case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-                case DXGI_FORMAT_R16G16B16A16_FLOAT:
-                {
-                    const auto* half = reinterpret_cast<const unsigned short*>(row + x * 8);
-                    pixel[0] = toByte(halfToFloat(half[0]) * 255.f);
-                    pixel[1] = toByte(halfToFloat(half[1]) * 255.f);
-                    pixel[2] = toByte(halfToFloat(half[2]) * 255.f);
-                    break;
-                }
-                default:
-                    if (unknownFormat == 0)
-                        ++unknownFormat;
-                    break;
-                }
-                std::fwrite(pixel, 1, 3, file);
-            }
-        }
-        std::fclose(file);
-        if (unknownFormat != 0 && logFile)
+        const auto format = dumpColorDescription.Format;
+        WriteColorPpm(path.c_str(), data + readbackFootprint[6].Offset, format, unsigned(dumpColorDescription.Width),
+                      unsigned(dumpColorDescription.Height), readbackFootprint[6].Footprint.RowPitch);
+        if (!ColorPpmSupported(format) && logFile)
         {
             static std::atomic<unsigned> logged { 0 };
             if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
             {
-                std::fprintf(logFile, "PACKED_DUMP color reason=unknown_format format=%u\n",
-                             unsigned(dumpColorDescription.Format));
+                std::fprintf(logFile, "PACKED_DUMP color reason=unknown_format format=%u\n", unsigned(format));
                 std::fflush(logFile);
             }
         }

@@ -286,6 +286,17 @@ void PollGlassDebugControl() noexcept
                 output << "dump=queued\n";
                 continue;
             }
+            if (line == "fgdump" || line.rfind("fgdump=", 0) == 0)
+            {
+                // Frame generation output dump: the generated frames the
+                // provider wrote, N executed evaluations (default 8, max 64).
+                const unsigned long requested =
+                    line.size() > 7 ? std::strtoul(line.c_str() + 7, nullptr, 10) : 8ul;
+                const unsigned count = static_cast<unsigned>(std::clamp(requested == 0 ? 8ul : requested, 1ul, 64ul));
+                const bool queued = RequestNativeFgOutputDump(count);
+                output << "fgdump=" << (queued ? "queued" : "busy") << " count=" << count << "\n";
+                continue;
+            }
             if (line == "gate=on" || line == "gate=off" || line == "gate=reset")
             {
                 auto& gate = Gate();
