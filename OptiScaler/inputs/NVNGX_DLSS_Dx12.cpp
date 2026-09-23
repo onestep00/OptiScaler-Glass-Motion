@@ -1190,6 +1190,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         ID3D12Resource* original = nullptr;
         bool substituted = false;
 
+        // Whether this evaluate belongs to the pass before the upscaler, whether or not it produced an
+        // edit. The pass after the upscaler runs only when it does not.
+        bool claimed = false;
+
         void run(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p, NVSDK_NGX_Feature f)
         {
             // The dual-feature arrangement runs the model inside the upscaler's own pipeline instead.
@@ -1206,7 +1210,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
                 original == nullptr)
                 return;
 
-            DlssNr::EvaluateBeforeUpscale(cmdList, p);
+            claimed = DlssNr::EvaluateBeforeUpscale(cmdList, p);
 
             if (auto* edited = DlssNr::PreUpscaleResult(); edited != nullptr)
             {
@@ -1258,10 +1262,11 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
             // motion vectors too, and its handle can reach here because the branch above does not
             // return, so filtering on the parameter block alone would run the model twice a frame.
             //
-            // Skipped when the pass already ran ahead of the upscaler: the two are the same model and
-            // the same per-frame cost, placed at one seam or the other.
+            // Skipped when the evaluate belongs to the pass ahead of the upscaler, even on a frame that
+            // pass skipped: the two are the same model and the same per-frame cost, placed at one seam or
+            // the other. A colour layout the earlier seam cannot take is handed to this one instead.
             if (result == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration &&
-                !preNr.substituted)
+                !preNr.claimed)
                 DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
 
             return result;
@@ -1308,8 +1313,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     // full cost the arrangement exists to avoid.
     //
     // EvaluateAfterUpscale declines by itself on a frame the pipeline stage already handled, so every
-    // call site is covered rather than this one.
-    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration && !preNr.substituted)
+    // call site is covered rather than this one. An evaluate the pass before the upscaler claimed is
+    // skipped here, for the reason given at the native branch above.
+    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration && !preNr.claimed)
         DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
 
     return optiResult;

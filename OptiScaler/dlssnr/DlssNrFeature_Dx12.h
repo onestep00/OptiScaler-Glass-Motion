@@ -71,7 +71,15 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 //
 // The edit lands on a surface of ours. The caller substitutes it for the upscale and puts the game's
 // own buffer back afterwards.
-void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+//
+// A game may render into the top-left corner of a larger colour texture. The pass then runs on that
+// rectangle alone, at its own size, and only the rectangle is copied into the surface.
+//
+// Answers whether the pass belongs before the upscaler on this evaluate, and the caller runs the pass
+// after the upscaler only when it does not: no colour texture, or a layout this seam cannot take (a
+// colour offset, a size half given or larger than the texture, an array, MSAA). The answer is true on
+// a frame the pass skips as well -- the one its model is built on, for one -- so nothing runs twice.
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                            ID3D12CommandQueue* timingQueue = nullptr);
 
 // The surface EvaluateBeforeUpscale wrote, or null when this frame's pass did not run.

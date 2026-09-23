@@ -10,6 +10,7 @@
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include "DlssNr_Dx12.h"
+#include "DlssNr_ActiveColor.h"
 
 #include <Config.h>
 #include <State.h>
@@ -251,6 +252,12 @@ struct NrState
     unsigned int preWidth = 0;
     unsigned int preHeight = 0;
     DXGI_FORMAT preFormat = DXGI_FORMAT_UNKNOWN;
+
+    // The picture alone, when the game renders into the corner of a larger colour texture. The pass
+    // before the upscaler works on this at the picture's own size, and the finished rectangle is then
+    // copied into preOut; the rest of preOut is never written. UNORDERED_ACCESS at rest, like the other
+    // work surfaces, and rebuilt whenever the picture's size changes.
+    ID3D12Resource* activeColor = nullptr;
 
     // Whether the last Dispatch reached its composite. Cleared on entry and set after the resolve, so
     // the dozen paths that give up in between are all covered by it. A caller substituting the edited
@@ -1293,6 +1300,31 @@ ID3D12Resource* EnsurePreUpscaleSurface(ID3D12Device* device, ID3D12GraphicsComm
     return g_nr.preOut;
 }
 
+// The compact surface the pass before the upscaler works on when the picture fills only the corner of
+// the colour texture. Sized to the picture, not the allocation, so a dynamic resolution title rebuilds
+// it as it moves; the old one is parked rather than released, since the GPU may still be reading it.
+ID3D12Resource* EnsureActiveColourSurface(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
+                                          unsigned int height)
+{
+    if (g_nr.activeColor != nullptr)
+    {
+        const D3D12_RESOURCE_DESC have = g_nr.activeColor->GetDesc();
+
+        if (have.Width == width && have.Height == height && have.Format == format)
+            return g_nr.activeColor;
+
+        ParkNrResource(g_nr.activeColor);
+    }
+
+    // CreateScratch leaves it in UNORDERED_ACCESS, which is where it rests.
+    g_nr.activeColor = CreateScratch(device, format, width, height);
+
+    if (g_nr.activeColor != nullptr)
+        LOG_DEBUG("DLSS-NR active colour surface {}x{} format {}", width, height, (int) format);
+
+    return g_nr.activeColor;
+}
+
 // A typeless resource cannot be viewed, and NGX builds its own views with nothing to tell it which
 // format to use. Depth is very often declared typeless, so the typed member of the same family is
 // substituted; CopyResource accepts that as a destination for the typeless original.
@@ -1464,6 +1496,64 @@ ID3D12Resource* GetResource(NVSDK_NGX_Parameter* params, const char* a, const ch
         return static_cast<ID3D12Resource*>(untyped);
 
     return nullptr;
+}
+
+// The rectangle of the game's colour texture the pass before the upscaler works on, or nothing when
+// it cannot take this layout and the evaluate falls back to the pass after the upscaler.
+//
+// DLSS reads Color as an origin-zero rectangle of the render size, and the texture around it may be
+// larger: many engines render into the corner of a display-sized texture, and a dynamic resolution
+// title allocates once at the largest size it will ever need. A valid rectangle is kept before the
+// upscaler at its own size; a colour offset, a size that is half given or exceeds the texture, an
+// array or MSAA is not. Both zero means the game did not say, and the whole texture is the picture.
+std::optional<DlssNr::ColorExtent> PreUpscaleColourExtent(NVSDK_NGX_Parameter* params)
+{
+    ID3D12Resource* colour = GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color");
+
+    if (colour == nullptr)
+        return std::nullopt;
+
+    unsigned int renderWidth = 0;
+    unsigned int renderHeight = 0;
+    unsigned int colourBaseX = 0;
+    unsigned int colourBaseY = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &renderWidth);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &renderHeight);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &colourBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &colourBaseY);
+
+    const D3D12_RESOURCE_DESC colourDesc = colour->GetDesc();
+    const auto allocationWidth = (unsigned int) colourDesc.Width;
+    const auto allocationHeight = colourDesc.Height;
+    const auto active = DlssNr::PreSrColorExtent(colourDesc, renderWidth, renderHeight, colourBaseX, colourBaseY);
+
+    // Once each, like wilsjo2's, so the log says which of the two this game is without repeating it.
+    if (!active.has_value())
+    {
+        static bool warnedSubrect = false;
+
+        if (!warnedSubrect)
+        {
+            warnedSubrect = true;
+            LOG_WARN("DLSS-NR before SR requires a valid origin-zero active rectangle inside a single-sample 2D "
+                     "Color texture; got allocation {}x{}, active {}x{} at {},{}. Falling back after SR.",
+                     allocationWidth, allocationHeight, renderWidth, renderHeight, colourBaseX, colourBaseY);
+        }
+    }
+    else if (active->width != allocationWidth || active->height != allocationHeight)
+    {
+        static bool reportedPadding = false;
+
+        if (!reportedPadding)
+        {
+            reportedPadding = true;
+            LOG_INFO("DLSS-NR before SR: staging active {}x{} from padded Color allocation {}x{}; only the active "
+                     "rectangle is copied back. Model size follows active size and WorkingScale.",
+                     active->width, active->height, allocationWidth, allocationHeight);
+        }
+    }
+
+    return active;
 }
 
 // A change has to hold still before it is acted on: a slider being dragged reports a new value every
@@ -1799,14 +1889,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.wroteTarget = false;
 
-    ID3D12Resource* target = output;
-
     // The picture the model is shown, against the picture the edit lands on. Equal on the pass that
     // runs after the upscaler, where the frame is read and written in place. Distinct on the pass that
     // runs before it: the read is the game's own colour buffer, which this pass has no business
     // writing, and the write is a surface of ours the upscaler is then pointed at.
     ID3D12Resource* const source = colour;
-    const bool split = source != target;
+    const bool split = source != output;
 
     // Where the source sits between this pass's reads. Unsplit that is the output's own idle state,
     // UNORDERED_ACCESS. Split it is the game's colour buffer, which arrives shader-readable unless
@@ -1836,16 +1924,53 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
             : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-    Barrier(cmdList, target, outputArrival, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
     ID3D12Device* device = nullptr;
 
-    if (FAILED(target->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+    if (FAILED(output->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
     {
         ReportSkipOnce("the output texture belongs to no D3D12 device");
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
         return;
     }
+
+    // Before the upscaler the picture may fill only the top-left corner of the colour texture (see
+    // DlssNrFrameInfo::ActiveWidth). The pass then works on a compact surface of the picture's own
+    // size: the encode reads just that rectangle of the colour buffer, which is the crop, the model and
+    // every work surface are sized from it, and once the edit is composed the rectangle alone is copied
+    // into output. The rest of output is never written. Everywhere else the target is output itself.
+    const D3D12_RESOURCE_DESC outputDesc = output->GetDesc();
+    const bool cropColor = frame.ActiveWidth != 0 && frame.ActiveHeight != 0 &&
+                           (frame.ActiveWidth != outputDesc.Width || frame.ActiveHeight != outputDesc.Height);
+
+    if (cropColor && (frame.ActiveWidth > outputDesc.Width || frame.ActiveHeight > outputDesc.Height))
+    {
+        ReportSkipOnce("the colour's active rectangle does not fit inside the output");
+        device->Release();
+        return;
+    }
+
+    ID3D12Resource* target = output;
+
+    // Where the target rests between frames, and is put back before every exit: output's own state,
+    // or UNORDERED_ACCESS for the compact surface, which nothing but this pass ever sees.
+    D3D12_RESOURCE_STATES targetArrival = outputArrival;
+
+    if (cropColor)
+    {
+        target = EnsureActiveColourSurface(device, outputDesc.Format, frame.ActiveWidth, frame.ActiveHeight);
+
+        if (target == nullptr)
+        {
+            g_nr.failed = true;
+            g_nr.reason = "the pre-SR active colour staging texture could not be allocated";
+            LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+            device->Release();
+            return;
+        }
+
+        targetArrival = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+
+    Barrier(cmdList, target, targetArrival, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
     const auto width = (unsigned int) desc.Width;
@@ -1965,7 +2090,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         g_nr.failed = true;
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
@@ -2119,7 +2244,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.failed = true;
             g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
-            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
             device->Release();
             return;
         }
@@ -2132,7 +2257,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (restoreRequired && !D3D12Hooks::CanRestoreRootSignature(cmdList))
         {
             ReportSkipOnce("the upscaler could not restore state on the creation frame");
-            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
             device->Release();
             return;
         }
@@ -2169,7 +2294,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // 0x-452FFFFF, which no one can decode back to 0xBAD00001.
             LOG_ERROR("DLSS-NR create failed: init 0x{:X} ({}), create 0x{:X} ({})", initResult,
                       NgxResultName(initResult), createResult, NgxResultName(createResult));
-            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
             device->Release();
             return;
         }
@@ -2193,14 +2318,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Creating and evaluating a feature in the same command list is the dice-roll that hung the
         // GPU (every crash died on a creation frame). The creation goes through the game's own submit
         // first; the first evaluate happens next frame. One frame without the model is invisible.
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
 
     if (g_nr.feature == nullptr)
     {
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
@@ -2233,7 +2358,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.failed = true;
         g_nr.reason = "the colour codec would not compile";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
@@ -2297,7 +2422,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (restoreRequired && !D3D12Hooks::CanRestoreRootSignature(cmdList))
             {
                 ReportSkipOnce("the upscaler could not restore state on the creation frame");
-                Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+                Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
                 device->Release();
                 return;
             }
@@ -2385,7 +2510,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     LOG_INFO("DLSS-NR: pass {} built at {}x{}", i + 1, workWidth, workHeight);
             }
 
-            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
             device->Release();
             return;
         }
@@ -2411,7 +2536,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // -- so the game that most needed this skip was also leaking a device reference per frame.
         // The output goes back the same way, for the same reason: this is a per-frame path, and a
         // resource left in a state the game's tracking does not expect is a wrong barrier every frame.
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
@@ -2566,7 +2691,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.failed = true;
         g_nr.reason = "the game's depth or motion vectors could not be made readable";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
@@ -2623,7 +2748,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         restoreGuides();
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return;
     }
@@ -2848,6 +2973,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                             nullptr, target, nullptr);
         setWork(answer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+        // The picture goes into output, and only the picture: the box is the rectangle the game
+        // rendered, so output's margin keeps whatever it held. The target's own transitions double as
+        // the wait for the resolve's writes.
+        if (cropColor)
+        {
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Barrier(cmdList, output, outputArrival, D3D12_RESOURCE_STATE_COPY_DEST);
+            DlssNr::CopyActiveColor(cmdList, output, target, { width, height });
+            Barrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_DEST, outputArrival);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
         g_nr.wroteTarget = true;
 
         // On-demand capture works in this path too: the staging copy still holds the frame as the
@@ -2941,7 +3078,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Hand the guides and the output back in the states the upscaler and the game expect.
     restoreGuides();
-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
 
     device->Release();
 }
@@ -2967,9 +3104,12 @@ void RetryAfterFailure()
 // sourceIn and destIn override what the parameter block would have supplied. Both or neither: a
 // caller holding the two frames is placing the pass somewhere the parameter block does not describe,
 // and half an override would leave the pass reading one pipeline and writing another.
+// activeColour is the rectangle of the colour buffer the pass before the upscaler works on; see
+// PreUpscaleColourExtent. Unset means the whole texture.
 void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, ID3D12CommandQueue* timingQueue,
                     bool preUpscale, ID3D12Resource* sourceIn = nullptr, ID3D12Resource* destIn = nullptr,
-                    std::optional<D3D12_RESOURCE_STATES> destArrival = std::nullopt)
+                    std::optional<D3D12_RESOURCE_STATES> destArrival = std::nullopt,
+                    std::optional<ColorExtent> activeColour = std::nullopt)
 {
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
     {
@@ -3042,6 +3182,12 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
     // How much of the guides is real. See DlssNrFrameInfo -- zero means the game did not say.
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
+
+    if (activeColour.has_value())
+    {
+        frame.ActiveWidth = activeColour->width;
+        frame.ActiveHeight = activeColour->height;
+    }
 
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
         frame.MvScaleX = 1.0f;
@@ -3262,12 +3408,23 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     EvaluateAtSeam(cmdList, params, timingQueue, false);
 }
 
-void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                            ID3D12CommandQueue* timingQueue)
 {
     // Cleared here as well as inside the pass: this call can give up before the pass is reached.
     g_nr.wroteTarget = false;
-    EvaluateAtSeam(cmdList, params, timingQueue, true);
+
+    // The seam is chosen per evaluate from the colour layout alone, never from whether the pass wrote
+    // anything: a frame this seam skips -- the one its model is built on, above all -- handed to the
+    // pass after the upscaler would rebuild the model at display resolution there, and back again here
+    // on the next frame, and neither would ever evaluate.
+    const auto active = params != nullptr ? PreUpscaleColourExtent(params) : std::nullopt;
+
+    if (!active.has_value())
+        return false;
+
+    EvaluateAtSeam(cmdList, params, timingQueue, true, nullptr, nullptr, std::nullopt, active);
+    return true;
 }
 
 ID3D12Resource* PreUpscaleResult() { return g_nr.wroteTarget ? g_nr.preOut : nullptr; }
@@ -3612,6 +3769,25 @@ void Shutdown()
         g_nr.passScratch->Release();
         g_nr.passScratch = nullptr;
     }
+
+    // The pre-upscale pair belongs to the device as much as the scratch set above does, and a surface
+    // left here would be handed to the next device's upscaler whenever the sizes happened to match.
+    if (g_nr.activeColor != nullptr)
+    {
+        g_nr.activeColor->Release();
+        g_nr.activeColor = nullptr;
+    }
+
+    if (g_nr.preOut != nullptr)
+    {
+        g_nr.preOut->Release();
+        g_nr.preOut = nullptr;
+    }
+
+    g_nr.preWidth = 0;
+    g_nr.preHeight = 0;
+    g_nr.preFormat = DXGI_FORMAT_UNKNOWN;
+    g_nr.wroteTarget = false;
 
     if (g_nr.meter != nullptr)
     {
