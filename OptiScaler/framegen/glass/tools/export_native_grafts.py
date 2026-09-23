@@ -23,6 +23,17 @@ true, beside its root graft or alone:
 A camera-only record's supply_class is the target's own current position class
 (camera_supply_class), since no previous graph is copied from a native VS.
 
+Vehicle targets (index.json field "vehicle", graft_native_motion.py) never get a
+camera-only record: the vehicle moves with its own transform, whose engine
+supply (MotionMatrix) such a VS does not receive, and camera motion alone is
+wrong on a moving vehicle. Their draws keep the engine's motion. Each refused
+VS is listed in <out>/grafts/refused.bin: "GGREFS01", u32 count, u32 reserved
+(0), then count 36-byte records sorted by sha: { u8 sha256[32]; u32 reason },
+reason 1 = vehicle object motion without engine supply. A vehicle root graft
+keeps its camera variant: array and multi-instance draws follow the engine's
+array convention (previous view-projection on each element's current world
+position).
+
 A graft is exported only when its status is "validated", its verification row
 has all four checks true and it requires engine motion rows [24, 25, 26].
 
@@ -45,7 +56,8 @@ A root graft without a union entry is refused.
 class-2 root graft may carry previous_world "current": it reads the target's own
 current INSTANCE_TRANSFORM rows instead of the MotionMatrix and is exported with
 required engine motion rows [] instead of [24, 25, 26]; its supply class must be
-2. All other records follow the rules above.
+2. Vehicle targets keep the MotionMatrix previous world there too. All other
+records follow the rules above.
 
 The output contains extracted game shader code. Write it to an ignored local
 directory;
@@ -68,6 +80,7 @@ CAMERA_CHECKS = ('camera_original_outputs_unchanged', 'camera_no_b7',
                  'camera_current_clip_convention_verified')
 ROWS = [24, 25, 26]
 NO_OUTPUT = 0xFFFFFFFF
+REFUSED_VEHICLE = 1  # refused.bin reason: vehicle object motion without engine supply
 SKINNING_INPUTS = {'BLENDINDICES', 'BLENDWEIGHT', 'INSTANCE_SKINNING_DATA', 'BONEINDEX'}
 SRV, CBV = 0, 2
 CLASS_NAMES = {1: 'root-only', 2: 'skinning', 4: 'preskinned', 6: 'skinning+preskinned'}
@@ -155,6 +168,18 @@ def main():
     camera_refused = Counter()
     records = []
     kinds = Counter()
+    # Vehicle camera-only candidates: (digest, camera supply class, evidence).
+    refusals = []
+
+    def camera_only(shader, camera, kind):
+        digest = bytes.fromhex(shader['sha256'])
+        if shader.get('vehicle'):
+            refusals.append((digest, int(shader['camera_supply_class']), tuple(shader['vehicle'])))
+            kinds[f'refused vehicle camera only ({kind})'] += 1
+            return
+        records.append((digest, NO_OUTPUT, NO_OUTPUT, int(shader['camera_supply_class']), None, camera))
+        kinds[f'camera only ({kind})'] += 1
+
     for shader in index['shaders']:
         sha = shader['sha256']
         index_rows[sha] = shader.get('camera_rows')
@@ -166,18 +191,18 @@ def main():
             if variant and shader.get('previous_world') == 'current':
                 kinds['root with current previous world'] += 1
         elif camera:
-            records.append((bytes.fromhex(sha), NO_OUTPUT, NO_OUTPUT, int(shader['camera_supply_class']), None, camera))
-            kinds['camera only (native twin, root not exported)'] += 1
+            camera_only(shader, camera, 'native twin, root not exported')
     for shader in index.get('generic_camera', []):
         sha = shader['sha256']
         index_rows[sha] = shader.get('camera_rows')
         camera = camera_outputs(shader, generic_verification.get(sha), grafted / f'{sha}.camera.dxil', camera_refused)
         if camera:
-            records.append((bytes.fromhex(sha), NO_OUTPUT, NO_OUTPUT, int(shader['camera_supply_class']), None, camera))
-            kinds['camera only (generic template)'] += 1
+            camera_only(shader, camera, 'generic template')
 
     records.sort(key=lambda record: record[0])
-    if len({record[0] for record in records}) != len(records):
+    refusals.sort()
+    digests = [record[0] for record in records] + [digest for digest, *_ in refusals]
+    if len(set(digests)) != len(digests):
         raise ValueError('duplicate graft sha256')
     out = args.out.resolve() / 'grafts'
     if out.exists():
@@ -192,6 +217,9 @@ def main():
         if camera_source:
             shutil.copyfile(camera_source, out / f'{digest.hex()}.camera.dxil')
     (out / 'index.bin').write_bytes(bytes(blob))
+    refused_blob = struct.pack('<8sII', b'GGREFS01', len(refusals), 0) + b''.join(
+        struct.pack('<32sI', digest, REFUSED_VEHICLE) for digest, *_ in refusals)
+    (out / 'refused.bin').write_bytes(refused_blob)
 
     histogram = Counter(record[3] for record in records)
     print(f'grafts={len(records)} index_bytes={len(blob)} out={out}')
@@ -205,6 +233,12 @@ def main():
     for value in sorted(rows):
         print(f'camera rows {value}: {rows[value]}')
     print(f'index_sha256={hashlib.sha256(bytes(blob)).hexdigest()}')
+    by_class = Counter(supply for _, supply, _ in refusals)
+    print(f'refused={len(refusals)} ('
+          + ', '.join(f'class {value}: {by_class[value]}' for value in sorted(by_class))
+          + f') refused_sha256={hashlib.sha256(refused_blob).hexdigest()}')
+    for evidence, count in sorted(Counter(evidence for *_, evidence in refusals).items()):
+        print(f'refused evidence {" + ".join(evidence)}: {count}')
 
 
 if __name__ == '__main__':

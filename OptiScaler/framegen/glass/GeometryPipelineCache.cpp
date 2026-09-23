@@ -413,6 +413,17 @@ struct GeometryPipelineCache::Impl
                                 else
                                     NoteGeometryGraft(GraftArrayMissing);
                             }
+                            else if (FindNativeGraftRefusal(vertexHash) != NativeGraftRefusal::None)
+                            {
+                                // Vehicle VS whose object-motion supply (the
+                                // engine MotionMatrix) this VS does not receive:
+                                // the catalog refused its camera-only record, so
+                                // its draws keep the engine's motion.
+                                NoteGeometryGraft(GraftRefused);
+                                graftKind = GeometryGraftKind::Refused;
+                                packedError = "Native graft refused for vertex shader " + hashPrefix(vertexHash) +
+                                              ": vehicle object motion without engine supply";
+                            }
                             else
                             {
                                 NoteGeometryGraft(GraftMissing);
@@ -536,6 +547,8 @@ const char* GeometryGraftKindName(GeometryGraftKind kind) noexcept
         return "vertex_only";
     case GeometryGraftKind::Missing:
         return "missing";
+    case GeometryGraftKind::Refused:
+        return "refused";
     case GeometryGraftKind::ClassDisabled:
         return "class_disabled";
     case GeometryGraftKind::Rejected:

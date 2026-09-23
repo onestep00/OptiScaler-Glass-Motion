@@ -111,6 +111,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Native graft packed rewrite contract failed' }
     (Join-Path $graftWorkspace 'all-transparent-vs\39f8b55578cc38ccb2c3263571fe2a9c1eeb31d24c83de653675021874f442d0.dxbc') `
     (Join-Path $graftWorkspace 'all-transparent-ps\6bc2b7e3e38cd012a38ecb7de0ab2bd49f6210286b3c067a98bbed91cb5b1a7c.dxbc') none none 10 11
 if ($LASTEXITCODE -ne 0) { throw 'Native graft camera-only packed rewrite contract failed' }
+# Refused vehicle VS: vehicle_destr_blendshape MeshStaticVehicle (no native twin,
+# vehicle damage input and grid modifiers) has no record and is listed in
+# refused.bin; its draws keep the engine's motion.
+& $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
+    (Join-Path $graftWorkspace 'all-transparent-vs\296676c3819d551b094c916e23edacbf20c0f10cdc7d4cce1f0dcf4fcde2c974.dxbc') refused
+if ($LASTEXITCODE -ne 0) { throw 'Native graft vehicle refusal contract failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'
 $sources = @((Join-Path $PSScriptRoot 'Settings.cpp'),

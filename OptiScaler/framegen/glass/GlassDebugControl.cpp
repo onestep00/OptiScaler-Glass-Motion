@@ -105,6 +105,7 @@ void writeStatus(std::ofstream& file)
     file << "GRAFT ready=" << ReadGeometryGraft(GraftReady) << " missing=" << ReadGeometryGraft(GraftMissing)
          << " rejected=" << ReadGeometryGraft(GraftRejected)
          << " class_disabled=" << ReadGeometryGraft(GraftClassDisabled)
+         << " refused=" << ReadGeometryGraft(GraftRefused)
          << " camera_only=" << ReadGeometryGraft(GraftCameraOnly)
          << " array_ready=" << ReadGeometryGraft(GraftArrayReady)
          << " array_missing=" << ReadGeometryGraft(GraftArrayMissing)
@@ -112,7 +113,8 @@ void writeStatus(std::ofstream& file)
          << " array_draws=" << ReadGeometryGraft(GraftArrayDraws)
          << " draws=" << ReadGeometryGraft(GraftDraws)
          << " fg_evals=" << ReadGeometryGraft(NativePreviousEvaluations)
-         << " catalog=" << NativeGraftCount() << " classmask=" << ReadGraftClassMask()
+         << " catalog=" << NativeGraftCount() << " catalog_refused=" << NativeGraftRefusalCount()
+         << " classmask=" << ReadGraftClassMask()
          << " vhfallback=" << (VertexHistoryFallbackEnabled() ? 1 : 0) << "\n";
     // Engine declaration hook installed at process attach. hook=0 leaves every
     // declaration native; status names the step that stopped installation.

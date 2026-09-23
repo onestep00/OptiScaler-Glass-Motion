@@ -2,9 +2,12 @@
 // original pixel shader. Offline compiler/validator check: no device, no game.
 // Usage: NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous
 //        camera-current camera-previous
+//        NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc refused
 // module-dir must contain Glass/grafts written by tools/export_native_grafts.py.
 // current and previous are "none" for a camera-only record (a VS without a
 // native current-position twin): no root graft, only the camera variant.
+// "refused": the VS has no record and refused.bin lists it (vehicle object
+// motion without engine supply).
 #include "pch.h"
 #include <dxcapi.h>
 #include <wrl/client.h>
@@ -114,9 +117,23 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 9, "NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous "
-                           "camera-current camera-previous");
+        require(argc == 9 || (argc == 5 && std::wstring(argv[4]) == L"refused"),
+                "NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous "
+                "camera-current camera-previous | NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc refused");
         moduleDirectory = argv[2];
+        if (argc == 5)
+        {
+            // Catalog refusal: no record, and the listed reason.
+            const auto vehicleVs = readFile(argv[3]);
+            std::array<std::uint8_t, 32> hash {};
+            require(!GlassFg::FindNativeGraft(vehicleVs.data(), vehicleVs.size(), &hash),
+                    "Refused VS returned a catalog record");
+            require(GlassFg::FindNativeGraftRefusal(hash) == GlassFg::NativeGraftRefusal::VehicleObjectMotion,
+                    "Refused VS is not listed as vehicle object motion");
+            std::printf("catalog grafts=%zu refused=%zu: vehicle VS refused\n", GlassFg::NativeGraftCount(),
+                        GlassFg::NativeGraftRefusalCount());
+            return 0;
+        }
         const bool cameraOnly = std::wstring(argv[5]) == L"none" && std::wstring(argv[6]) == L"none";
         const unsigned expectedCurrent = cameraOnly ? 0 : std::stoul(argv[5]);
         const unsigned expectedPrevious = cameraOnly ? 0 : std::stoul(argv[6]);
@@ -137,8 +154,11 @@ int wmain(int argc, wchar_t** argv)
         // shader bytes are a miss.
         const auto originalVs = readFile(argv[3]);
         const auto pixel = readFile(argv[4]);
-        const auto graft = GlassFg::FindNativeGraft(originalVs.data(), originalVs.size());
+        std::array<std::uint8_t, 32> hash {};
+        const auto graft = GlassFg::FindNativeGraft(originalVs.data(), originalVs.size(), &hash);
         require(graft.has_value(), "Catalog miss for the original VS");
+        require(GlassFg::FindNativeGraftRefusal(hash) == GlassFg::NativeGraftRefusal::None,
+                "Catalog record is also listed as refused");
         require(graft->currentOutput == expectedCurrent && graft->previousOutput == expectedPrevious,
                 "Catalog output ids differ from index.json");
         require(cameraOnly == !graft->bytes && cameraOnly == !graft->size,

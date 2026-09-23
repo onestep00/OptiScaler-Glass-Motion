@@ -29,6 +29,11 @@ constexpr std::uint32_t NoOutput = 0xFFFFFFFFu;
 // sizing an allocation. Shader bytes follow the compiler's own 2 MiB limit.
 constexpr std::uint32_t MaxGrafts = 4096;
 constexpr std::uintmax_t MaxGraftBytes = 2 * 1024 * 1024;
+// refused.bin: "GGREFS01", u32 count, u32 reserved (0), then count records of
+// { u8 sha256[32]; u32 reason; } sorted by sha (little endian), reason a
+// NativeGraftRefusal. A VS is either indexed or refused.
+constexpr char RefusalMagic[8] = { 'G', 'G', 'R', 'E', 'F', 'S', '0', '1' };
+constexpr std::size_t RefusalRecordBytes = 36;
 
 struct Graft
 {
@@ -41,16 +46,69 @@ struct Graft
     bool attempted = false;
 };
 
+struct Refusal
+{
+    std::array<std::uint8_t, 32> sha {};
+    NativeGraftRefusal reason = NativeGraftRefusal::None;
+};
+
 struct Catalog
 {
     std::once_flag indexOnce;
     std::mutex loadMutex;
-    std::vector<Graft> grafts; // Sorted by sha; immutable after indexOnce.
+    std::vector<Graft> grafts;     // Sorted by sha; immutable after indexOnce.
+    std::vector<Refusal> refusals; // Sorted by sha; immutable after indexOnce.
     BCRYPT_ALG_HANDLE sha256 = nullptr;
     std::filesystem::path directory;
-    std::atomic<std::size_t> count { 0 };
+    std::atomic<std::size_t> count { 0 }, refusalCount { 0 };
 };
 Catalog catalog;
+
+// Any defect leaves the refusal list empty: the VS then counts as a graft miss.
+void loadRefusals() noexcept
+{
+    try
+    {
+        std::ifstream file(catalog.directory / L"refused.bin", std::ios::binary);
+        if (!file)
+            return;
+        char header[IndexHeaderBytes] {};
+        if (!file.read(header, sizeof(header)) || std::memcmp(header, RefusalMagic, sizeof(RefusalMagic)) != 0)
+            return;
+        std::uint32_t count = 0, reserved = 0;
+        std::memcpy(&count, header + 8, 4);
+        std::memcpy(&reserved, header + 12, 4);
+        if (count > MaxGrafts || reserved)
+            return;
+        std::vector<Refusal> refusals(count);
+        for (auto& refusal : refusals)
+        {
+            unsigned char record[RefusalRecordBytes] {};
+            if (!file.read(reinterpret_cast<char*>(record), sizeof(record)))
+                return;
+            std::memcpy(refusal.sha.data(), record, 32);
+            std::uint32_t reason = 0;
+            std::memcpy(&reason, record + 32, 4);
+            if (reason != static_cast<std::uint32_t>(NativeGraftRefusal::VehicleObjectMotion))
+                return;
+            refusal.reason = NativeGraftRefusal::VehicleObjectMotion;
+        }
+        if (file.peek() != std::char_traits<char>::eof())
+            return;
+        // Written sorted and unique; anything else is a different format.
+        if (std::adjacent_find(refusals.begin(), refusals.end(), [](const Refusal& a, const Refusal& b) {
+                return !(a.sha < b.sha);
+            }) != refusals.end())
+            return;
+        catalog.refusals = std::move(refusals);
+        catalog.refusalCount.store(catalog.refusals.size(), std::memory_order_release);
+    }
+    catch (...)
+    {
+        catalog.refusals.clear();
+        catalog.refusalCount.store(0, std::memory_order_release);
+    }
+}
 
 void loadIndex() noexcept
 {
@@ -62,6 +120,7 @@ void loadIndex() noexcept
             return;
         }
         catalog.directory = Util::DllPath().parent_path() / L"Glass" / L"grafts";
+        loadRefusals();
         std::ifstream file(catalog.directory / L"index.bin", std::ios::binary);
         if (!file)
             return;
@@ -110,6 +169,17 @@ void loadIndex() noexcept
             return;
         catalog.grafts = std::move(grafts);
         catalog.count.store(catalog.grafts.size(), std::memory_order_release);
+        // A VS is either indexed or refused; an overlap means mismatched files.
+        const auto indexed = [](const Refusal& refusal) {
+            const auto found = std::lower_bound(catalog.grafts.begin(), catalog.grafts.end(), refusal.sha,
+                                                [](const Graft& graft, const auto& key) { return graft.sha < key; });
+            return found != catalog.grafts.end() && found->sha == refusal.sha;
+        };
+        if (std::any_of(catalog.refusals.begin(), catalog.refusals.end(), indexed))
+        {
+            catalog.refusals.clear();
+            catalog.refusalCount.store(0, std::memory_order_release);
+        }
     }
     catch (...)
     {
@@ -222,4 +292,14 @@ std::optional<NativeGraft> FindNativeGraft(const void* vertexShader, std::size_t
 }
 
 std::size_t NativeGraftCount() noexcept { return catalog.count.load(std::memory_order_acquire); }
+
+NativeGraftRefusal FindNativeGraftRefusal(const std::array<std::uint8_t, 32>& hash) noexcept
+{
+    std::call_once(catalog.indexOnce, loadIndex);
+    const auto found = std::lower_bound(catalog.refusals.begin(), catalog.refusals.end(), hash,
+                                        [](const Refusal& refusal, const auto& key) { return refusal.sha < key; });
+    return found != catalog.refusals.end() && found->sha == hash ? found->reason : NativeGraftRefusal::None;
+}
+
+std::size_t NativeGraftRefusalCount() noexcept { return catalog.refusalCount.load(std::memory_order_acquire); }
 } // namespace GlassFg

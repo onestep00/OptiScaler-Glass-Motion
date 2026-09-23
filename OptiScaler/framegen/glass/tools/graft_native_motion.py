@@ -40,8 +40,21 @@ at the previous skinning offset) and the previous camera stay the twin's. Such a
 record needs no engine motion row (required_engine_motion_rows []); its b7
 declaration is neither enlarged nor added unless the previous graph reads another
 b7 modifier row. It records previous_world "current" and previous_world_rows
-[[b7 row, "INSTANCE_TRANSFORM", k], ...]. Class 1 root grafts and camera variants
-are unchanged.
+[[b7 row, "INSTANCE_TRANSFORM", k], ...]. Class 1 root grafts, vehicle targets
+(below) and camera variants are unchanged.
+
+Vehicle targets move with their vehicle's transform. The engine data of the VS
+marks them: the VEHICLE_DMG_POS vertex input (vehicle damage deformation), the
+vehicle damage-grid modifiers MatMod_VehicleGridCorners and
+MatMod_VehicleMeshPivotInGridSpace in its modifier metadata
+(shader-modifier-contracts.json), or vehicle vertex factories only
+(MeshStaticVehicle, MeshSkinnedVehicle in all-cache-techniques.json). Their rows
+(twin and generic) record that evidence as "vehicle". The engine's own velocity
+route for vehicle meshes reads the MotionMatrix (vehicle_destr_blendshape
+MeshStaticVehicle c5783867... reads b7 rows 4..6, MatMod_MotionMatrix row 4), so
+a vehicle root graft keeps the MotionMatrix previous world in both modes, and
+its camera-only variant, which carries camera motion only, never serves as the
+VS's only record (export_native_grafts.py refuses it).
 """
 from pathlib import Path
 from collections import Counter,defaultdict
@@ -61,6 +74,18 @@ _parser.add_argument('--skinned-previous-world', choices=('motion','current'), d
 _args=_parser.parse_args()
 p=_args.workspace.resolve(strict=True);_extra=_args.generic_extra
 GRAFTED='native-grafted-skinned-current' if _args.skinned_previous_world=='current' else 'native-grafted'
+
+# Engine data marking a VS that draws vehicle geometry (module docstring).
+VEHICLE_FACTORIES={'MeshStaticVehicle','MeshSkinnedVehicle'}
+VEHICLE_MODIFIERS={'MatMod_VehicleGridCorners','MatMod_VehicleMeshPivotInGridSpace'}
+VEHICLE_INPUT=re.compile(r'^!\d+ = !\{i32 \d+, !"VEHICLE_DMG_POS", ',re.M)
+
+def vehicle_evidence(text,factories,contract):
+    """The engine data that marks a VS as drawing vehicle geometry; [] when none does."""
+    evidence=['VEHICLE_DMG_POS input'] if VEHICLE_INPUT.search(text) else []
+    evidence+=sorted({s['name']+' modifier' for c in contract or [] for s in c['slots'] if s['name'] in VEHICLE_MODIFIERS})
+    if factories and set(factories)<=VEHICLE_FACTORIES:evidence.append('vehicle vertex factories only')
+    return evidence
 
 def emit_clip_outputs(a,text,native,node,lines,metadata,previous,input_cols,used_calls,dejittered=False):
     """Append de-jittered current clip and the given previous clip as two new outputs.
@@ -740,6 +765,7 @@ def main():
         candidates=sorted(r['native_candidates'],key=lambda n:min(x['dependencies']['instructions'] for x in n['previous']))
         families=sorted(factories.get(r['sha256'],()))
         if not families:raise ValueError(r['sha256']+' has no technique in all-cache-techniques.json')
+        vehicle=vehicle_evidence(target,families,contracts.get(r['sha256']))
         # Factory-consistent twins (module docstring): a skinned target refuses
         # root-only twins of another vertex factory.
         skinned=any('Skinned' in f for f in families)
@@ -755,9 +781,10 @@ def main():
                 except (ValueError,KeyError,StopIteration,AssertionError) as e:errors.append(str(e))
             for stale in (path,path.with_suffix('.dxil')):stale.unlink(missing_ok=True)
             return None,None,sorted(set(errors))
-        # --skinned-previous-world current: class-2 twins graft with the target's current world rows.
+        # --skinned-previous-world current: class-2 twins graft with the target's current world rows,
+        # except vehicle targets, which keep the engine MotionMatrix (module docstring).
         n,info,errors=attempt(graft,out/(r['sha256']+'.ll'),twins,lambda n:dict(previous_world=
-            'current' if _args.skinned_previous_world=='current' and previous_class(n)==2 else 'motion'))
+            'current' if _args.skinned_previous_world=='current' and previous_class(n)==2 and not vehicle else 'motion'))
         if n:row=dict(sha256=r['sha256'],families=families,native_sha256=n['sha256'],status='validated',
                       specializations=n.get('specializations',{}),**info)
         elif len(twins)<len(candidates):
@@ -770,6 +797,7 @@ def main():
         c,info,errors=attempt(camera_graft,out/(r['sha256']+'.camera.ll'),candidates)
         if c:row.update(camera_status='validated',camera_native_sha256=c['sha256'],**info)
         else:row.update(camera_status='unsupported',camera_errors=errors)
+        if vehicle:row['vehicle']=vehicle
         return row
     with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(process,rows))
     summary=dict(total=len(rows),statuses=dict(Counter(r['status'] for r in results)),
@@ -778,8 +806,11 @@ def main():
         copied_from_original_native_mv=True,live_admitted=False)
     if _args.skinned_previous_world=='current':
         summary['previous_world']=dict(Counter(r.get('previous_world','motion') for r in results if r['status']=='validated'))
-    generic,generic_summary=generic_phase(rows,results,out,assemble)
+    generic,generic_summary=generic_phase(rows,results,out,assemble,factories,contracts)
     summary['generic_camera']=generic_summary
+    summary['vehicle']=dict(twin_statuses=dict(Counter(r['status'] for r in results if r.get('vehicle'))),
+        twin_camera_only=sum(1 for r in results if r.get('vehicle') and r['status']!='validated' and r['camera_status']=='validated'),
+        generic_camera_statuses=dict(Counter(r['camera_status'] for r in generic if r.get('vehicle'))))
     (out/'index.json').write_text(json.dumps(dict(summary=summary,shaders=results,generic_camera=generic),indent=2))
     print(json.dumps(summary,indent=2))
 
@@ -835,8 +866,12 @@ def native_frames():
         frames[pair,tuple(sorted(current&set(ORIGIN_ROWS))),tuple(sorted(previous&set(ORIGIN_ROWS)))]+=1
     return frames
 
-def generic_phase(rows,results,out,assemble):
-    """Camera-only grafts for transparent VS outside the native twin matches."""
+def generic_phase(rows,results,out,assemble,factories,contracts):
+    """Camera-only grafts for transparent VS outside the native twin matches.
+
+    factories: vertex factories per VS from all-cache-techniques.json, the vehicle
+    evidence's factory list (falls back to the families below for other VS).
+    """
     templates=camera_templates(results);frames=native_frames()
     matched={r['sha256'] for r in rows}
     families={g['sha256']:g['families'] for g in json.loads((p/'native-motion-gaps.json').read_text())['shaders']}
@@ -854,13 +889,16 @@ def generic_phase(rows,results,out,assemble):
         source=next((f for f in (p/'all-transparent-vs'/(sha+'.ll'),p/'extended-position-inputs'/(sha+'.ll')) if f.exists()),None)
         row=dict(sha256=sha,families=families[sha],source=str(source.relative_to(p)) if source else None)
         path=out/(sha+'.camera.ll')
+        text=source.read_text() if source else ''
         try:
             if not source:raise ValueError('disassembly absent from the transparent inventory')
-            text,info=generic_camera_graft(source.read_text(),templates)
-            assemble(path,text);row.update(camera_status='validated',**info)
+            graft_text,info=generic_camera_graft(text,templates)
+            assemble(path,graft_text);row.update(camera_status='validated',**info)
         except (ValueError,KeyError,StopIteration,AssertionError) as e:
             for stale in (path,path.with_suffix('.dxil')):stale.unlink(missing_ok=True)
             row.update(camera_status='unsupported',camera_errors=[str(e)[:400]])
+        vehicle=vehicle_evidence(text,sorted(factories.get(sha,())) or families[sha],contracts.get(sha))
+        if vehicle:row['vehicle']=vehicle
         return row
     with ThreadPoolExecutor(max_workers=4) as pool:generic=list(pool.map(process,sorted(set(families)-matched)))
     per_family=defaultdict(Counter)

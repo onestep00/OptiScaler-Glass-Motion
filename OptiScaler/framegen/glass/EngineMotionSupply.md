@@ -1,7 +1,7 @@
 # Native material motion supply and creation gates
 
 - Created: 2026-09-13
-- Updated: 2026-09-13
+- Updated: 2026-09-24
 - Status: 240 ordinary grafts and 10 separate preskinned-input candidates validate offline; selected startup/b7 supply verified; broader native inputs, all-route MV and FG incomplete
 - Applied: diagnostic only; installed OptiScaler correction unchanged
 - Deprecated: no
@@ -828,3 +828,73 @@ Remaining proof for this supply: a previous skinning supply for skinned
 transparent draws (class 2), a dedicated recheck of the 6 px glasses error, a
 preskinned (t9/b3) previous supply, the 54 unsupported VS, and opaque-probe
 equivalence (`research/native-supply-integration-plan.md:90`).
+
+## Vehicle object motion, 2026-09-24
+
+Observation. The City Center street session (DLL `3c33ec9f`, `GraftClassMask`
+3, skinned-current catalog; workspace
+`glass-live-tools/scene-20260924-skin-street/dumps`, log
+`artifacts/glass-log-pid79760.txt`) drew six vehicle VS through camera-only
+records: `296676c3`, `bb99bbe6` (`vehicle_destr_blendshape`), `7a31295c`,
+`9d76d15a` (`vehicle_glass*`), `f8fbc912` (`glass` on MeshStaticVehicle) and
+`c39622e9` (`vehicle_destr_blendshape` on MeshSkinned). Per object id of the
+packed record, the delivered motion was the camera's: frame-1 ids 11, 13, 16,
+17, 474 and 477 (`296676c3`) and 413, 651 (`bb99bbe6`) delivered 0.00 px where
+the engine had 21–23 px; frame-3 moving cars delivered 0.00 px where the engine
+had −17.9 to −22.2 px (e.g. ids 151, 199, 212, 25, 28, 30) or 2.2–3.0 px, and
+`7a31295c` id 624 delivered 0 px against −21.3 px. Parked cars agreed (≤0.13 px).
+
+Engine route for the same objects. `vehicle_destr_blendshape` has a
+`gbuffer_velbuff_regular` technique per vertex factory. Its MeshStaticVehicle
+velocity VS `c5783867…` reads the MotionMatrix at b7 rows 4..6
+(`opaque-velocity-audit/c5783867….ll:176` b7 handle, `:1018-1031` loads) and the
+previous camera b1 rows 16..19 (`:1057-1075`) into output 5 (`:1126-1129`). Its
+metadata (`shader-modifier-contracts.json`, key `0xdb997baec20a825d`) names
+`MatMod_MotionMatrix` at row 4 and requests bit 7 (mask `0xC2000084`). The
+MeshStatic velocity VS `001b21f0…` does the same (`.ll:172`, `:949-962`,
+`:988-1006`). Both previous graphs are class 1 (`native-instance-input-audit.json`:
+no skinning input, t10 or t9/b3). The MeshSkinnedVehicle VS `3bb98b10…` adds
+the skinning inputs (class 2). The vehicle's own transform history is the object
+motion; camera motion alone is not the engine's velocity for these objects.
+
+Supply at the transparent draw. The transparent and unlit vehicle VS request no
+motion: `296676c3` and `bb99bbe6` share key `0xcd4bded0362ae30a` (mask
+`0x90000004`, bit 7 clear; rows 1, 2, 4 MaterialParam, 3
+`MatMod_VehicleGridCorners`, 5 `MatMod_VehicleMeshPivotInGridSpace`), `7a31295c`
+and `d441e9d5` share `0x85d0bd41fedcea8d` (mask `0x10003004`). Only the
+declaration hook adds the MotionMatrix (row 24), and only for the VS/PS pairs of
+validated root grafts: `shader-pairs-2018-direct-span-clear.bin` has 12 pairs
+for `d441e9d5` and none for `296676c3`, `bb99bbe6` or `7a31295c`. Every
+transparency-route pair of the 45 vehicle root grafts is in that file.
+
+Why camera-only. `shared-native-motion-matches.json` lists `296676c3`,
+`bb99bbe6` and `7a31295c` as "no exact native current-position match": their
+position cones read terms the velocity VS lack (`native-motion-gaps.json`: b1
+row 37 and b4 rows 0..3 or 1..3 for the unlit variants; b4 rows 4, 5 and b7 rows
+1..3 for the glass). The generic phase then applied the canonical camera
+template `50ba90d4…` without regard to object motion.
+
+`d441e9d5` (`vehicle_glass_onesided`, MeshStatic) has a class 1 root graft from
+`50ba90d4` (MotionMatrix × POSITION, the computation of `001b21f0`) and its
+declaration pairs. Its street residual (mean 0.80 px, p95 5.5 px) splits in
+frame-1: pixels whose engine value is the car behind the glass, residual mean
+0.25 px (p95 0.75, 313 px); pixels whose engine value is the static background
+seen through the glass, 4.98 px (261 px), the glass's own motion and the
+intended correction; still objects 0.02–0.09 px.
+
+Rule (`tools/graft_native_motion.py`, `tools/export_native_grafts.py`). A
+vehicle target is a VS with the VEHICLE_DMG_POS input, a vehicle damage-grid
+modifier (`MatMod_VehicleGridCorners`, `MatMod_VehicleMeshPivotInGridSpace`) or
+vehicle vertex factories only: 96 transparent VS. Their root grafts stay (45: 21
+class 1, 24 class 2) and keep the MotionMatrix previous world in the
+skinned-current variant. Their camera-only candidates (45: 25 class 1, 20 class
+2) are not exported; `Glass/grafts/refused.bin` lists them, the module counts
+`GRAFT refused` and their draws keep the engine's motion. Vehicle root pipelines
+keep the camera variant for array draws; none was drawn as an array in the
+street session (`array=0` for every vehicle pipeline, pid 79760).
+
+Not covered by this rule: `glass` on MeshStatic car windows (e.g. `39f8b555`)
+carries no vehicle data in its VS and stays camera-only. In the street dumps its
+pixels on moving cars were delivered by the paired root VS `7448a1d2` (frame-3
+ids 638, 691: residual 0.09–0.10 px). A root supply for the refused VS would
+need a MotionMatrix graft without a native twin plus declaration pairs.

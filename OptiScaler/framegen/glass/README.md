@@ -1,7 +1,7 @@
 # Glass: engine-supplied motion for transparent surfaces in DLSS Frame Generation
 
 - Created: 2026-09-10
-- Updated: 2026-09-23
+- Updated: 2026-09-24
 - Status: product path. The previous-frame position of a transparent draw comes from the engine: its MotionMatrix supply through a root graft, or its previous camera through a camera-only graft. Module vertex history is an off-by-default diagnostic fallback. In-game results cover only the scenes in [Verification results](#verification-results). Full coverage (C12) and the 1 ms budget (C13) are not met.
 - Applied: `glass-motion` branch of this fork, deployed as `dxgi.dll` through MO2. Source defaults keep the correction off.
 - Deprecated: no
@@ -25,7 +25,7 @@ flowchart LR
   A[Engine transparent draw<br/>CyberpunkDraws + PSO creation hook] --> B{Graft catalog<br/>SHA-256 of the original VS}
   B -->|root record, single draw| C[Root graft VS<br/>previous clip from MotionMatrix]
   B -->|array or multi-instance draw,<br/>or camera-only record| D[Camera-only graft VS<br/>previous VP x current world]
-  B -->|no record or class disabled| E[Draw unchanged<br/>engine MV and depth kept]
+  B -->|no record, refused vehicle VS<br/>or class disabled| E[Draw unchanged<br/>engine MV and depth kept]
   C --> F[Original material PS<br/>+ 64-bit UMax packed record]
   D --> F
   F --> G[GlassObjectMotion.hlsl<br/>boundary, threshold, occlusion]
@@ -41,13 +41,14 @@ At D3D12 device creation (`D3D12_Hooks.cpp:2245`), `GeometryHost.cpp` checks the
 
 ### 2. Capture: the graft catalog
 
-`GeometryPipelineCache.cpp` compiles a packed variant for every transparent PSO the game creates. It runs on the pipeline-cache worker, never in a draw callback. The worker hashes the original VS container once (SHA-256) and looks it up in `Glass/grafts/index.bin` (`GGRAFT02`, 52-byte records, `NativeGraftCatalog.cpp:18-27`). The outcome of a pipeline job is final; a miss is not retried per frame (`GeometryPipelineCache.cpp:281-362`).
+`GeometryPipelineCache.cpp` compiles a packed variant for every transparent PSO the game creates. It runs on the pipeline-cache worker, never in a draw callback. The worker hashes the original VS container once (SHA-256) and looks it up in `Glass/grafts/index.bin` (`GGRAFT02`, 52-byte records, `NativeGraftCatalog.cpp:18-27`). A VS the export refused is listed in `Glass/grafts/refused.bin` (`GGREFS01`, 36-byte records, `NativeGraftCatalog.h` `NativeGraftRefusal`). The outcome of a pipeline job is final; a miss is not retried per frame (`GeometryPipelineCache.cpp:281-362`).
 
 | Record kind | VS used for the packed variant | Previous clip | Used for |
 | --- | --- | --- | --- |
 | Root graft (`<sha>.dxil`) | original transparent VS plus the previous-position arithmetic copied from its native velocity-VS twin | engine MotionMatrix, material constant buffer b7 rows 24..26 | single-instance draws |
 | Camera variant of a root graft (`<sha>.camera.dxil`) | same original VS | native previous view-projection (b1 rows 16..19 or 12..15) applied to the VS's own current world position | array, grouped and multi-instance draws of the same PSO |
 | Camera-only record (no `<sha>.dxil`) | original VS without a native twin, or whose twin was refused by the factory rule or has no validated root graft | same camera-only form: the twin's camera multiply, or for a VS without a twin one of two canonical templates (`50ba90d4…` for b1 28..31 → 16..19, `79f7efb4…` for 0..3 → 12..15) | every draw of that VS |
+| Refused vehicle VS (`refused.bin`, no record) | none | none | no packed variant: every draw keeps the engine MV and depth (`GRAFT refused`) |
 
 Both graft kinds keep every original output. They add two float4 outputs: the engine's de-jittered current clip (`XY − b1[51].xy·W`) and the previous clip (`NativeGraftCatalog.h:9-22`, `EngineMotionSupply.md` "Current clip convention"). The pixel stage computes `(previous UV − current UV)` with no jitter term and no capture delta (`DxilVertexHistory.h:218-222`). Graft draws read no module history. They take identity-only mappings (object ID and live generation, no history-arena block), so a full vertex-history arena cannot reject them (commit `a6712d09b`, `PackedMotionCapture.cpp:639-645`).
 
@@ -57,14 +58,17 @@ Selection rules:
 
 - Array, grouped and multi-instance draws of a root-graft pipeline use the camera variant. The engine keeps no per-element previous transform. Its own velocity for array elements is the previous view-projection applied to the element's current world position (`research/ACTIVE.md:77`, `EngineMotionSupply.md:547-554`). Applying the root transform to every element measured 81 px of error on a still camera (`research/ACTIVE.md:77`).
 - A skinned-factory target does not take a root graft from a twin of another vertex factory whose previous graph is root-only. Such targets become camera-only records (`factory_mismatch`; commits `680525741`, `2bef442ff`; `tools/AGENTS.md:26`).
+- A vehicle target moves with its vehicle's transform. It is a VS with the `VEHICLE_DMG_POS` input, a vehicle damage-grid modifier (`MatMod_VehicleGridCorners`, `MatMod_VehicleMeshPivotInGridSpace`) or vehicle vertex factories only (96 transparent VS). The engine's velocity route for vehicle meshes reads the MotionMatrix, and the transparent vehicle VS receive it only through a root graft's declaration pairs (`EngineMotionSupply.md` "Vehicle object motion"). A vehicle root graft keeps that supply (the skinned-current variant keeps the MotionMatrix for vehicles too). A vehicle VS without one gets no camera-only record: the export lists it in `refused.bin`, the pipeline counts `refused` and keeps the engine values. On 2026-09-24 the camera-only records of six vehicle VS delivered 0 px on cars moving 17–23 px (`scene-20260924-skin-street`).
 - `GraftClassMask` admits records by the supply class of their previous graph: bit 0 root-only, bit 1 skinned (t10), bit 2 preskinned (t9/b3). The default is 1, root only (`GlassControls.h:261-277`, `GlassSettings.cpp:80-81`). A default of 3 was tried on DLL `0c5bb34e` and withdrawn: in all six still frames the NPC head region (hair and glasses, skinned class 2) delivered about 77 px where the engine had about 3.5 px (`research/ACTIVE.md:128`). A disabled class counts `class_disabled` and keeps the engine values.
-- A VS without a record counts `missing` and keeps the engine values. `VertexHistoryFallback` (default off) re-enables the old module vertex-history variant for diagnostics only. That path does not satisfy C2.
+- A VS without a record counts `missing`, or `refused` when `refused.bin` lists it, and keeps the engine values. `VertexHistoryFallback` (default off) re-enables the old module vertex-history variant for diagnostics only. That path does not satisfy C2.
 
 Catalog regeneration is local only; the output contains extracted game shader code and stays in the ignored `artifacts/` tree. `tools/graft_native_motion.py --workspace <dir>` writes the grafts, `tools/verify_native_grafts.py --workspace <dir>` checks them, and the exporter accepts only records that pass every check (`tools/AGENTS.md:18`, `26-27`). Export from the workspace root (`research/ACTIVE.md:43`):
 
 ```powershell
 python glass-optiscaler-source\OptiScaler\framegen\glass\tools\export_native_grafts.py --workspace glass-native-material-v1 --out glass-optiscaler-source\artifacts\glass-grafts\Glass
 ```
+
+The skinned-current experiment (`research/ACTIVE.md:244`) runs the graft, verify and export tools with `--skinned-previous-world current` and exports to `glass-optiscaler-source\artifacts\glass-grafts-skinned-current\Glass`. Both exports write the same `index.bin` and `refused.bin`; they differ in the class 2 root graft bytes of non-vehicle targets.
 
 `motion-declarations.bin` is a copy of `glass-native-material-v1/pending-motion-declarations/declarations.bin`. `motion-shader-pairs.bin` is a copy of `pending-motion-declarations/shader-pairs-2018-direct-span-clear.bin` (SHA-256 `827bf29b…`): the 2,018 pairs whose direct writer spans are fully classified. The six pairs with an unresolved modifier 0 are not used (`EngineMotionSupply.md:588-593`, `research/ACTIVE.md:126`). Both files sit in `artifacts/glass-grafts/Glass/` (`GlassFg.props:102-108`). `GlassFg.props` copies the catalog and the declaration data into `Glass/` beside the built DLL when they exist. Without the catalog every pipeline counts as a graft miss. Without the declaration data the hook stays uninstalled with status `declaration_file_missing`. The build copy never deletes files: after a record loses its root graft, delete the stale `<sha>.dxil` from the build output. `glass-game.ps1 -Action deploy` replaces the deployed `grafts` directory as a whole (`glass-live-tools/glass-game.ps1:123-136`). The integration deploy moved the RED4ext `GlassMotion` plugin into `glass-deploy-backup-20260923-163549/red4ext-plugins-GlassMotion` (`research/ACTIVE.md:126`).
 
@@ -111,7 +115,7 @@ Status lines:
 
 | Line | Fields |
 | --- | --- |
-| `GRAFT` | `ready` root-graft pipelines, `missing` VS without a record, `rejected` graft rewrite or compile failures, `class_disabled`, `camera_only` camera-only-record pipelines, `array_ready`/`array_missing` camera variants of root-graft pipelines, `array_rejected` array draws without a usable variant, `array_draws`, `draws`, `fg_evals` (substituted FG evaluations whose capture frame drew at least one graft variant with the fallback off, `NativeHost.cpp:1983-1987`), `catalog` record count, `classmask`, `vhfallback` |
+| `GRAFT` | `ready` root-graft pipelines, `missing` VS without a record, `rejected` graft rewrite or compile failures, `class_disabled`, `refused` pipelines whose VS `refused.bin` lists (vehicle VS without the engine's object-motion supply), `camera_only` camera-only-record pipelines, `array_ready`/`array_missing` camera variants of root-graft pipelines, `array_rejected` array draws without a usable variant, `array_draws`, `draws`, `fg_evals` (substituted FG evaluations whose capture frame drew at least one graft variant with the fallback off, `NativeHost.cpp:1983-1987`), `catalog` record count, `catalog_refused` refusal count, `classmask`, `vhfallback` |
 | `DECL` | `hook` 1 when both detours are installed, `seen` provider results, `matched` augmented declarations returned, `rejected` declared keys whose native record differed from the plan, `stage_seen`, `stage_selected`, `status` (`installed`, `not_cyberpunk`, `native_layout_rejected`, `declaration_file_missing`, `declaration_profile_rejected`, `hook_attach_failed`) |
 | `packed` | admission and frame counters, `fg_frames`, `history_bypassed` (graft draws admitted without an arena block) |
 | `controls`, `identity` | control word and identity rejection split |
@@ -165,7 +169,7 @@ Launch only through the MO2 script path, on the last active monitor at 3840×216
 
 ## Verification results
 
-All results are from 2026-09-23 at a 2560×1440 render size (dump headers). "Residual" is `|delivered − engine|` on substituted pixels from `glass_graft_residual.py`. Paths are under the workspace `glass-live-tools/` unless noted. Directories marked † are not named in `research/ACTIVE.md`. They were matched to the run by time and dump headers; for example, `scene-20260923d/ceiling-fast360/frame-2/dump-1.txt` has `engine_covered_pixels=18856`, the `sub 18,856` of `research/ACTIVE.md:87`.
+Results are from 2026-09-23 and 2026-09-24 at a 2560×1440 render size (dump headers). "Residual" is `|delivered − engine|` on substituted pixels from `glass_graft_residual.py` or, per pipeline and object id, from `glass_pipeline_coverage.py`. Paths are under the workspace `glass-live-tools/` unless noted. Directories marked † are not named in `research/ACTIVE.md`. They were matched to the run by time and dump headers; for example, `scene-20260923d/ceiling-fast360/frame-2/dump-1.txt` has `engine_covered_pixels=18856`, the `sub 18,856` of `research/ACTIVE.md:87`.
 
 | Run (DLL, pid) | Scene | Result | Source | Raw data |
 | --- | --- | --- | --- | --- |
@@ -195,6 +199,7 @@ All results are from 2026-09-23 at a 2560×1440 render size (dump headers). "Res
 | `580b24ad`, `GraftClassMask=1` | same protocol rerun | 77 px region gone; `class_disabled=348~367` | ACTIVE.md:128 | `p6-20260923c-on/` |
 | same | remaining unsubstituted VS | 14: 13 outside the transparent inventory (blended decal 11, debugdraw 1, unclassified 1), 1 screen-space particle (`42531526`); no further graft candidates | ACTIVE.md:129 | — |
 | `0c5bb34e` / `580b24ad` | compose GPU time | `gpu_ms=0.176` (mask 3), `0.128` (mask 1) | ACTIVE.md:130 | — |
+| `3c33ec9f`, 79760, 2026-09-24; `GraftClassMask=3`, skinned-current catalog | City Center street, still camera, cars moving 17–23 px/frame | camera-only vehicle records: `296676c3` residual mean 8.85 px (p95 22.1), `bb99bbe6` 9.72 (p95 22.6), `7a31295c` 3.94 (p95 21.3); every moving-car object delivered 0 px, parked cars ≤0.13 px. Root `d441e9d5` (vehicle glass): mean 0.80 px; 0.25 px where the engine shows the car behind the glass, 4.98 px where it shows the static background through it (the glass's own motion). Led to the vehicle refusal | `EngineMotionSupply.md` "Vehicle object motion" | `scene-20260924-skin-street/` (`coverage.txt`), `artifacts/glass-log-pid79760.txt` (workspace) |
 
 The integration build ran the in-DLL declaration hook, the factory rule, the arena decoupling and the legacy removal together (`research/ACTIVE.md:124-130`). ACTIVE.md records no dedicated recheck of the 6 px NPC-glasses error from the factory rule, and no `history_bypassed` result for the arena decoupling. Rows before 16:36 predate `OpaqueProbe=false`; their `occluded` counts may include opaque-diagnostic pipelines [INFERENCE from `research/ACTIVE.md:127`].
 
@@ -205,7 +210,8 @@ The integration build ran the in-DLL declaration hook, the factory rule, the are
 - Record range: 11-bit motion at 1/8 px bounds a record to ±128 px. Faster motion keeps the engine value (`research/ACTIVE.md:87`); this bears on C11.
 - Coverage: 54 VS without a native twin have no camera-only graft (screen-space 11, two-stage projection 17, no `SV_Position` 6, multiple stores 7, other 13; `research/ACTIVE.md:107`). Preskinned twins (t9/b3) have no root graft. In the integration build, 14 VS stayed unsubstituted, 13 of them outside the transparent inventory (`research/ACTIVE.md:129`). See [SupportMatrix.md](SupportMatrix.md).
 - Camera-only records carry camera motion only: independently moving array elements, camera-facing rotation of billboards and particles, and icon anchor motion are not included. This matches the engine's own velocity for those draws (`research/ACTIVE.md:77`, `research/ACTIVE.md:108`).
-- Not yet run: the full user protocol (`research/ACTIVE.md:62`); the 2026-09-19 report of railings and panes rotating individually; the quest icon under rotation beyond the A-B-A-B pan; vehicle glass, particles, smoke, holograms, liquids, destruction and procedural deformation in game (`research/requirements-and-evidence-20260923.md` §5).
+- Vehicles: vehicle VS without a root graft (45 listed in `refused.bin`, 25 of them class 1) keep the engine values; on a moving car such glass shows the motion of what is behind it. A root supply for them would need a MotionMatrix graft without a native twin plus declaration pairs. `glass` on MeshStatic car windows (e.g. `39f8b555`) has no vehicle data in its VS and stays camera-only. The refusal build has no in-game result yet.
+- Not yet run: the full user protocol (`research/ACTIVE.md:62`); the 2026-09-19 report of railings and panes rotating individually; the quest icon under rotation beyond the A-B-A-B pan; particles, smoke, holograms, liquids, destruction and procedural deformation in game (`research/requirements-and-evidence-20260923.md` §5).
 - Opaque-probe equivalence (T3) has not been run (`research/native-supply-integration-plan.md:90`).
 - C13: the compose GPU time on the integration build is `gpu_ms=0.128` with mask 1 (`research/ACTIVE.md:130`). The CPU hook cost was last measured on 2026-09-19 at 3.62 ms/frame (`research/requirements-and-evidence-20260923.md` §3). CPU+GPU total with diagnostics off, the P6 pass criterion, has not been measured.
 - The port to official OptiScaler is the last stage (`research/objective.md:27`). It has started in the workspace tree `glass-port-source`; see [Port to official + wilsjo2 DLSSNR](#port-to-official--wilsjo2-dlssnr).
@@ -247,7 +253,7 @@ From an x64 Visual Studio Developer PowerShell in `glass-optiscaler-source`, wit
 .\OptiScaler\framegen\glass\tests\run-tests.ps1
 ```
 
-The runner builds and runs the contract executables under `artifacts/glass-tests`: packed frame selection, material blend classification, compute recording, command lifetime, tag metadata, array mapping, hook gate, motion dump format, Streamline tag bridge, GPU timer, native session queue type and release, pipeline-cache memo, the native graft packed rewrite and settings. The pipeline-cache memo needs `artifacts/glass-geometry-shader` from `tests/build_geometry_shader.ps1`. The graft rewrite needs the local catalog from `tools/export_native_grafts.py`. It runs a root graft (`4140f6d4…`, rows `7 8 7 8`) and a camera-only record (`39f8b555…`, `none none 10 11`) with their paired original PS (`tests/run-tests.ps1:91-113`). These tests check shader and host contracts on an independent device; they are not game-quality evidence.
+The runner builds and runs the contract executables under `artifacts/glass-tests`: packed frame selection, material blend classification, compute recording, command lifetime, tag metadata, array mapping, hook gate, motion dump format, Streamline tag bridge, GPU timer, native session queue type and release, pipeline-cache memo, the native graft packed rewrite and settings. The pipeline-cache memo needs `artifacts/glass-geometry-shader` from `tests/build_geometry_shader.ps1`. The graft rewrite needs the local catalog from `tools/export_native_grafts.py`. It runs a root graft (`4140f6d4…`, rows `7 8 7 8`) and a camera-only record (`39f8b555…`, `none none 10 11`) with their paired original PS, and checks that a refused vehicle VS (`296676c3…`) has no record and is listed in `refused.bin` (`tests/run-tests.ps1:91-119`). These tests check shader and host contracts on an independent device; they are not game-quality evidence.
 
 ## Build and fork updates
 
