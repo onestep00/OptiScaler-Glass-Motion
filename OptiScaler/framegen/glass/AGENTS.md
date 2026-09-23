@@ -14,13 +14,13 @@
 
 - [tests/ArraySourceDomains.md](tests/ArraySourceDomains.md): Latest split population header decoding and caller-context checks; diagnostic-only current ordinals, not previous motion or deployment.
 
-- [CompletionPlan.md](CompletionPlan.md): Active opaque-MV-first plan. Modifier construction/publication/packet ordering checkpoint added; 20 VS request gaps remain across 88 exact cache combinations and are absent from limited historical captures. Array identity, render N-1 and other native routes remain incomplete; no new game MV.
+- [CompletionPlan.md](CompletionPlan.md): Opaque-MV-first plan with its 2026-09-13 investigation record. The 2026-09-23 closing note lists what is integrated (engine-supplied previous positions, camera-only arrays, occlusion, factory rule, FG-off check) and what remains (glasses recheck, full user protocol, C12 coverage, C13, official OptiScaler port).
 
 - [NativeOpaqueMvRoutes.md](NativeOpaqueMvRoutes.md): Original supply matrix. Common modifier upload/binding and weight initialization linked (16 functions/62 sites). Historical 152 root records/23 native VS map vertex b7 to slot 3; 4,745 handle records agree, GPU contents/N-1 not verified. Instance audit covers 899 VS. Group selection and MV-FG remain incomplete. Old graft labels need revalidation.
 
 - [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): 240 grafts plus 10 separate preskinned t9/b3 candidates pass offline checks. Native prior-buffer binder found; actual inputs/frame ownership unverified. Other 425 shader paths, grouped history, full-screen MV and FG remain incomplete; broad adapter not deployed.
+- [EngineMotionSupply.md](EngineMotionSupply.md): Engine MotionMatrix supply, declaration hook and graft evidence. The 2026-09-23 section records the in-DLL declaration hook, the exported graft catalog, the live array convention (camera-only; the root graft fails on arrays) and the factory rule. The in-DLL hook and the glasses recheck have not run in game.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 
@@ -34,7 +34,7 @@
 
 - [tests/PackedUav.md](tests/PackedUav.md): Original UAV/color preservation, signed MV/range and generation rejection pass 22,528 GPU samples; 3,530 local shader pairs validate. Production activation, pixel-depth coverage and game FG remain incomplete.
 
-- [NativeMaterialMotion.md](NativeMaterialMotion.md): Explicit clip inputs now support validated transparent blending/discard with read-only depth; independent GPU checks pass. Selected live pixel MV evidence remains diagnostic, not full-object/FG integration.
+- [NativeMaterialMotion.md](NativeMaterialMotion.md): `NativeClipInputs` material capture; the packed graft path uses it since 2026-09-23. Standalone `build_native_material.ps1` contract and 2026-09-12 live evidence.
 
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Live original skinned input Z matches preceding X in three consecutive pairs; raw-word recorder is tested. Previous-position evaluation and dense MV/FG still absent.
 
@@ -114,7 +114,8 @@
 - [Compatibility.md](Compatibility.md): Relocatable engine discovery, indirect signatures, MRT admission and UI/log evidence pass independent checks. Fresh-process validation pending; production object capture/FG substitution remain absent.
 
 - [tests/GeometryDraws.md](tests/GeometryDraws.md): 32054cc live packet/public draw observation verified; active MRT/root joins failed and new FG input remains absent. Source fixes and relocatable discovery pass independent checks; fresh-process validation pending.
-- [README.md](README.md): Active experimental module. MO2 deployment, controls and timer verified; cup ghosts remain. Name-independent PSO census identified missing variants. Complete 143-draw material-span F/T/U reconstructs actual early HDR color within 0.219% relative error, with exact outside coverage. B retains refraction. Later color/temporal transport, runtime integration and visual acceptance remain incomplete.
+- [README.md](README.md): Product architecture (engine draws → graft catalog → packed records → compose → `ScopedInputs`), live channel, settings, build/deploy/verify commands and the 2026-09-23 in-game verification table.
+- [SupportMatrix.md](SupportMatrix.md): Graft-catalog coverage by vertex factory and material family, in-game observations and uncovered paths.
 - [EngineGeometry.md](EngineGeometry.md): All-world 32-route inventory and engine evidence. CPU lifetime/index and startup observer now implemented, but unique pose candidates do not prove draw ownership. Live frame/instance linkage, missing mutation routes and procedural/particle coverage remain incomplete.
 - [tests/GeometryObjects.md](tests/GeometryObjects.md): Actual array setter invalidates lifetime during mutation; native non-grouped source indices, nested/reused scopes and ten-function relocation pass owned checks. GPU publication and game MV remain incomplete; source only.
 - [tests/GeometryShaders.md](tests/GeometryShaders.md): Original shader history, separate masks, inactive-instance isolation/recovery and public PSO/root acquisition verified on an independent GPU. Worker/cache leases and mapped 54-DWORD linkage pass. Startup adapter added; draw replacement, deployment and FG application remain incomplete.
