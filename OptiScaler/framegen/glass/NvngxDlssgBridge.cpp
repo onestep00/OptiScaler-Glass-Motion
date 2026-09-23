@@ -262,6 +262,16 @@ constexpr ReleaseFeatureFn kReleaseHookEntries[kMaxHookSlots] {
 };
 } // namespace
 
+void RememberFrameGenerationHandle(const void* handle, unsigned id) noexcept
+{
+    RegisterFrameGenerationHandle(handle, id);
+}
+
+void ForgetRememberedFrameGenerationHandle(const void* handle, unsigned id) noexcept
+{
+    ForgetFrameGenerationHandle(handle, id);
+}
+
 bool ProviderConfirmsFrameGeneration(const void* handle, bool dedicatedProvider) noexcept
 {
     if (handle == nullptr)

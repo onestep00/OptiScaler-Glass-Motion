@@ -25,6 +25,14 @@ void InstallLoadedNgxHooks() noexcept;
 // MotionVectors/Depth, which the upscaler and Ray Reconstruction share, so the
 // parameter table cannot prove the identity; the provider hook can.
 bool ProviderConfirmsFrameGeneration(const void* handle, bool dedicatedProvider) noexcept;
+// Pointer registry of proven frame generation handles, shared with the
+// provider create hook. The gate remembers a handle it admitted on a proof
+// (OptiScaler's feature-checked seam, or the frame generation caller), and
+// the release paths forget it; a pointer is never learned from the
+// parameter table or the handle id, which the upscaler and Ray
+// Reconstruction share with frame generation.
+void RememberFrameGenerationHandle(const void* handle, unsigned id) noexcept;
+void ForgetRememberedFrameGenerationHandle(const void* handle, unsigned id) noexcept;
 
 // Identity fallback for the driver-level DLSS-G evaluation, which names only
 // MotionVectors/Depth and can carry a handle that was created before this hook
