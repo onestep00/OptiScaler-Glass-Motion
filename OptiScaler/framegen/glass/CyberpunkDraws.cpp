@@ -721,30 +721,44 @@ std::uint64_t modifierBlock(const void* returnSlot, std::uint64_t expectedReturn
 // run's rbp at entry+0x10 and reserves 0x48 bytes, the block test at +0x3d, and
 // the Rigid call at +0xb9 and Skinned call at +0x135. Anything else leaves both
 // return addresses 0, and the probe then reports its rows as unavailable. The
-// run body itself is fixed by its layout profile. Reads mapped code only.
-void resolveProbeFrames(EngineDrawState& state, const unsigned char* base, const CyberpunkLayout& layout) noexcept
+// run body itself is fixed by its layout profile. Every inspected byte is first
+// checked to lie inside an executable section of the image, so a call that
+// leads elsewhere in another build leaves the probe off instead of reading
+// outside mapped code.
+void resolveProbeFrames(EngineDrawState& state, const RelocatableCode& image, const unsigned char* base,
+                        const CyberpunkLayout& layout) noexcept
 {
-    const auto callTarget = [](const unsigned char* call) noexcept -> const unsigned char*
+    using Target = RelocatableCode::Target;
+    // RVA of a rel32 call's destination; 0 when the five call bytes or the
+    // destination are not executable code of the image.
+    const auto callTarget = [&](std::uint32_t call) noexcept -> std::uint32_t
     {
-        if (call[0] != 0xe8)
-            return nullptr;
+        if (!image.contains(call, 5, Target::Code) || base[call] != 0xe8)
+            return 0;
         std::int32_t displacement = 0;
-        std::memcpy(&displacement, call + 1, sizeof(displacement));
-        return call + 5 + displacement;
+        std::memcpy(&displacement, base + call + 1, sizeof(displacement));
+        const auto target = std::int64_t(call) + 5 + displacement;
+        return target > 0 && target <= std::int64_t(UINT32_MAX) &&
+                       image.contains(static_cast<std::uint32_t>(target), 1, Target::Code)
+                   ? static_cast<std::uint32_t>(target)
+                   : 0;
     };
     static constexpr unsigned char prologue[] { 0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x68,
                                                 0x10, 0x48, 0x89, 0x70, 0x18, 0x48, 0x89, 0x78, 0x20, 0x41,
                                                 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x30 };
     static constexpr unsigned char blockTest[] { 0x48, 0x8b, 0x5f, 0x10, 0x80, 0xbb, 0xc4, 0x01, 0x00, 0x00, 0x00 };
-    const auto* run = base + layout.functions[CyberpunkLayout::Run];
-    const auto* flush = callTarget(run + 0x290);
+    // The flush bytes this check reads: entry through the end of the Skinned call.
+    constexpr std::uint32_t inspected = 0x13a;
+    const auto run = layout.functions[CyberpunkLayout::Run];
+    const auto flush = callTarget(run + 0x290);
     if (!flush || callTarget(run + 0x613) != flush || callTarget(run + 0x6e6) != flush ||
-        std::memcmp(flush, prologue, sizeof(prologue)) || std::memcmp(flush + 0x3d, blockTest, sizeof(blockTest)) ||
-        callTarget(flush + 0xb9) != base + layout.functions[CyberpunkLayout::Rigid] ||
-        callTarget(flush + 0x135) != base + layout.functions[CyberpunkLayout::Skinned])
+        !image.contains(flush, inspected, Target::Code) || std::memcmp(base + flush, prologue, sizeof(prologue)) ||
+        std::memcmp(base + flush + 0x3d, blockTest, sizeof(blockTest)) ||
+        callTarget(flush + 0xb9) != layout.functions[CyberpunkLayout::Rigid] ||
+        callTarget(flush + 0x135) != layout.functions[CyberpunkLayout::Skinned])
         return;
-    state.rigidReturn = reinterpret_cast<std::uint64_t>(flush + 0xbe);
-    state.skinnedReturn = reinterpret_cast<std::uint64_t>(flush + 0x13a);
+    state.rigidReturn = reinterpret_cast<std::uint64_t>(base + flush + 0xbe);
+    state.skinnedReturn = reinterpret_cast<std::uint64_t>(base + flush + inspected);
 }
 
 void run(void* a, void* b, void* c)
@@ -1293,7 +1307,13 @@ bool InitializeCyberpunkDraws(HMODULE executable) noexcept
         state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + layout->tick);
         state->rendererGlobal = base + layout->rendererGlobal;
         state->drawReturn = base + layout->drawReturn;
-        resolveProbeFrames(*state, base, *layout);
+        // Code inspection bounds for the probe frames: the mapped image of the
+        // executable, as the layout resolution reads it.
+        MODULEINFO info {};
+        RelocatableCode image;
+        if (K32GetModuleInformation(GetCurrentProcess(), executable, &info, sizeof(info)) &&
+            info.lpBaseOfDll == executable && image.initialize({ base, info.SizeOfImage }))
+            resolveProbeFrames(*state, image, base, *layout);
         HMODULE resident = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                                 reinterpret_cast<LPCWSTR>(&InitializeCyberpunkDraws), &resident))
