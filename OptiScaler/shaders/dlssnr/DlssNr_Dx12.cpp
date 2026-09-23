@@ -18,7 +18,7 @@
 
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
-#include <gpu_time/GpuTime_Dx12.h>
+#include <resource_tracking/ResTrack_dx12.h>
 #include <framegen/glass/GlassSecondConsumer.h>
 
 #include <mutex>
@@ -27,6 +27,8 @@
 #include <optional>
 #include <sstream>
 #include <cstring>
+#include <wrl/client.h>
+#include "DlssNr_GpuTime.h"
 #include "precompile/DlssNr_Shader.h"
 
 namespace
@@ -385,7 +387,12 @@ NrState g_nr;
 std::unique_ptr<DlssNr_Dx12> g_compose;
 
 // What the pass costs on the GPU, for the breakdown in the overlay.
-std::unique_ptr<GpuTime_Dx12> g_gpuTime;
+//
+// Each sample belongs to the command list it was recorded on and is read only once that list's own
+// submission has signalled a fence, so a reading is never of a query the GPU has not reached, nor of a
+// slot a later frame has already reused. The queue and command-list hooks that say when a list is
+// submitted or thrown away are ResTrack_Dx12::HookNrQueue's.
+std::unique_ptr<DlssNrGpuTime> g_gpuTime;
 
 // A second timer, around the model's evaluate and nothing else.
 //
@@ -398,9 +405,16 @@ std::unique_ptr<GpuTime_Dx12> g_gpuTime;
 //
 // Splitting them says how much of the pass is the model and how much is ours -- and ours is the half
 // we can actually do something about.
-std::unique_ptr<GpuTime_Dx12> g_ngxTime;
+std::unique_ptr<DlssNrGpuTime> g_ngxTime;
 std::optional<double> g_lastNgxTime;
 std::optional<double> g_lastGpuTime;
+
+// Guards the two timers. Not g_nrMutex: the hooks report every submit and every command-list reset in
+// the game, on whichever thread makes it, and must neither wait out a whole pass nor re-enter that
+// lock when NGX submits or resets a list of its own inside one. Recursive because a submission is
+// answered with a Signal on the game's queue, and anything else hooked on that queue may submit again
+// from inside it, on this thread.
+std::recursive_mutex g_nrTimeMutex;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
@@ -2545,14 +2559,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // inside the envelope so the game's compute state is restored no matter which way this returns.
     ScopedNrStateEnvelope stateEnvelope(cmdList);
 
-    if (g_gpuTime == nullptr)
-        g_gpuTime = std::make_unique<GpuTime_Dx12>(device);
+    // A sample is read only once its own list has been submitted, so the hooks that report submissions
+    // and resets go in before the first one is recorded. Nothing happens here once they are in.
+    ResTrack_Dx12::HookNrQueue(device);
 
-    if (g_ngxTime == nullptr)
-        g_ngxTime = std::make_unique<GpuTime_Dx12>(device);
+    {
+        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
 
-    if (g_gpuTime != nullptr)
+        if (g_gpuTime == nullptr)
+            g_gpuTime = std::make_unique<DlssNrGpuTime>(device, "total");
+
+        if (g_ngxTime == nullptr)
+            g_ngxTime = std::make_unique<DlssNrGpuTime>(device, "model");
+
         g_gpuTime->Start(cmdList);
+    }
 
     // Fetch the game's exposure, where the game supplies one and the user asked for it.
     //
@@ -2785,7 +2806,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     if (g_ngxTime != nullptr)
+    {
+        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
         g_ngxTime->Start(cmdList);
+    }
 
     int result = NVSDK_NGX_Result_Success;
     unsigned int answer = 0;
@@ -2837,7 +2861,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     if (g_ngxTime != nullptr)
+    {
+        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
         g_ngxTime->End(cmdList);
+    }
 
     g_nr.reset = false;
 
@@ -3019,6 +3046,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_gpuTime != nullptr)
     {
+        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
         g_gpuTime->End(cmdList);
 
         // This path records into the game's own list, so there is no queue of ours to read from.
@@ -3049,7 +3077,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 lastSplitLog = g_frames;
                 const double total = g_lastGpuTime.value();
                 const double ngx = g_lastNgxTime.value();
-                LOG_INFO("DLSS-NR cost: {:.2f} ms total = {:.2f} ms model + {:.2f} ms ours ({:.0f}% ours)",
+                LOG_INFO("DLSS-NR elapsed: {:.2f} ms total, {:.2f} ms model, {:.2f} ms surrounding work ({:.0f}%; "
+                         "intervals may include other GPU work)",
                          total, ngx, total - ngx, total > 0.0 ? 100.0 * (total - ngx) / total : 0.0);
             }
         }
@@ -3852,11 +3881,38 @@ void Shutdown()
     }
 
     g_capture.release();
-    g_gpuTime.reset();
-    g_ngxTime.reset();
+
+    {
+        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+        g_gpuTime.reset();
+        g_ngxTime.reset();
+    }
+
     g_lastNgxTime.reset();
     g_lastGpuTime.reset();
 
     g_compose.reset();
+}
+
+void CommandListsSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+{
+    std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+
+    if (g_gpuTime != nullptr)
+        g_gpuTime->Submitted(queue, count, lists);
+
+    if (g_ngxTime != nullptr)
+        g_ngxTime->Submitted(queue, count, lists);
+}
+
+void CommandListReset(ID3D12CommandList* cmd)
+{
+    std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+
+    if (g_gpuTime != nullptr)
+        g_gpuTime->ResetRecording(cmd);
+
+    if (g_ngxTime != nullptr)
+        g_ngxTime->ResetRecording(cmd);
 }
 } // namespace DlssNr

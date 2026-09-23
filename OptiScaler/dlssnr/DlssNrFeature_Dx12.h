@@ -178,6 +178,13 @@ ExposureStatus GameExposureStatus();
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();
 
+// What the GPU timer behind LastGpuTime learns from the game's queue. A sample is read only after the
+// list it was recorded on has been submitted, and dropped if that list is reset without being
+// submitted. Called from the queue and command-list hooks (ResTrack_Dx12::HookNrQueue), on whichever
+// thread submits or resets, for every list in the game.
+void CommandListsSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
+void CommandListReset(ID3D12CommandList* cmd);
+
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
 
