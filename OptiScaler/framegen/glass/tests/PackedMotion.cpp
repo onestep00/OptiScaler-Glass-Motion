@@ -7,9 +7,14 @@ namespace
 constexpr uint32_t CandidateCount = 7;
 constexpr uint32_t PixelCount = 5;
 
+// Matches the capture's key layout: 17 bits of depth plus a covered/uncovered
+// class bit at the top of the 18-bit high key. A record is covered when its
+// stored material opacity reaches the configured threshold; the fixtures below
+// use 128/255, the same boundary the live default uses.
 uint64_t pack(uint32_t depth, int32_t motionX, int32_t motionY, uint32_t weight, uint32_t objectId)
 {
-    return (uint64_t(depth & 0x3ffff) << 46) | (uint64_t(uint32_t(motionX) & 0x7ff) << 35) |
+    const uint64_t key = uint64_t(depth & 0x1ffff) | (weight >= 128u ? 0x20000ull : 0ull);
+    return (key << 46) | (uint64_t(uint32_t(motionX) & 0x7ff) << 35) |
            (uint64_t(uint32_t(motionY) & 0x7ff) << 24) | (uint64_t(weight & 0xff) << 16) |
            uint64_t(objectId & 0xffff);
 }

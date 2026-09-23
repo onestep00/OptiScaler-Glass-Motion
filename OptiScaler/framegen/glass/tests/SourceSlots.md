@@ -69,7 +69,7 @@ destructor body 0x296688 before optional deallocation. That body removes associa
 state and releases handle+0x10. This supplies a concrete candidate cancellation
 seam for pending-source metadata, subject to live hook and call-contract checks.
 No new destructor hook has been installed. Local function disassemblies are under
-`work/glass-engine-identity-probe-v2/`.
+`glass-engine-identity-probe-v2/`.
 
 ## Producer/consumer investigation
 
@@ -85,8 +85,8 @@ proxy, registry slot and current array count. This used 45,093 metadata reads /
 bound the search; they do not prove temporal identity or safely bootstrap a cache
 without concurrent lifecycle observation. No shader input changed.
 
-Local reproducible checker: `work/check-glass-source-chain.py`. Result:
-`work/glass-instance-producer-live-v3/capture-2/current-source-chains.json`.
+Local reproducible checker: `check-glass-source-chain.py`. Result:
+`glass-instance-producer-live-v3/capture-2/current-source-chains.json`.
 
 The whole-array-only profile 0x49535033 was subsequently built and tested in
 PID 70152 without restarting. It uses the extended header but installs only the
@@ -107,9 +107,9 @@ coverage. The source observer stopped recording and stays pinned forwarding;
 the census module unloaded with no pending GPU captures. The game remained
 responding. No object MV or new FG input was produced.
 
-Local evidence: `work/glass-instance-producer-live-v3/preflight.json`,
+Local evidence: `glass-instance-producer-live-v3/preflight.json`,
 `capture/analysis.json`, `capture-2/source-indices.csv`, and
-`work/glass-node-draw-census-v4/capture/linear-source-join.json`.
+`glass-node-draw-census-v4/capture/linear-source-join.json`.
 
 PID 70152 remained responding during a new census-only generation-2 load and
 unload, with zero GPU captures pending or recorded. The new census has 32,768
@@ -120,8 +120,8 @@ object counts or complete-frame coverage; contention/overflow still truncate the
 sample. The concurrent node-creation recording captured zero calls. Existing
 objects therefore need an explicit live acquisition route as well as future
 creation observation. No new MV or FG input was produced. Local evidence:
-`work/glass-node-draw-census-v2/capture/analysis.json` and
-`work/glass-node-groups-live-v1/capture-3/status.txt`.
+`glass-node-draw-census-v2/capture/analysis.json` and
+`glass-node-groups-live-v1/capture-3/status.txt`.
 
 Further inspection of the original producer 0x1E9B88 found a distinct call at
 0x1EA1C9 (return 0x1EA1CE): its descriptor copies global start/count from
@@ -168,7 +168,7 @@ tracking continues and all forwarding modules remain pinned. The game remained
 responding. No source-generation-populated draw, new MV, FG substitution or
 ghosting improvement was demonstrated. Existing-object bootstrap is the immediate
 missing path; creation-only observation does not populate the already-loaded scene.
-Local evidence: `work/glass-linked-sources-live-v1/preflight.json`,
+Local evidence: `glass-linked-sources-live-v1/preflight.json`,
 `owners-capture/{owners,source-query}.txt`, and `producer-capture/status.txt`.
 
 `SourceQueryConnection.cpp` subsequently loaded the independent fixture DLL
@@ -179,7 +179,7 @@ producer, destruction removed it, and recreation returned a newer generation.
 After releasing the test's original LoadLibrary reference, the pinned callback
 remained callable. Both files compile with `/O2 /W4 /WX`, and the executable
 passed. Fixtures never install engine hooks and must never be injected into a
-game. Local executable/provider artifacts are in `work/glass-source-query-test-v1/`.
+game. Local executable/provider artifacts are in `glass-source-query-test-v1/`.
 This closes independent module discovery/pinning coverage, not live engine
 lifetime coverage, bootstrap or FG admission.
 
@@ -243,7 +243,7 @@ Static direct-call analysis found one instruction-validated call to destructor
 body 0x296688, in deleting destructor 0x29665C. That caller retains the handle and
 delete flag in nonvolatile RDI/RBX and returns the handle; the shown normal return
 does not use the quarantined leaf's R10 convention. This does not prove all
-indirect callers. Local evidence is `work/glass-node-lifetime-audit-v1/`.
+indirect callers. Local evidence is `glass-node-lifetime-audit-v1/`.
 Source-array replacement, actual draw-source publication and N-1 GPU positions
 remain unconnected. The diagnostic serial is not permission to reuse old motion.
 
@@ -298,8 +298,8 @@ establish a production view/submission domain. Initial apparent slot conflicts
 came from erroneously including the non-global sentinel and were removed by
 correcting the analysis, not by selecting one of the conflicting owners.
 
-Evidence: workspace `work/glass-producer-join-live-v1/all-source-joins.json`,
-`join.json`, and `work/glass-instance-producer-live-v2/capture/`. The engine binary
+Evidence: workspace `glass-producer-join-live-v1/all-source-joins.json`,
+`join.json`, and `glass-instance-producer-live-v2/capture/`. The engine binary
 hash matches the previously audited hash below. Local addresses are diagnostic
 observations and must not become production constants.
 
@@ -320,7 +320,7 @@ Only two snapshots overlapped the bounded census sufficiently for that exact
 recording join. Vertex sidecars now also retain original pipeline/draw arguments,
 including start-instance, so later joins do not depend on an earlier census row
 remaining within its recording capacity. No resource data is added to the sidecar.
-Evidence: `work/glass-array-vertices-live-v1/vertex-analysis.json` and
+Evidence: `glass-array-vertices-live-v1/vertex-analysis.json` and
 `consecutive-pair.json`. Generation 12 retired/unloaded all 64 jobs; the producer
 observer is stopped. The new sidecar fields require rebuilding the diagnostic.
 
@@ -380,7 +380,7 @@ The captured cup VS uses per-instance current transforms and b1 rows 28--31.
 Both descriptors expose a single b7 CBV at root table slot 3, but this establishes
 neither equal buffer contents nor valid previous data at the transparent draw.
 These static data dependencies exclude control-flow/runtime validity claims.
-Local evidence: `work/glass-native-input-dependencies-v1/{native,cups}.json`,
+Local evidence: `glass-native-input-dependencies-v1/{native,cups}.json`,
 original shader disassembly and the prior `glass-bindings-live-v12` layouts.
 Keep grouped source identity/history work active; a matching root layout alone
 does not remove that requirement. No shader swap or game input change was made.
@@ -393,8 +393,8 @@ Those seven belong to skin-family and spline variants. Other resource reads stil
 require dataflow analysis; this inventory does not prove absence of a separate
 previous-instance path. Non-MeshStatic factories are outside this audit. Cache
 SHA-256 was rechecked before extraction. Local scripts and results are
-`work/audit-static-velocity-variants.py` and
-`work/glass-static-velocity-variants-v1/{audit,dynamic-reads}.json`.
+`audit-static-velocity-variants.py` and
+`glass-static-velocity-variants-v1/{audit,dynamic-reads}.json`.
 
 Static direct-call tracing located the array setter's caller in an engine update
 worker. The worker passes an owner, bounds and a span of 48-byte transforms from
@@ -480,8 +480,8 @@ common wrapper's packed ordinal nor unchanged count is a general object ID.
 The next diagnostic must distinguish the wrapper's upstream caller and its
 source-index domain, then connect that to the later render grouping. Do not add
 CPU vertex copies or a full-screen mask per instance to solve this identity gap.
-Local evidence: `work/glass-instance-updates-live-v2/capture-{2,3}/analysis.json`
-and `work/glass-engine-identity-probe-v2/function-{3cbca8,579ab8,57b114,3a2038,a040c0,3c8508,2276c30}.txt`.
+Local evidence: `glass-instance-updates-live-v2/capture-{2,3}/analysis.json`
+and `glass-engine-identity-probe-v2/function-{3cbca8,579ab8,57b114,3a2038,a040c0,3c8508,2276c30}.txt`.
 All RVAs describe the audited binary only; no production hook or signature was added.
 
 ### Upstream wrapper diagnostic
@@ -511,7 +511,7 @@ The 401-byte creation profile installed, and Start/Save returned zero. The first
 saved interval contained zero calls (zero rows and zero rejected observations).
 Recording is stopped; the process remained responding. This is installation
 evidence only, not live source/proxy data or broad stability proof. Local output:
-`work/glass-node-groups-live-v1/capture/`. The quarantined leaf was not installed.
+`glass-node-groups-live-v1/capture/`. The quarantined leaf was not installed.
 
 After the user reloaded the same save in PID 70152, capture-2 reached its 4,096-row
 bound with zero rejected observations. All calls returned to 0x2542cf. Every
@@ -550,7 +550,7 @@ with several draw counts/chunks and unclassified pipeline IDs. It must not be
 identified as a cup from the instance count. The census contains frame-zero
 observations, 51,610 contended attempts and 1,296,834 overflow attempts, so it is
 not a complete frame census. Local evidence:
-`work/glass-node-draw-census-v1/capture/{draw-census.done,node-mesh-join.json}`.
+`glass-node-draw-census-v1/capture/{draw-census.done,node-mesh-join.json}`.
 
 Control requests in this run had to use MO2 overwrite/bin/x64/Glass for both
 request and response. An older overwrite request shadowed a request written to
@@ -591,7 +591,7 @@ Its full 149-byte wrapper profile passed installation; StartArrays48 and Save
 returned zero. The saved observation interval contained no wrapper calls, empty
 or nonempty. Recording is disabled and the process remained responding. This
 proves installation/control only, not live argument capture; a later array supply
-event is still required. Local output: `work/glass-array-wrapper-live-v1/capture/`.
+event is still required. Local output: `glass-array-wrapper-live-v1/capture/`.
 The older enqueue observer remains separately pinned with recording disabled.
 Neither diagnostic changes geometry, render commands or FG input resources.
 
@@ -607,7 +607,7 @@ owner addresses, 183 appeared with different counts, 93 with different upstream
 callers, and all with different handle addresses. These are address repetitions,
 not proven same-object updates: registration generations were not captured.
 Do not infer persistent identity from these repetitions or from handle addresses.
-Evidence: `work/glass-array-wrapper-live-v1/capture-2/{analysis,repeat-analysis}.json`.
+Evidence: `glass-array-wrapper-live-v1/capture-2/{analysis,repeat-analysis}.json`.
 
 Further static tracing of the dominant 0x3c8508 path found direct callers
 0x25422c and 0x2277018. Both partition a source array into contiguous 48-byte
@@ -616,7 +616,7 @@ locates the source group/range before the renderer handle is created. The next
 identity observation should preserve that parent source and group range rather
 than equating newly created renderer handles across frames. This does not yet
 prove parent-source lifetime or moving-element stability. The owned function
-disassemblies are under `work/glass-engine-identity-probe-v2/`.
+disassemblies are under `glass-engine-identity-probe-v2/`.
 
 ### Typed source of the dominant grouped path
 
@@ -638,7 +638,7 @@ instance, its lifetime, buffer replacement and group-to-renderer handoff still
 must be captured together before admitting history. The checked-cast wrapper
 loads the node handle from its input instance+0x60.
 
-Local evidence: `work/glass-array-wrapper-live-v1/source-type.json`, owned
+Local evidence: `glass-array-wrapper-live-v1/source-type.json`, owned
 function disassemblies 0x3c8ae8/0x3c8b08/0x25422c/0x2277018 and the leaf
 accessor bytes at 0xaefd28. This is a potential bounded scalar provenance route,
 not a claim of static object motion, all-transparency coverage or FG integration.
@@ -681,8 +681,8 @@ loaded into PID 62100 without restarting. Its 51-byte audited leaf profile
 passed installation and both Start and Save returned zero. The first interval
 had zero accessor calls and the simultaneous wrapper interval also had zero
 calls. This is control/installation evidence only. Raw local output is in
-`work/glass-transform-range-live-v1/capture/` and
-`work/glass-array-wrapper-live-v1/capture-3/`. No FG input was changed.
+`glass-transform-range-live-v1/capture/` and
+`glass-array-wrapper-live-v1/capture-3/`. No FG input was changed.
 
 `ExperimentInstanceUpdates.cpp` is a separate CPU diagnostic, not part of the
 OptiScaler build. It records at most 4,096 calls with the caller, context, input

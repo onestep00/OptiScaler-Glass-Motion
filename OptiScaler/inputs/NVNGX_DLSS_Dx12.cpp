@@ -1239,8 +1239,14 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
                 // bridge; without this marker the same call would be corrected
                 // twice (once here, once inside the wrapper).
                 GlassFg::NativeFgScope nativeScope;
+                // The feature id was checked on this branch, so the correction
+                // does not have to prove the identity from the parameter names:
+                // the driver-level DLSS-G table names only MotionVectors/Depth,
+                // which the upscaler and Ray Reconstruction share. Passing the
+                // claim here is what lets the gate admit the generator without
+                // opening it for those two.
                 result = GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
-                                                   NVNGXProxy::D3D12_EvaluateFeature());
+                                                   NVNGXProxy::D3D12_EvaluateFeature(), true);
             }
             else
                 result = NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
@@ -1274,7 +1280,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         // native path uses; every other feature stays untouched.
         if (feature == NVSDK_NGX_Feature_FrameGeneration)
             return GlassFg::EvaluateNativeFG(InCmdList, InFeatureHandle, InParameters, InCallback,
-                                             &GlassUpstreamDLSSG);
+                                             &GlassUpstreamDLSSG, true);
         return Nvngx_FG::D3D12_EvaluateFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
     }
 

@@ -5,6 +5,7 @@
 #ifdef GLASS_OBSERVATION_HOST
 #include "../GeometryCreation.h"
 #include "../GeometryCommands.h"
+#include "../GlassHookProbe.h"
 #include "../ExperimentCensusBridge.h"
 static ID3D12PipelineState* observedOriginal = nullptr;
 static uint64_t expectedAddress = 0;
@@ -73,12 +74,15 @@ int main()
     {
         Device device;
 #ifdef GLASS_OBSERVATION_HOST
-        const auto compiler = std::filesystem::absolute("work/glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll");
+        const auto compiler = std::filesystem::absolute("glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll");
         require(GlassFg::StartGeometryCreation(device.d.Get(), compiler), "Creation observer startup");
         require(GlassFg::StartGeometryCommands(device.d.Get()), "Command observer startup");
+        // The production hooks return immediately until the settings layer
+        // enables the correction; the observer fixture has to enable them.
+        GlassFg::SetHooksIdle(false);
         require(GlassFg::RegisterExperimentCensus(&census), "Census registration");
 #ifdef GLASS_OBSERVATION_MODULE
-        const auto modulePath = std::filesystem::absolute("work/glass-optiscaler-source/artifacts/glass-tests/experiment-bindings.dll");
+        const auto modulePath = std::filesystem::absolute("glass-optiscaler-source/artifacts/glass-tests/experiment-bindings.dll");
         const auto outputPath = modulePath.parent_path() / ("binding-module-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         auto configPath = modulePath; configPath.replace_extension(".config");
         {
@@ -118,10 +122,10 @@ int main()
         check(D3DCompile(shader, sizeof(shader), nullptr, nullptr, nullptr, "VS", "vs_5_0", 0, 0, &vs, &error));
         check(D3DCompile(shader, sizeof(shader), nullptr, nullptr, nullptr, "PS", "ps_5_0", 0, 0, &ps, &error));
 #ifdef GLASS_OBSERVATION_NATIVE
-        const auto nativeCode = read("work/glass-optiscaler-source/artifacts/glass-tests/observation-native-vs.dxil");
+        const auto nativeCode = read("glass-optiscaler-source/artifacts/glass-tests/observation-native-vs.dxil");
         vs.Reset(); check(D3DCreateBlob(nativeCode.size(), &vs));
         memcpy(vs->GetBufferPointer(), nativeCode.data(), nativeCode.size());
-        const auto nativePixel = read("work/glass-optiscaler-source/artifacts/glass-tests/observation-native-ps.dxil");
+        const auto nativePixel = read("glass-optiscaler-source/artifacts/glass-tests/observation-native-ps.dxil");
         ps.Reset(); check(D3DCreateBlob(nativePixel.size(), &ps));
         memcpy(ps->GetBufferPointer(), nativePixel.data(), nativePixel.size());
 #endif
@@ -148,7 +152,7 @@ int main()
         check(device.d->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&second)));
 #ifdef GLASS_OBSERVATION_RETRY
         {
-            const auto retryPixel = read("work/glass-optiscaler-source/artifacts/glass-tests/observation-depth-ps.dxil");
+            const auto retryPixel = read("glass-optiscaler-source/artifacts/glass-tests/observation-depth-ps.dxil");
             auto retryDesc = d;
             retryDesc.PS = { retryPixel.data(), retryPixel.size() };
             retryDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -160,7 +164,7 @@ int main()
             ComPtr<ID3D12PipelineState> retryPso;
             check(device.d->CreateGraphicsPipelineState(&retryDesc, IID_PPV_ARGS(&retryPso)));
             GlassFg::GeometryPipelineCache cache(device.d.Get(), std::filesystem::absolute(
-                "work/glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll"));
+                "glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll"));
             const auto drain = [&] {
                 const auto deadline = GetTickCount64() + 10000;
                 while (cache.stats().pending && GetTickCount64() < deadline) Sleep(1);

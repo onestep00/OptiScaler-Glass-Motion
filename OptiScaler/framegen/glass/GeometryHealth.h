@@ -13,7 +13,11 @@ enum GeometryCapability : unsigned
     GeometryEngineLayout = 8,
     GeometryObjectHooks = 16,
     GeometryDrawHooks = 32,
-    GeometryCommandHooks = 64
+    GeometryCommandHooks = 64,
+    // Grouped instance-array element identity. Without it an array element is
+    // keyed by its position in the draw instead of by the engine's own source
+    // index, which is what a reordered group update silently breaks.
+    GeometryGroupHooks = 128
 };
 enum GeometryEvidence : unsigned
 {
@@ -41,6 +45,12 @@ struct GeometryHealth
     std::array<std::uint64_t, GeometryEvidenceCount> lastChangeMs {};
     std::uint64_t lastPacketMs = 0, lastFgMs = 0, sampledMs = 0;
     std::uint32_t frame = 0;
+    // Set while the packed capture reports a full vertex-history arena: the
+    // object correction is still replacing FG inputs, but a growing share of
+    // surfaces can no longer reserve a history block and keeps the engine's
+    // motion. This is the state measured live on 2026-09-16 in which covered
+    // pixels fell from 6 % of the screen to 0.09 %.
+    bool motionDegraded = false;
     bool has(GeometryCapability capability) const { return (capabilities & capability) != 0; }
     bool recentlyApplied(std::uint64_t now) const
     {
@@ -61,6 +71,8 @@ struct GeometryHealth
             return "Engine object hooks unavailable";
         if (!has(GeometryDrawHooks))
             return "Engine draw hooks unavailable";
+        if (!has(GeometryGroupHooks))
+            return "Grouped array element identity hooks unavailable";
         if (!has(GeometryCommandHooks))
             return "D3D12 command hooks unavailable";
         if (!counts[GeometryPackets])
@@ -83,6 +95,8 @@ struct GeometryHealth
             return "Object MV captured; FG input replacement not observed";
         if (!lastFgMs || now < lastFgMs || now - lastFgMs > 15000)
             return "FG replacement was observed, but is not currently progressing";
+        if (motionDegraded)
+            return "Object MV correction degraded: vertex-history arena full (edges keep background motion)";
         return "Object MV inputs are reaching FG (quality remains experimental)";
     }
 };
@@ -94,6 +108,7 @@ inline std::array<std::atomic<std::uint64_t>, GeometryEvidenceCount> counts {};
 inline std::array<std::atomic<std::uint64_t>, GeometryEvidenceCount> changedMs {};
 inline std::atomic<std::uint64_t> packetMs = 0, fgMs = 0, sampledMs = 0;
 inline std::atomic<std::uint32_t> frame = 0;
+inline std::atomic<unsigned> motionDegraded = 0;
 inline std::atomic<void (*)()> refresh = nullptr;
 inline std::atomic<std::uint64_t> refreshAttemptMs = 0;
 } // namespace GeometryTelemetry
@@ -142,6 +157,7 @@ inline GeometryHealth ReadGeometryHealth()
 {
     GeometryHealth result;
     result.capabilities = GeometryTelemetry::capabilities.load(std::memory_order_relaxed);
+    result.motionDegraded = GeometryTelemetry::motionDegraded.load(std::memory_order_relaxed) != 0;
     for (unsigned i = 0; i < GeometryEvidenceCount; ++i)
     {
         result.counts[i] = GeometryTelemetry::counts[i].load(std::memory_order_relaxed);
@@ -152,5 +168,11 @@ inline GeometryHealth ReadGeometryHealth()
     result.sampledMs = GeometryTelemetry::sampledMs.load(std::memory_order_relaxed);
     result.frame = GeometryTelemetry::frame.load(std::memory_order_relaxed);
     return result;
+}
+// Published by the once-per-second health refresh and by the host report, from
+// the packed capture status the caller already reads.
+inline void PublishGeometryMotionDegraded(bool value)
+{
+    GeometryTelemetry::motionDegraded.store(value ? 1u : 0u, std::memory_order_relaxed);
 }
 } // namespace GlassFg

@@ -3,6 +3,7 @@
 #include "../GeometryCommands.h"
 #include "../CommandLifetime.h"
 #include "../ExperimentDrawBridge.h"
+#include "../GlassHookProbe.h"
 int main()
 {
     try
@@ -17,6 +18,9 @@ int main()
         g.d->CreateRenderTargetView(nullptr, &nullView, unknownSource);
         require(GlassFg::StartGeometryViews(g.d.Get()), "View observer installation");
         require(GlassFg::StartGeometryCommands(g.d.Get()), "Command observer installation");
+        // The production hooks return immediately until the settings layer
+        // enables the correction; the observer fixture has to enable them.
+        GlassFg::SetHooksIdle(false);
         ComPtr<ID3D12DescriptorHeap> heap, depthHeap;
         check(g.d->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)));
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
@@ -77,11 +81,15 @@ int main()
         g.begin();
         g.c->OMSetRenderTargets(1, &handle[4], FALSE, &depthHandle);
         const auto* bound = GlassFg::ReadGeometryRasterState(g.c.Get());
-        require(bound && bound->targetViews[0] && bound->depthView &&
-                    bound->targetViews[0]->resource == original->resource &&
-                    bound->depthView->dsv.Flags == D3D12_DSV_FLAG_READ_ONLY_DEPTH &&
-                    bound->depthView->dsv.Texture2DArray.FirstArraySlice == 1,
-                "Original OM binding snapshot");
+        require(bound != nullptr, "Original OM binding snapshot: no raster record");
+        require(bound->targetViews[0] != nullptr, "Original OM binding snapshot: no target view");
+        require(bound->depthView != nullptr, "Original OM binding snapshot: no depth view");
+        require(bound->targetViews[0]->resource == original->resource,
+                "Original OM binding snapshot: target resource mismatch");
+        require(bound->depthView->dsv.Flags == D3D12_DSV_FLAG_READ_ONLY_DEPTH,
+                "Original OM binding snapshot: depth flags");
+        require(bound->depthView->dsv.Texture2DArray.FirstArraySlice == 1,
+                "Original OM binding snapshot: depth slice");
         const auto boundCopy = *bound;
         const auto partial = GlassFg::MakeExperimentDrawInput(g.c.Get(), 1, {}, {}, *bound, {}, {});
         require(!partial.rasterKnown && partial.renderTargetCount == 1 && partial.renderTargets[0] == handle[4].ptr &&

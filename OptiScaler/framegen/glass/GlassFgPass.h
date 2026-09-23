@@ -32,10 +32,56 @@ struct Inputs
     // hands to the NGX core (via _nvngx.dll) uses MotionVectors/Depth.
     const char* motionKey = "DLSSG.MVecs";
     const char* depthKey = "DLSSG.Depth";
+    // True only when the evaluation carried the DLSS-G parameter identity
+    // (DLSSG.MVecs plus the multi-frame metadata). The frame generator is the
+    // only consumer that names those keys, so this is also the gate that keeps
+    // the correction off the upscaler and Ray Reconstruction, which share the
+    // MotionVectors/Depth names on their own evaluations.
+    bool frameGeneration = true;
     // Native Streamline frame domain, independent of the engine render tick.
     // UINT64_MAX means absent (for example an older replay); never infer it
     // from a repeated resource address or the multipass interpolation index.
     std::uint64_t frame = UINT64_MAX;
+    // Which DLSSG.* keys the table carried. Zero on the upscaler and Ray
+    // Reconstruction tables, so a non-zero mask is the frame generation
+    // identity even when the textures are named MotionVectors/Depth.
+    unsigned identityMask = 0;
+
+    // The keys only a frame generation evaluation publishes. The upscaler and
+    // Ray Reconstruction never set any of them, so one present marker is enough
+    // to tell the generator from the other two features that share the
+    // MotionVectors/Depth texture names.
+    static constexpr unsigned markerCount = 12;
+    static const char* const* markers() noexcept
+    {
+        static const char* const names[markerCount] {
+            "DLSSG.MVecs",       "DLSSG.HUDLess",        "DLSSG.Depth",          "DLSSG.MultiFrameIndex",
+            "DLSSG.MultiFrameCount", "DLSSG.Reset",      "DLSSG.ClipToPrevClip", "DLSSG.MvecScaleX",
+            "DLSSG.MvecScaleY",  "DLSSG.OpticalFlowEnabled", "DLSSG.CameraNear", "DLSSG.CameraFar",
+        };
+        return names;
+    }
+    template <class Parameters> static unsigned markerMask(Parameters* params)
+    {
+        if (!params)
+            return 0;
+        const char* const* names = markers();
+        unsigned mask = 0;
+        for (unsigned i = 0; i < markerCount; ++i)
+        {
+            void* value = nullptr;
+            if (params->Get(names[i], &value) == 1)
+                mask |= (1u << i);
+        }
+        return mask;
+    }
+    // True when the table names at least one DLSS-G only parameter. The texture
+    // aliases alone cannot prove the identity; these keys can.
+    static bool tableNamesFrameGeneration(unsigned mask) noexcept
+    {
+        static constexpr unsigned strong = (1u << 0) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 9);
+        return (mask & strong) != 0;
+    }
 
     bool valid() const
     {
@@ -72,6 +118,14 @@ struct Inputs
             // constants it already tracks, so the compose sees the same units.
             value.motionKey = "MotionVectors";
             value.depthKey = "Depth";
+            // The shared names are not a frame generation identity on their
+            // own: the upscaler and Ray Reconstruction read exactly the same
+            // two keys. The DLSSG.* parameters in the same table are, because
+            // only the generator publishes them. Streamline's plugin hands its
+            // evaluation in with the generic texture names and the DLSS-G
+            // metadata, which is the shape this branch has to admit.
+            value.identityMask = markerMask(params);
+            value.frameGeneration = tableNamesFrameGeneration(value.identityMask);
             if (params->Get(value.motionKey, &value.motion) != 1 || !value.motion ||
                 params->Get(value.depthKey, &value.depth) != 1 || !value.depth)
                 return false;
@@ -97,6 +151,8 @@ struct Inputs
         for (float number : value.clipToPrevious)
             if (!std::isfinite(number))
                 return false;
+        value.frameGeneration = true;
+        value.identityMask = markerMask(params);
         return true;
     }
 
@@ -332,8 +388,11 @@ class Pass
             }
             surface.dispatch(cmd, inputs.scaleX, inputs.scaleY, inputs.jitterX, inputs.jitterY,
                              inputs.clipToPrevious.data(), inputs.reset != 0, false, true, false);
+            // The region layer is an own-layer supply, not a blend strength: the
+            // delivered motion either replaces the engine value inside the mask
+            // or stays out of it, so the layer is built at full weight.
             region.dispatch(cmd, surface, inputs.scaleX, inputs.scaleY, inputs.jitterX, inputs.jitterY,
-                            inputs.clipToPrevious.data(), inputs.reset != 0, controls.coverage());
+                            inputs.clipToPrevious.data(), inputs.reset != 0, 1.f);
             if (timer && timing)
                 timer->end(cmd, timing);
             ++dispatchCount;

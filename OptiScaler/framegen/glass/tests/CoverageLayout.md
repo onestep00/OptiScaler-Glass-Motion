@@ -29,7 +29,7 @@ three recorded samples only; near-plane crossing, arbitrary displacement, tempor
 ownership and the live bounds producer remain unverified. The rectangles were
 computed from actual VS geometry, with material masks used only to check coverage.
 
-Evidence is local `work/glass-array-bounds-live-v1/bounds-analysis.json` and raw
+Evidence is local `glass-array-bounds-live-v1/bounds-analysis.json` and raw
 paired captures. Generation 13 completed/unloaded all 64 captures, with 261 total
 jobs retired and none pending. These are diagnostic readbacks, not a continuous
 runtime design or GPU timing measurement.

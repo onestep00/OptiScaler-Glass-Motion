@@ -5,12 +5,16 @@
 #include "CyberpunkLayout.h"
 #include "CyberpunkObjects.h"
 #include "CyberpunkDraws.h"
+#include "CyberpunkGroups.h"
 #include "GeometryCommands.h"
 #include "GeometryViews.h"
 #include "GeometryHealth.h"
+#include "GeometryGateTrace.h"
 #include "PackedMotionCapture.h"
 #include "GlassMotionIdentity.h"
 #include "GlassDebugControl.h"
+#include "GlassControls.h"
+#include "GlassHookProbe.h"
 #include "NativeHost.h"
 #include "GlassHostTiming.h"
 #include <Util.h>
@@ -44,6 +48,15 @@ void refreshHealth() noexcept
         }
         const auto packets = GetCyberpunkDrawStatus();
         const auto commands = GetGeometryCommandStats();
+        // Degradation flag for the window text and the log: a full history arena
+        // is the measured state in which the object correction stops covering
+        // the scene even though the replacement itself keeps running.
+        {
+            const auto packed = ReadPackedMotionCaptureStatus();
+            PublishGeometryMotionDegraded(packed.historyArenaPages != 0 &&
+                                          packed.historyArenaUsedPages >= packed.historyArenaPages &&
+                                          packed.historyArenaLargestFree == 0);
+        }
         health.counts[GeometryIdentities] = packets.identities;
         health.counts[GeometryEngineDraws] = packets.draws;
         health.counts[GeometryPublicDraws] = commands.indexed;
@@ -79,6 +92,10 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 const bool ready = files && StartGeometryCreation(device, compiler);
                 const bool objects = ready && InitializeCyberpunkObjects(GetModuleHandleW(nullptr));
                 const bool draws = objects && InitializeCyberpunkDraws(GetModuleHandleW(nullptr));
+                // Grouped instance arrays: the element's original array index is
+                // published from the engine's own grouped update so the motion
+                // history is keyed by the object, not by the draw ordinal.
+                const bool groups = draws && InitializeCyberpunkGroups(GetModuleHandleW(nullptr));
                 const bool commands = ready && StartGeometryCommands(device);
                 // The native state observer was installed lazily inside the first
                 // frame generation evaluation, which put its Detours transaction
@@ -101,6 +118,7 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                                       (ready ? GeometryCreationHooks : 0u) |
                                       (GetCyberpunkLayout(GetModuleHandleW(nullptr)) ? GeometryEngineLayout : 0u) |
                                       (objects ? GeometryObjectHooks : 0u) | (draws ? GeometryDrawHooks : 0u) |
+                                      (groups ? GeometryGroupHooks : 0u) |
                                       (commands ? GeometryCommandHooks : 0u);
                 health.sampledMs = GetTickCount64();
                 PublishGeometryHealth(health);
@@ -111,6 +129,11 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 // device-creation path leaves only the per-session pipeline for
                 // the render thread.
                 WarmPackedShaderOnce();
+                // The hot hooks stay idle until the settings layer has run, so
+                // the load and the TSC calibration must not be left to the first
+                // render-thread call: both would stall a frame there.
+                (void)ReadControls();
+                WarmHookCostProbe();
                 GeometryTelemetry::refresh.store(refreshHealth, std::memory_order_release);
                 // The live channel and the periodic log must not depend on the
                 // game reaching the FG path: menus and loading screens never
@@ -206,19 +229,35 @@ void ReportGeometryHost(FILE* log) noexcept
         if (!creation.cache.lastError.empty())
             fprintf(log, "GEOMETRY_COMPILER last_error=%s\n", creation.cache.lastError.c_str());
         const auto packed = ReadPackedMotionCaptureStatus();
+        PublishGeometryMotionDegraded(packed.historyArenaPages != 0 &&
+                                      packed.historyArenaUsedPages >= packed.historyArenaPages &&
+                                      packed.historyArenaLargestFree == 0);
+        if (packed.historyArenaPages != 0 && packed.historyArenaUsedPages >= packed.historyArenaPages &&
+            packed.historyArenaLargestFree == 0)
+            std::fprintf(log,
+                         "GEOMETRY_PACKED_DEGRADED history_arena_full used=%u/%u live=%u arena_full=%llu "
+                         "frame=%u retired=%u pinned=%u slot_recovered=%llu\n",
+                         packed.historyArenaUsedPages, packed.historyArenaPages, packed.historyLive,
+                         static_cast<unsigned long long>(packed.historyArenaFull), packed.historyFrame,
+                         packed.historyRetiredFrame, packed.historyPinnedEntries,
+                         static_cast<unsigned long long>(packed.slotRecovered));
         fprintf(log,
                 "GEOMETRY_PACKED initialized=%u healthy=%u registered=%u extent=%ux%u admitted=%llu captured_frames=%llu "
-                "fg_frames=%llu missing_pipeline=%llu unknown_identity=%llu topology_rejected=%llu mapping_overflow=%llu "
+                "fg_frames=%llu missing_pipeline=%llu delta_missing_draws=%llu unknown_identity=%llu topology_rejected=%llu mapping_overflow=%llu "
                 "history_overflow=%llu slot_busy=%llu ordering_rejected=%llu no_fg_frame=%llu no_fg_queue=%llu "
-                "packed_ready=%llu packed_rejected=%llu acquire_no_candidate=%llu acquire_stale=%llu "
-                "acquire_ambiguous=%llu acquire_consumer_busy=%llu coverage_fallback=%llu\n",
+                "packed_ready=%llu packed_rejected=%llu packed_delta_missing=%llu acquire_no_candidate=%llu acquire_stale=%llu "
+                "acquire_ambiguous=%llu acquire_consumer_busy=%llu coverage_fallback=%llu "
+                "packed_opaqueprobe_ready=%llu packed_opaqueprobe_rejected=%llu\n",
                 packed.initialized, packed.healthy, packed.registered, packed.width, packed.height,
                 packed.admittedDraws, packed.capturedFrames, packed.fgFrames, packed.missingPipeline,
+                static_cast<unsigned long long>(packed.deltaMissingDraws),
                 packed.unknownIdentity, packed.topologyRejected, packed.mappingOverflow, packed.historyOverflow,
                 packed.slotBusy, packed.orderingRejected, packed.noFgFrame, packed.noFgQueue,
-                creation.cache.packedReady, creation.cache.packedRejected, packed.acquireNoCandidate,
+                creation.cache.packedReady, creation.cache.packedRejected,
+                static_cast<unsigned long long>(creation.cache.packedDeltaMissing), packed.acquireNoCandidate,
                 packed.acquireStalePair, packed.acquireAmbiguous, packed.acquireConsumerBusy,
-                static_cast<unsigned long long>(ReadPackedCoverageFallbackCount()));
+                static_cast<unsigned long long>(ReadPackedCoverageFallbackCount()),
+                creation.cache.packedOpaqueProbeReady, creation.cache.packedOpaqueProbeRejected);
         fprintf(log,
                 "GEOMETRY_PACKED_SPLIT unknown_owner_span=%llu unknown_resolve=%llu unknown_owner_mismatch=%llu "
                 "unknown_field_mismatch=%llu unknown_no_array_generation=%llu raster_rejected=%llu shape_rejected=%llu "
@@ -226,28 +265,164 @@ void ReportGeometryHost(FILE* log) noexcept
                 packed.unknownOwnerSpan, packed.unknownResolve, packed.unknownOwnerMismatch,
                 packed.unknownFieldMismatch, packed.unknownNoArrayGeneration, packed.rasterRejected,
                 packed.shapeRejected, packed.viewportRejected);
+        // Why ReadCyberpunkMeshShape refused a draw. Everything above is filed
+        // under shape_rejected, which cannot say whether the draw lost its
+        // flush correlation or the mesh chunk itself was unreadable.
+        const auto shape = ReadCyberpunkShapeStats();
+        fprintf(log,
+                "GEOMETRY_SHAPE_SPLIT no_flush=%llu no_batch=%llu empty_objects=%llu mesh_chunk=%llu frame=%llu "
+                "instances=%llu records=%llu header=%llu buffers=%llu chunk_read=%llu unstable_chunk=%llu "
+                "header_moved=%llu buffers_moved=%llu fields=%llu fields_vertices=%llu fields_indices=%llu "
+                "fields_streams=%llu fields_stream_range=%llu fields_index_type=%llu fields_index_offset=%llu "
+                "total=%llu\n",
+                static_cast<unsigned long long>(shape.noFlush), static_cast<unsigned long long>(shape.noBatch),
+                static_cast<unsigned long long>(shape.emptyObjects),
+                static_cast<unsigned long long>(shape.meshChunk), static_cast<unsigned long long>(shape.frame),
+                static_cast<unsigned long long>(shape.instances), static_cast<unsigned long long>(shape.records),
+                static_cast<unsigned long long>(shape.header), static_cast<unsigned long long>(shape.buffers),
+                static_cast<unsigned long long>(shape.chunkRead),
+                static_cast<unsigned long long>(shape.unstableChunk),
+                static_cast<unsigned long long>(shape.headerMoved),
+                static_cast<unsigned long long>(shape.buffersMoved),
+                static_cast<unsigned long long>(shape.fields),
+                static_cast<unsigned long long>(shape.fieldsVertices),
+                static_cast<unsigned long long>(shape.fieldsIndices),
+                static_cast<unsigned long long>(shape.fieldsStreams),
+                static_cast<unsigned long long>(shape.fieldsStreamRange),
+                static_cast<unsigned long long>(shape.fieldsIndexType),
+                static_cast<unsigned long long>(shape.fieldsIndexOffset),
+                static_cast<unsigned long long>(shape.rejected));
+        // Which field check refused a draw is only half of the answer; the
+        // first few refusals also print the numbers that decided them.
+        static std::size_t shapeSamplesPrinted = 0;
+        CyberpunkShapeSample shapeSample[4] {};
+        const auto shapeSampleCount = ReadCyberpunkShapeSamples(shapeSample, 4);
+        for (; shapeSamplesPrinted < shapeSampleCount; ++shapeSamplesPrinted)
+        {
+            const auto& item = shapeSample[shapeSamplesPrinted];
+            fprintf(log,
+                    "GEOMETRY_SHAPE_FIELDS n=%llu reason=%u vertices=%u indices=%u flush_indices=%u streams=%u "
+                    "index_type=%u index_offset=%u mesh=%llx chunk=%u\n",
+                    static_cast<unsigned long long>(shapeSamplesPrinted), item.reason, item.vertices,
+                    item.indices, item.flushIndices, item.streams, item.indexType, item.indexOffset,
+                    static_cast<unsigned long long>(item.mesh), item.chunk);
+        }
         if (!creation.cache.lastPackedError.empty())
             fprintf(log, "GEOMETRY_PACKED_ERROR last_error=%s\n", creation.cache.lastPackedError.c_str());
+        // Bounded admission report. The packed counters above only show the
+        // gates that were given a counter; the silent ones (no rewritten
+        // pipeline, no replayable bindings, prepare's early returns) are the
+        // common case for ordinary content and were invisible before this line.
+        if (GateArmed())
+        {
+            const auto& gate = Gate();
+            fprintf(log,
+                    "GEOMETRY_GATE draws=%llu no_pipeline=%llu no_bindings=%llu no_record=%llu no_owner=%llu "
+                    "prepare_lock=%llu prepare_failed=%llu prepare_command=%llu prepare_frameid=%llu "
+                    "prepare_instances=%llu prepare_mapping=%llu prepare_pipeline=%llu prepare_notpacked=%llu "
+                    "prepare_root=%llu prepare_raster=%llu prepare_shape=%llu prepare_viewport=%llu "
+                    "prepare_frameslot=%llu prepare_ordering=%llu prepare_span=%llu prepare_history=%llu "
+                    "prepare_noelement=%llu bind_rejected=%llu captured=%llu "
+                    "unseen_pipeline_probes=%llu unseen_pipeline_distinct=%llu\n",
+                    gate.stage[GateObjectDraws].load(), gate.stage[GateNoPipeline].load(),
+                    gate.stage[GateNoBindings].load(), gate.stage[GateNoRecord].load(),
+                    gate.stage[GateNoOwner].load(),
+                    gate.stage[GatePrepareLock].load(), gate.stage[GatePrepareFailed].load(),
+                    gate.stage[GatePrepareCommand].load(), gate.stage[GatePrepareFrameId].load(),
+                    gate.stage[GatePrepareInstances].load(), gate.stage[GatePrepareMapping].load(),
+                    gate.stage[GatePreparePipeline].load(), gate.stage[GatePrepareNotPacked].load(),
+                    gate.stage[GatePrepareRoot].load(), gate.stage[GatePrepareRaster].load(),
+                    gate.stage[GatePrepareShape].load(), gate.stage[GatePrepareViewport].load(),
+                    gate.stage[GatePrepareFrameSlot].load(), gate.stage[GatePrepareOrdering].load(),
+                    gate.stage[GatePrepareSpan].load(), gate.stage[GatePrepareHistory].load(),
+                    gate.stage[GatePrepareNoElement].load(), gate.stage[GateBindRejected].load(),
+                    gate.stage[GateCaptured].load(), gate.unseenPipelineProbes.load(),
+                    gate.unseenPipelineDistinct.load());
+            fprintf(log,
+                    "GEOMETRY_UNSEEN unknown=%llu accepted_not_ready=%llu rejected_transparent=%llu "
+                    "rejected_opaque=%llu\n",
+                    static_cast<unsigned long long>(gate.unseenUnknown.load()),
+                    static_cast<unsigned long long>(gate.unseenAcceptedNotReady.load()),
+                    static_cast<unsigned long long>(gate.unseenRejectedTransparent.load()),
+                    static_cast<unsigned long long>(gate.unseenRejectedOpaque.load()));
+            const auto& census = GateCreationCensus();
+            fprintf(log, "GEOMETRY_CREATION created=%llu accepted=%llu rejected=%llu rejected_transparent=%llu\n",
+                    static_cast<unsigned long long>(census.created.load()),
+                    static_cast<unsigned long long>(census.accepted.load()),
+                    static_cast<unsigned long long>(census.rejected.load()),
+                    static_cast<unsigned long long>(census.rejectedTransparent.load()));
+            fprintf(log, "GEOMETRY_CREATION_REASON root=%llu vertex=%llu pixel=%llu vertex_bytes=%llu "
+                         "pixel_bytes=%llu targets=%llu samples=%llu stages=%llu stream=%llu topology=%llu "
+                         "layout=%llu depth_write=%llu stencil=%llu blend=%llu root_unknown=%llu limits=%llu "
+                         "compilation_off=%llu\n",
+                    static_cast<unsigned long long>(census.reason[GateCandidateRoot].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateVertex].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidatePixel].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateVertexBytes].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidatePixelBytes].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateTargets].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateSamples].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateShaderStages].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateStreamOutput].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateTopology].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateInputLayout].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateDepthWrite].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateStencilWrite].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateBlend].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateRootUnknown].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateLimits].load()),
+                    static_cast<unsigned long long>(census.reason[GateCandidateCompilationOff].load()));
+            fprintf(log, "GEOMETRY_CREATION_TRANSPARENT depth_write=%llu stencil=%llu blend=%llu root_unknown=%llu "
+                         "limits=%llu samples=%llu topology=%llu layout=%llu\n",
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateDepthWrite].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateStencilWrite].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateBlend].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateRootUnknown].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateLimits].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateSamples].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateTopology].load()),
+                    static_cast<unsigned long long>(census.transparentReason[GateCandidateInputLayout].load()));
+        }
         const auto identity = ReadGlassMotionIdentityStats();
         fprintf(log,
                 "GEOMETRY_IDENTITY resolved=%llu rejected=%llu no_owner=%llu no_view=%llu no_lifetime=%llu "
-                "no_element_index=%llu no_element_parent=%llu no_element_order=%llu\n",
+                "no_element_index=%llu no_element_parent=%llu no_element_order=%llu "
+                "element_mapped=%llu element_unmapped=%llu\n",
                 identity.resolved, identity.rejected, identity.noOwner, identity.noView, identity.noLifetime,
-                identity.noElementIndex, identity.noElementParent, identity.noElementOrder);
+                identity.noElementIndex, identity.noElementParent, identity.noElementOrder, identity.elementMapped,
+                identity.elementUnmapped);
+        const auto groups = ReadGroupedArrayStats();
+        fprintf(log,
+                "GEOMETRY_GROUPS grouped=%llu staged=%llu published=%llu aborted=%llu append=%llu in_range=%llu "
+                "outside=%llu dropped=%llu sample_calls=%llu sample_cycles=%llu sample_max_cycles=%llu\n",
+                groups.groupedCalls, groups.staged, groups.published, groups.aborted, groups.appendCalls,
+                groups.appendInRange, groups.appendOutside, groups.appendDropped, groups.sampleCalls,
+                groups.sampleCycles, groups.sampleMaxCycles);
         fprintf(log,
                 "GEOMETRY_PARENT no_flag=%llu no_entry=%llu no_ticket=%llu no_slot=%llu no_mesh=%llu "
-                "no_header=%llu no_selection=%llu seeded=%llu\n",
+                "no_header=%llu no_selection=%llu seeded=%llu memo_hit=%llu memo_miss=%llu\n",
                 packets.parentNoFlag, packets.parentNoEntry, packets.parentNoTicket, packets.parentNoSlot,
-                packets.parentNoMesh, packets.parentNoHeader, packets.parentNoSelection, packets.parentSeeded);
+                packets.parentNoMesh, packets.parentNoHeader, packets.parentNoSelection, packets.parentSeeded,
+                packets.parentMemoHits, packets.parentMemoMisses);
         std::fprintf(log,
                      "GEOMETRY_SELECTION grouped=%llu non_global=%llu range=%llu\n",
                      static_cast<unsigned long long>(packets.parentNoSelectionGrouped),
                      static_cast<unsigned long long>(packets.parentNoSelectionNonGlobal),
                      static_cast<unsigned long long>(packets.parentNoSelectionRange));
         std::fprintf(log,
+                     "GEOMETRY_PACKET_LOCAL count1=%llu count_more=%llu count_more_skin=%llu "
+                     "gate_pass=%llu gate_count1=%llu gate_skin=%llu\n",
+                     static_cast<unsigned long long>(packets.parentNonGlobalCount1),
+                     static_cast<unsigned long long>(packets.parentNonGlobalCountMore),
+                     static_cast<unsigned long long>(packets.parentNonGlobalCountMoreSkin),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalGatePass),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalGateCount),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalGateSkin));
+        std::fprintf(log,
                      "GEOMETRY_ARRAY_ORDER grouped=%llu compared=%llu permuted=%llu changed=%llu "
                      "local=%llu local_compared=%llu local_permuted=%llu local_changed=%llu "
-                     "same_address=%llu distinct_address=%llu\n",
+                     "same_address=%llu distinct_address=%llu local_same_address=%llu "
+                     "local_distinct_address=%llu local_unreadable=%llu local_base_moved=%llu\n",
                      static_cast<unsigned long long>(packets.arrayProbeGrouped),
                      static_cast<unsigned long long>(packets.arrayProbeCompared),
                      static_cast<unsigned long long>(packets.arrayProbePermuted),
@@ -257,7 +432,11 @@ void ReportGeometryHost(FILE* log) noexcept
                      static_cast<unsigned long long>(packets.arrayProbeLocalPermuted),
                      static_cast<unsigned long long>(packets.arrayProbeLocalChanged),
                      static_cast<unsigned long long>(packets.arrayProbeSameAddress),
-                     static_cast<unsigned long long>(packets.arrayProbeDistinctAddress));
+                     static_cast<unsigned long long>(packets.arrayProbeDistinctAddress),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalSameAddress),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalDistinctAddress),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalUnreadable),
+                     static_cast<unsigned long long>(packets.arrayProbeLocalBaseMoved));
         fprintf(log, "GEOMETRY_CHUNKS unknown=");
         for (const auto& entry : packed.unknownChunks)
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
@@ -266,6 +445,9 @@ void ReportGeometryHost(FILE* log) noexcept
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
         std::fprintf(log, " missing=");
         for (const auto& entry : packed.missingChunks)
+            if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
+        std::fprintf(log, " delta_missing=");
+        for (const auto& entry : packed.deltaMissingChunks)
             if (entry.count) std::fprintf(log, "%u:%llu,", entry.chunk, static_cast<unsigned long long>(entry.count));
         std::fprintf(log, "\n");
         // N-1 stability: inserted grows when an element key changes between
@@ -360,6 +542,41 @@ void ReportGeometryHost(FILE* log) noexcept
                         auto& composeRecord = ComposeRecordTiming();
                         auto& composeExecute = ComposeExecuteTiming();
                         auto& composeSignal = ComposeSignalTiming();
+                        // CPU cost of the hooks themselves. This is the number
+                        // that answers "what does the correction cost per
+                        // frame": every hot hook is counted and one call in
+                        // HookCostSampling is timed, then the samples are scaled
+                        // by the engine frames in the same window.
+                        // Per-thread slots are summed and reset here, so the hot
+                        // path stays a lock-free increment in the owning thread.
+                        const auto commandHooks = TakeHookCost(&HookCostSlot::command);
+                        const auto indexedHooks = TakeHookCost(&HookCostSlot::indexed);
+                        const auto runHooks = TakeHookCost(&HookCostSlot::run);
+                        const auto appendHooks = TakeHookCost(&HookCostSlot::append);
+                        const auto rigidHooks = TakeHookCost(&HookCostSlot::rigid);
+                        const auto skinnedHooks = TakeHookCost(&HookCostSlot::skinned);
+                        const auto observerHooks = TakeHookCost(&HookCostSlot::observer);
+                        // The stored command family covers both shapes; the
+                        // reported command total stays the sum of its parts.
+                        const auto commandAll = SumHookCosts(commandHooks, indexedHooks);
+                        const auto drawHooks = SumHookCosts(SumHookCosts(runHooks, appendHooks),
+                                                            SumHookCosts(rigidHooks, skinnedHooks));
+                        static std::atomic<std::uint32_t> hookFrame { 0 };
+                        const auto previousHookFrame = hookFrame.exchange(commands.lastFrame, std::memory_order_relaxed);
+                        const auto hookFrames =
+                            commands.lastFrame > previousHookFrame ? commands.lastFrame - previousHookFrame : 0u;
+                        // The probe times one call in HookCostSampling, so each
+                        // family is scaled by calls/timed before it is compared
+                        // with a measured frame cost. The timer is stopped around
+                        // the engine's own call, so this is our code only.
+                        const auto hookMs = [](const HookCostTotals& value)
+                        { return HookCostScaledMs(value.selfCycles, value.calls, value.timed); };
+                        const auto hookMaxMs = [](const HookCostTotals& value)
+                        { return double(value.maxCycles) / TscHertz() * 1000.0; };
+                        const auto hookMsPerFrame =
+                            hookFrames ? (hookMs(commandAll) + hookMs(drawHooks) + hookMs(observerHooks)) /
+                                             double(hookFrames)
+                                       : 0.0;
                         std::fprintf(log,
                                      "GLASS_TIMING evaluate_n=%llu evaluate_ms=%.3f evaluate_max_ms=%.3f "
                                      "capture_n=%llu capture_ms=%.3f capture_max_ms=%.3f "
@@ -367,13 +584,79 @@ void ReportGeometryHost(FILE* log) noexcept
                                      "composeq_n=%llu composeq_ms=%.3f composeq_max_ms=%.3f "
                                      "cqreset_max_ms=%.3f cqrecord_max_ms=%.3f cqexec_max_ms=%.3f "
                                      "cqsignal_max_ms=%.3f submit_n=%llu submit_ms=%.3f submit_max_ms=%.3f "
+                                     "hook_frames=%u "
+                                     "hook_cmd_calls=%llu hook_cmd_timed=%llu hook_cmd_ms=%.3f hook_cmd_max_ms=%.3f "
+                                     "hook_cmd_stalls=%llu "
+                                     "hook_draw_calls=%llu hook_draw_timed=%llu hook_draw_ms=%.3f hook_draw_max_ms=%.3f "
+                                     "hook_draw_stalls=%llu "
+                                     "hook_indexed_calls=%llu hook_indexed_ms=%.3f "
+                                     "hook_run_calls=%llu hook_run_ms=%.3f "
+                                     "hook_append_calls=%llu hook_append_ms=%.3f "
+                                     "hook_rigid_calls=%llu hook_rigid_ms=%.3f "
+                                     "hook_skinned_calls=%llu hook_skinned_ms=%.3f "
+                                     "hook_obs_calls=%llu hook_obs_timed=%llu hook_obs_ms=%.3f hook_obs_max_ms=%.3f "
+                                     "hook_obs_stalls=%llu "
+                                     "hook_ms_per_frame=%.4f "
                                      "epoch=%.3f\n",
                                      countOf(evaluation), averageMs(evaluation), maximumMs(evaluation),
                                      countOf(capture), averageMs(capture), maximumMs(capture), countOf(compose),
                                      averageMs(compose), maximumMs(compose), countOf(composeQueue),
                                      averageMs(composeQueue), maximumMs(composeQueue), maximumMs(composeReset),
                                      maximumMs(composeRecord), maximumMs(composeExecute), maximumMs(composeSignal),
-                                     countOf(submission), averageMs(submission), maximumMs(submission), EpochSeconds());
+                                     countOf(submission), averageMs(submission), maximumMs(submission), hookFrames,
+                                     commandAll.calls, commandAll.timed, hookMs(commandAll),
+                                     hookMaxMs(commandAll), commandAll.stalls, drawHooks.calls, drawHooks.timed,
+                                     hookMs(drawHooks), hookMaxMs(drawHooks), drawHooks.stalls, indexedHooks.calls,
+                                     hookMs(indexedHooks), runHooks.calls, hookMs(runHooks), appendHooks.calls,
+                                     hookMs(appendHooks), rigidHooks.calls, hookMs(rigidHooks), skinnedHooks.calls,
+                                     hookMs(skinnedHooks), observerHooks.calls,
+                                     observerHooks.timed, hookMs(observerHooks), hookMaxMs(observerHooks),
+                                     observerHooks.stalls, hookMsPerFrame,
+                                     EpochSeconds());
+                        // Stage split of the two dominant hook shapes. The
+                        // timers ride the same 1/64 sample as the family
+                        // total, so these numbers are per sampled call and are
+                        // read against each other, not as a scaled total.
+                        const auto stageTotals = TakeHookStages();
+                        unsigned long long stageEntries = 0;
+                        for (const auto value : stageTotals.calls)
+                            stageEntries += value;
+                        if (stageEntries)
+                        {
+                            const auto stageNs = [&](unsigned stage)
+                            {
+                                return stageTotals.calls[stage] ?
+                                    double(stageTotals.cycles[stage]) / double(stageTotals.calls[stage]) /
+                                        TscHertz() * 1.0e9 :
+                                    0.0;
+                            };
+                            std::fprintf(log,
+                                         "HOOK_STAGE append_read_n=%llu append_read_ns=%.0f "
+                                         "append_parent_n=%llu append_parent_ns=%.0f "
+                                         "append_tail_n=%llu append_tail_ns=%.0f "
+                                         "indexed_head_n=%llu indexed_head_ns=%.0f "
+                                         "indexed_tail_n=%llu indexed_tail_ns=%.0f "
+                                         "append_ticket_ns=%.0f append_fields_ns=%.0f append_select_ns=%.0f "
+                                         "indexed_read_ns=%.0f indexed_find_ns=%.0f indexed_pipeline_ns=%.0f\n",
+                                         stageTotals.calls[HookStageAppendRead],
+                                         stageNs(HookStageAppendRead),
+                                         stageTotals.calls[HookStageAppendSelect],
+                                         stageNs(HookStageAppendTicket) + stageNs(HookStageAppendFields) +
+                                             stageNs(HookStageAppendSelect),
+                                         stageTotals.calls[HookStageAppendTail],
+                                         stageNs(HookStageAppendTail),
+                                         stageTotals.calls[HookStageIndexedRead],
+                                         stageNs(HookStageIndexedRead) + stageNs(HookStageIndexedFind) +
+                                             stageNs(HookStageIndexedPipeline),
+                                         stageTotals.calls[HookStageIndexedTail],
+                                         stageNs(HookStageIndexedTail),
+                                         stageNs(HookStageAppendTicket),
+                                         stageNs(HookStageAppendFields),
+                                         stageNs(HookStageAppendSelect),
+                                         stageNs(HookStageIndexedRead),
+                                         stageNs(HookStageIndexedFind),
+                                         stageNs(HookStageIndexedPipeline));
+                        }
                         std::fflush(log);
                         evaluation.reset();
                         submission.reset();

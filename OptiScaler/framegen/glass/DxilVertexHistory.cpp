@@ -338,7 +338,8 @@ std::array<std::string, 4> outputValuesAtReturn(std::string& body, unsigned outp
 
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryLayout layout,
                                          const VertexConstantPair* capture, const VertexClipPair* clipPair,
-                                         const VertexInputPair* inputPair)
+                                         const VertexInputPair* inputPair, bool captureDelta,
+                                         bool markMissingDelta)
 {
     VertexHistoryShader result;
     try
@@ -347,6 +348,23 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
         const bool mapped = layout == GeometryLayout::PerInstance;
         need(!capture || !clipPair, "Diagnostic record payload collision");
         need(!inputPair || (!capture && !clipPair), "Diagnostic input payload collision");
+        // The capture delta reuses the tag words the pair already stores, so it
+        // requires that payload and the per-instance record layout that carries
+        // the mapped object index ahead of it.
+        need(!captureDelta || (capture && mapped && !clipPair && !inputPair),
+             "Capture delta requires the mapped constant pair");
+        // A pair-less store leaves bytes 24/28 undefined, so the next paired
+        // frame reads whatever an older capture wrote there as its predecessor
+        // jitter. Marking writes a NaN into both words, which the delta's
+        // existing IsFinite gate rejects, so a record without a captured pair
+        // contributes no delta instead of a stale one. Diagnostic input words
+        // and the pair-store payload stay untouched.
+        need(!markMissingDelta || (!capture && !inputPair),
+             "Missing-delta mark requires the pair-less tag store");
+        // (x * 0.5, y * -0.5) is the documented NDC-to-UV convention. The 0.5
+        // is fixed; only the sign is a comparison knob.
+        const char* scaleX = kCaptureJitterUvSign >= 0 ? "5.000000e-01" : "-5.000000e-01";
+        const char* scaleY = kCaptureJitterUvSign >= 0 ? "-5.000000e-01" : "5.000000e-01";
         result.recordBytes = clipPair ? 64 : 32;
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
         std::string source(disassembly);
@@ -425,7 +443,7 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
                                 "dx.op.barrier", "dx.op.traceRay", "dx.op.callShader" })
             need(source.find(op) == std::string::npos, "Shader side effect unsupported");
         const auto zero = metadata.add("i32 0"), mask1 = metadata.add("i32 3, i32 1"),
-                   mask15 = metadata.add("i32 3, i32 15");
+                   mask3 = metadata.add("i32 3, i32 3"), mask15 = metadata.add("i32 3, i32 15");
         auto inputSystem = [&](const char* name, unsigned kind)
         {
             for (const auto& node : inputs)
@@ -512,7 +530,8 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
             nativePrevious = readOutput(clipPair->previousOutput);
         }
         const auto row = extent(metadata, outputs), output = nextId(metadata, outputs);
-        need(row + (mapped ? 3 : 2) <= 32, "No history varying registers available");
+        const unsigned extraRows = mapped ? 3u : 2u;
+        need(row + extraRows + (captureDelta ? 1u : 0u) <= 32, "No history varying registers available");
         outputs.push_back(metadata.add("i32 " + std::to_string(output) + ", !\"GLASS_PREVIOUS\", i8 9, i8 0, " + zero +
                                        ", i8 2, i32 1, i8 4, i32 " + std::to_string(row) + ", i8 0, " + mask15));
         outputs.push_back(metadata.add("i32 " + std::to_string(output + 1) +
@@ -522,6 +541,14 @@ VertexHistoryShader RewriteVertexHistory(std::string_view disassembly, GeometryL
             outputs.push_back(metadata.add("i32 " + std::to_string(output + 2) +
                                            ", !\"GLASS_OBJECT_INDEX\", i8 5, i8 0, " + zero +
                                            ", i8 1, i32 1, i8 1, i32 " + std::to_string(row + 2) + ", i8 0, " + mask1));
+        // Frame-to-frame difference of the captured constant words, already
+        // scaled into the UV unit the packed material shader adds. Written by
+        // every path so no pixel ever interpolates an undefined varying.
+        if (captureDelta)
+            outputs.push_back(metadata.add("i32 " + std::to_string(output + extraRows) +
+                                           ", !\"GLASS_CAPTURE_DELTA\", i8 9, i8 0, " + zero +
+                                           ", i8 2, i32 1, i8 2, i32 " + std::to_string(row + extraRows) +
+                                           ", i8 0, " + mask3));
         metadata.get(signatures[1]) = join(outputs);
         unsigned ids[3] {};
         for (unsigned cls = 0; cls < 3; ++cls)
@@ -669,6 +696,32 @@ glass.read:
                  << capture->row << ")\n"
                  << "  %glass.extra0 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 0\n"
                  << "  %glass.extra1 = extractvalue %dx.types.CBufRet.i32 %glass.extraWords, 1\n";
+        if (captureDelta)
+        {
+            // The tag already holds this frame's words at record bytes 24/28
+            // and the previous frame's at the same offset of the record this
+            // VS just read, so both operands need no extra load. Sign and
+            // scale follow kCaptureJitterUvSign and the documented NDC-to-UV
+            // convention; a rejected or non-finite pair contributes zero.
+            code << "  %glass.oldj0i = extractvalue %dx.types.ResRet.i32 %glass.tag, 2\n"
+                 << "  %glass.oldj1i = extractvalue %dx.types.ResRet.i32 %glass.tag, 3\n"
+                 << "  %glass.curj0 = bitcast i32 %glass.extra0 to float\n"
+                 << "  %glass.curj1 = bitcast i32 %glass.extra1 to float\n"
+                 << "  %glass.oldj0 = bitcast i32 %glass.oldj0i to float\n"
+                 << "  %glass.oldj1 = bitcast i32 %glass.oldj1i to float\n"
+                 << "  %glass.jdraw0 = fsub float %glass.curj0, %glass.oldj0\n"
+                 << "  %glass.jdraw1 = fsub float %glass.curj1, %glass.oldj1\n"
+                 << "  %glass.jds0 = fmul float %glass.jdraw0, " << scaleX << "\n"
+                 << "  %glass.jds1 = fmul float %glass.jdraw1, " << scaleY << "\n"
+                 // dx.op.isSpecialFloat (op 10) is the IsFinite predicate: true
+                 // for finite operands, as the existing depthfinite use assumes.
+                 << "  %glass.jdfinite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.jds0)\n"
+                 << "  %glass.jdfinite1 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.jds1)\n"
+                 << "  %glass.jdfinite = and i1 %glass.jdfinite0, %glass.jdfinite1\n"
+                 << "  %glass.jdok = and i1 %glass.validbool, %glass.jdfinite\n"
+                 << "  %glass.jdsel0 = select i1 %glass.jdok, float %glass.jds0, float 0.000000e+00\n"
+                 << "  %glass.jdsel1 = select i1 %glass.jdok, float %glass.jds1, float 0.000000e+00\n";
+        }
         if (inputPair)
             for (unsigned word = 0; word < 2; ++word)
                 code << "  %glass.extra" << word << " = call i32 @dx.op.loadInput.i32(i32 4, i32 "
@@ -690,7 +743,12 @@ glass.read:
         code << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.address, i32 undef, i32 %glass.c0i, i32 %glass.c1i, i32 %glass.c2i, i32 %glass.c3i, i8 15)\n"
              << "  call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %glass.uav, i32 %glass.tagaddress, i32 undef, i32 %glass.frame, i32 %glass.gen, "
              << ((capture || inputPair) ? "i32 %glass.extra0, i32 %glass.extra1, i8 15)\n"
-                         : "i32 undef, i32 undef, i8 3)\n")
+                         : markMissingDelta
+                               // 0x7fc00000 is a quiet NaN: the delta's IsFinite
+                               // gate drops the pair instead of reusing an older
+                               // frame's words.
+                               ? "i32 2143289344, i32 2143289344, i8 15)\n"
+                               : "i32 undef, i32 undef, i8 3)\n")
              << R"(  br label %glass.end
 glass.reject:
 )";
@@ -705,6 +763,10 @@ glass.end:
             code << "  %glass.o" << c << " = phi float [ %glass.p" << c << ", %glass.read ], [ " << values[c]
                  << ", %glass.reject ]\n";
         code << "  %glass.ov = phi float [ %glass.valid, %glass.read ], [ 1.000000e+00, %glass.reject ]\n";
+        if (captureDelta)
+            for (unsigned c = 0; c < 2; ++c)
+                code << "  %glass.jd" << c << " = phi float [ %glass.jdsel" << c
+                     << ", %glass.read ], [ 0.000000e+00, %glass.reject ]\n";
         for (unsigned c = 0; c < 4; ++c)
             code << "  call void @dx.op.storeOutput.f32(i32 5, i32 " << output << ", i32 0, i8 " << c
                  << ", float %glass.o" << c << ")\n";
@@ -712,6 +774,10 @@ glass.end:
         if (mapped)
             code << "  call void @dx.op.storeOutput.i32(i32 5, i32 " << output + 2
                  << ", i32 0, i8 0, i32 %glass.mapindex)\n";
+        if (captureDelta)
+            for (unsigned c = 0; c < 2; ++c)
+                code << "  call void @dx.op.storeOutput.f32(i32 5, i32 " << output + extraRows << ", i32 0, i8 " << c
+                     << ", float %glass.jd" << c << ")\n";
         code << "  ret void";
         body.replace(body.find("  ret void"), 10, code.str());
         const std::pair<const char*, const char*> types[] = { { "dx.types.Handle", "{ i8* }" },
@@ -735,6 +801,10 @@ glass.end:
             if (body.find(text) == std::string::npos)
                 body += text + "\n";
         }
+        // Declared only when used: the validator rejects unused external
+        // functions, and the capture delta is the sole user here.
+        if (captureDelta && body.find("declare i1 @dx.op.isSpecialFloat.f32") == std::string::npos)
+            body += "declare i1 @dx.op.isSpecialFloat.f32(i32, float)\n";
         for (const auto& [id, value] : metadata.nodes)
             body += "!" + std::to_string(id) + " = !{" + value + "}\n";
         if (mapped && body.find("declare void @dx.op.storeOutput.i32") == std::string::npos)
@@ -827,7 +897,8 @@ VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsi
 VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, MaterialSource sourceFactor,
                                           MaterialDestination destinationFactor, MaterialMotionTarget target,
                                           unsigned firstHistoryRegister, GeometryLayout layout,
-                                          const NativeClipInputs* nativeInputs, bool preserveOriginalUavs)
+                                          const NativeClipInputs* nativeInputs, bool preserveOriginalUavs,
+                                          bool captureDelta)
 {
     VertexHistoryShader result;
     try
@@ -851,6 +922,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         const bool mapped = layout == GeometryLayout::PerInstance;
         need(!packedMotion || mapped, "Packed motion requires object mapping");
         need(!packedMotion || !nativeInputs, "Packed native motion is not validated");
+        // The delta varying is produced by the paired packed vertex shader; the
+        // pixel stage may only read it from that linked layout.
+        need(!captureDelta || (packedMotion && mapped), "Capture delta requires the packed per-instance path");
         need(!coverageOnly || mapped, "Coverage requires object mapping");
         need(!nativeInputs || !nativeInputs->countInvocations || mapped, "Native invocation audit requires mapped reserved record");
         need(!disassembly.empty() && disassembly.size() <= 2 * 1024 * 1024, "Invalid shader size");
@@ -934,7 +1008,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                 captureUavId = std::max(captureUavId, id + 1);
             }
         const auto zero = metadata.add("i32 0"), mask15 = metadata.add("i32 3, i32 15"),
-                   mask1 = metadata.add("i32 3, i32 1");
+                   mask1 = metadata.add("i32 3, i32 1"), mask3 = metadata.add("i32 3, i32 3");
         unsigned position = UINT32_MAX;
         for (const auto& node : inputs)
         {
@@ -958,7 +1032,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         }
         const auto previous = nextId(metadata, inputs), usedRows = extent(metadata, inputs);
         const auto row = firstHistoryRegister == UINT32_MAX ? usedRows : firstHistoryRegister;
-        need(row >= usedRows && row <= (mapped ? 29u : 30u), "Pixel history register collision or overflow");
+        const unsigned extraRows = mapped ? 3u : 2u;
+        need(row >= usedRows && row + extraRows + (captureDelta ? 1u : 0u) <= 32,
+             "Pixel history register collision or overflow");
         inputs.push_back(metadata.add("i32 " + std::to_string(previous) + ", !\"GLASS_PREVIOUS\", i8 9, i8 0, " + zero +
                                       ", i8 2, i32 1, i8 4, i32 " + std::to_string(row) + ", i8 0, " + mask15));
         inputs.push_back(metadata.add("i32 " + std::to_string(previous + 1) +
@@ -968,6 +1044,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             inputs.push_back(metadata.add("i32 " + std::to_string(previous + 2) +
                                           ", !\"GLASS_OBJECT_INDEX\", i8 5, i8 0, " + zero +
                                           ", i8 1, i32 1, i8 1, i32 " + std::to_string(row + 2) + ", i8 0, " + mask1));
+        if (captureDelta)
+            inputs.push_back(metadata.add("i32 " + std::to_string(previous + extraRows) +
+                                          ", !\"GLASS_CAPTURE_DELTA\", i8 9, i8 0, " + zero +
+                                          ", i8 2, i32 1, i8 2, i32 " + std::to_string(row + extraRows) +
+                                          ", i8 0, " + mask3));
         metadata.get(signatures[0]) = join(inputs);
         std::array<std::array<std::string, 4>, 2> color;
         for (const auto& node : outputs)
@@ -1061,9 +1142,13 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             }
         metadata.append(
             resources[2],
+            // 80 bytes for the packed path: it reads the opacity-threshold row
+            // at byte offset 64, and a 64-byte declaration makes the validator
+            // reject that load as out of bounds. The bound resource is the
+            // module's 256-byte-aligned constant slot, so the extra row exists.
             metadata.add("i32 " + std::to_string(constantId) +
                          ", %Glass.PixelConstants* undef, !\"GlassPixelConstants\", i32 31, i32 1, i32 1, i32 " +
-                         std::to_string(retainColor ? 64 : 32) + ", null"));
+                         std::to_string(packedMotion ? 80 : (retainColor ? 64 : 32)) + ", null"));
         if (retainColor)
         {
             const auto atomic64 = packedMotion ? metadata.add("i32 3, i32 1") : "null";
@@ -1141,6 +1226,10 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         if (mapped)
             code << "  %glass.mapindex = call i32 @dx.op.loadInput.i32(i32 4, i32 " << previous + 2
                  << ", i32 0, i8 0, i32 undef)\n";
+        if (captureDelta)
+            for (unsigned c = 0; c < 2; ++c)
+                code << "  %glass.captureDelta" << c << " = call float @dx.op.loadInput.f32(i32 4, i32 "
+                     << previous + extraRows << ", i32 0, i8 " << c << ", i32 undef)\n";
         code << R"(  %glass.vok = fcmp oeq float %glass.valid, 0.000000e+00
   %glass.wok = fcmp ogt float %glass.p3, 0.000000e+00
   %glass.ok = and i1 %glass.vok, %glass.wok
@@ -1164,8 +1253,30 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << (c ? "-5.000000e-01" : "5.000000e-01") << "\n"
                  << "  %glass.prev" << c << " = fadd float %glass.half" << c << ", 5.000000e-01\n"
                  << "  %glass.raw" << c << " = fsub float %glass.prev" << c << ", %glass.uv" << c << "\n"
-                 << "  %glass.j" << c << " = extractvalue %dx.types.CBufRet.f32 %glass.c1, " << c << "\n"
-                 << "  %glass.mv" << c << " = fadd float %glass.raw" << c << ", %glass.j" << c << "\n";
+                 << "  %glass.j" << c << " = extractvalue %dx.types.CBufRet.f32 %glass.c1, " << c << "\n";
+            if (captureDelta)
+            {
+                code << "  %glass.mvTerm" << c << " = fadd float %glass.raw" << c << ", %glass.j" << c << "\n";
+                // Four render pixels in UV space is the admission bound for a
+                // capture-to-capture jitter delta. The vertex stage already
+                // zeroed rejected or non-finite pairs.
+                code << "  %glass.captureLimit" << c << " = fmul float %glass.v" << c + 2
+                     << ", 4.000000e+00\n"
+                     << "  %glass.captureLow" << c << " = fsub float 0.000000e+00, %glass.captureLimit" << c
+                     << "\n"
+                     << "  %glass.captureHigh" << c << " = fcmp ogt float %glass.captureDelta" << c
+                     << ", %glass.captureLimit" << c << "\n"
+                     << "  %glass.captureUnder" << c << " = fcmp olt float %glass.captureDelta" << c
+                     << ", %glass.captureLow" << c << "\n"
+                     << "  %glass.captureUpper" << c << " = select i1 %glass.captureHigh" << c
+                     << ", float %glass.captureLimit" << c << ", float %glass.captureDelta" << c << "\n"
+                     << "  %glass.captureClamped" << c << " = select i1 %glass.captureUnder" << c
+                     << ", float %glass.captureLow" << c << ", float %glass.captureUpper" << c << "\n"
+                     << "  %glass.mv" << c << " = fadd float %glass.mvTerm" << c << ", %glass.captureClamped" << c
+                     << "\n";
+            }
+            else
+                code << "  %glass.mv" << c << " = fadd float %glass.raw" << c << ", %glass.j" << c << "\n";
         }
         if (coverageOnly || packedCoverageOnly)
             code << "  %glass.hasall = icmp eq i32 0, 0\n";
@@ -1281,7 +1392,10 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         for (const auto& [name, fields] : std::array<std::pair<const char*, const char*>, 3> {
                  { { "dx.types.Handle", "{ i8* }" },
                    { "dx.types.CBufRet.f32", "{ float, float, float, float }" },
-                   { "Glass.PixelConstants", "{ [16 x float] }" } } })
+                   // 20 floats: MaterialCaptureConstants grew a fifth row for the
+                   // packed capture's opacity threshold. Readers outside the
+                   // packed path only touch rows 0..3.
+                   { "Glass.PixelConstants", "{ [20 x float] }" } } })
             if (body.find(std::string("%") + name + " = type") == std::string::npos)
                 body.insert(body.find("define void "), std::string("%") + name + " = type " + fields + "\n\n");
         for (const auto* declaration :

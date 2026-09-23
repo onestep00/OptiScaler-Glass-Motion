@@ -8,7 +8,11 @@ namespace GlassFg
 struct Controls
 {
     bool enabled = false;
-    unsigned strength = 100;
+    // Interior opacity threshold in percent. A covered pixel takes the object's
+    // own motion and depth when its material opacity reaches this value; below
+    // it the engine's motion and depth stay untouched. The visible boundary
+    // always takes the exact object motion.
+    unsigned opacityPercent = 50;
     bool measureGpuTime = true;
     unsigned edgeWidth = 2;
     // Safety staging for the full-screen packed object-motion dispatch.
@@ -27,15 +31,24 @@ struct Controls
     // Isolation switch: keep the input copies and the FG swap but skip the
     // compose compute dispatch, so the swap can be tested with zero new GPU work.
     bool packedCompute = true;
-    // Integration without foreign resources: copy the composed motion/depth
-    // back into the game's own FG inputs instead of substituting parameters.
+    // Retired: the game's motion and depth textures are also read by DLSS Super
+    // Resolution, Ray Reconstruction and the ray traced passes, so copying the
+    // composed values into them leaked the correction outside frame generation.
+    // The copy path is removed and this field is forced off; it stays only so
+    // old INI and control files keep parsing.
     bool packedWriteBack = false;
     // Diagnostic: run the compose dispatch without reading the packed object
     // records, so a GPU stall can be attributed to the dispatch itself or to
     // the record read that the capture raster wrote.
     bool packedSkipRead = false;
-    // Consume the live plugin's grouped-array element mapping for element
-    // identity. Off until the published list is verified.
+    // Retired 2026-09-17: the module's own engine group hooks publish the
+    // grouped-array element mapping (CyberpunkGroups -> GlassArrayMapping) and
+    // GlassMotionIdentity consumes it without this switch, so no code reads the
+    // field any more. It stays so old INI files and control-channel requests
+    // keep parsing; its bit is still reported in the packed word and in the
+    // status line. The plugin route that used to feed this switch is not to be
+    // enabled next to the engine hooks (both hook 0x9c19e8 and publish to the
+    // same table).
     bool arrayMapping = false;
     // Bisect switch: when false the module still observes draws and FG frames
     // but never creates its rewritten pipelines. Used to separate the D3D12
@@ -63,16 +76,90 @@ struct Controls
     // copy on the others, so the read-time answer is what reaches generation.
     bool packedSupply = false;
 
-    bool active() const { return enabled && strength > 0; }
     // Supply the documented DLSS-G transparency-layer inputs (the composed
     // motion and the packed coverage as opacity) so the generator treats the
     // transparent surface as its own layer instead of letting the content
     // behind it drive the region.
     bool packedLayer = false;
-    float coverage() const { return std::min(strength, 100u) / 100.f; }
+
+    // Projection-jitter compensation for the captured object motion. Measured
+    // 2026-09-16: the injected vector differs from the engine's own motion by
+    // one vector shared by every object in the frame (20 of 20 object groups,
+    // spread 0.05 px), i.e. a screen-space offset, not object motion. A
+    // sub-pixel camera jitter that the material path cancels differently from
+    // the engine's opaque path produces exactly that. 0 = off, 1 = -previous,
+    // 2 = +previous, 3 = +current, 4 = -current, 5 = current - previous. Gain
+    // scales it in percent.
+    // Measured 2026-09-18 (delta wiring absent, per-pixel fixed effects with
+    // the engine motion as the camera proxy, 406,615 px x 14 frames, mode 0):
+    // the captured vector carried the current frame's jitter and not the
+    // predecessor's, a(J) = -1.105 [-1.137,-1.043] b(P) = +0.008 on x, a(J) =
+    // -1.142 b(P) = -0.067 on y, while the engine's own field is jitter
+    // independent. That is why mode 3 compensated the capture in that build.
+    // 2026-09-19: the capture endpoint now adds the frame-to-frame constant
+    // delta, so the captured record is jitter free and mode 3 double counts the
+    // term. Measured on the delta build (24 frames x 2, still and moving): the
+    // delivered-minus-engine field has no jitter dependence at mode 0, a(J) x
+    // +0.004 y +0.033 with a 0.023 px boundary step, while mode 3 re-adds
+    // +0.887*J with a 0.348 px boundary step. Product default: 0. Modes 1-5 stay
+    // reachable only through the live diagnostic channel for re-measurement.
+    unsigned jitterMode = 0;
+    unsigned jitterGain = 100;
+
+    // Diagnostic: deliver an all-zero motion field to the frame generator
+    // instead of the engine's or the captured motion. Depth is left as the
+    // engine wrote it. This is the "no motion vectors at all" baseline for FG
+    // artifact comparison; it never touches the game's own motion texture.
+    bool zeroMotion = false;
+
+    // Second consumer. Off by default: the composed motion reaches only the
+    // frame generator through the input substitution. When on, the DLSS-NR
+    // pass (DLSS 5 neural rendering) is handed the composed motion and depth
+    // through its own evaluate inputs. The engine's own textures are never
+    // written, so DLSS-SR, Ray Reconstruction and the ray traced passes keep
+    // reading exactly what the game produced.
+    bool nrMotion = false;
+
+    // Far-surface skip, in steps of 25 m of view distance. 0 keeps every
+    // surface. Distant level-of-detail glass carries no detail the generator
+    // can act on, and its capture costs the same as a near one, so the capture
+    // shader drops records whose previous-frame clip w (view distance, in the
+    // same units as the world) is at or beyond this distance. The units are
+    // world units; the game's world unit is one metre.
+    unsigned farSkipStep = 0;
+
+    // Diagnostic: one line per compose carrying the (jitter, previous) pair the
+    // compose actually used. The dump interval is 36-37 frames, so a dump header
+    // cannot say which pair produced a captured vector; this line can, which is
+    // what separates a wrong frame offset from a wrong jitter term in the
+    // capture residual. One fprintf per compose, off by default.
+    bool jitterLog = false;
+
+    // Engine-proximity gate, diagnostic only. When on, the compose still
+    // selects the object's own motion for a covered pixel but writes nothing
+    // when that motion is already within EngineGatePx of the value the engine
+    // put there. It is off by default because the condition set is a binary
+    // blend of engine and object motion (C21, C3, C4): the border and every
+    // covered pixel take the object's motion, and any skip leaves the pixel on
+    // the background value the user reports as sticking. The 2026-09-19
+    // Songbird mirror band A/B that motivated the gate (`tvar_band` +1.31 luma
+    // and `hptvar_band_hi` +1.61 on ceilband1, +2.66 / +4.58 on ceilband2)
+    // measured `substitute=off` against mode 3, and the later gate-on A/B in
+    // the same band is neutral inside its noise (railgate2 `j0g - off` +0.16
+    // tvar / +0.33 hptvar_hi with round spread of about 5-10 luma). The live
+    // diagnostic channel opens it (`enggate=on`) and resizes it (`gatepx=`).
+    bool engineGate = false;
+    // Gate radius in 1/16 px steps, 0..7 (2 = 0.125 px, the packing quantum).
+    unsigned engineGateSteps = 2;
+
+    bool active() const { return enabled; }
+    float opacityThreshold() const { return std::min(opacityPercent, 100u) / 100.f; }
+    float engineGatePx() const { return float(std::min(engineGateSteps, 7u)) / 16.f; }
+    // 0 = off. Otherwise the smallest distance the capture shader rejects.
+    float farCutoffMeters() const { return farSkipStep ? 25.f * float(farSkipStep) : 0.f; }
     uint64_t packed() const
     {
-        return (std::uint64_t(std::min(strength, 100u)) << 1) | (enabled ? 1u : 0u) |
+        return (std::uint64_t(std::min(opacityPercent, 100u)) << 1) | (enabled ? 1u : 0u) |
                (measureGpuTime ? 256u : 0u) | (std::uint64_t(std::clamp(edgeWidth, 1u, 4u)) << 9) |
                (packedDispatch ? (std::uint64_t(1) << 12) : 0u) |
                (std::uint64_t((std::min)(packedRows, 0xffffu)) << 13) |
@@ -85,7 +172,16 @@ struct Controls
                (groupedOrder ? (std::uint64_t(1) << 38) : 0u) |
                (arrayProbe ? (std::uint64_t(1) << 39) : 0u) |
                (packetLocalOrder ? (std::uint64_t(1) << 40) : 0u) |
-               (packedSupply ? (std::uint64_t(1) << 41) : 0u);
+               (packedSupply ? (std::uint64_t(1) << 41) : 0u) |
+               (packedLayer ? (std::uint64_t(1) << 42) : 0u) |
+               (std::uint64_t(std::min(jitterMode, 7u)) << 43) |
+               (std::uint64_t(std::min(jitterGain, 255u)) << 46) |
+               (zeroMotion ? (std::uint64_t(1) << 35) : 0u) |
+               (nrMotion ? (std::uint64_t(1) << 55) : 0u) |
+               (jitterLog ? (std::uint64_t(1) << 54) : 0u) |
+               (engineGate ? (std::uint64_t(1) << 56) : 0u) |
+               (std::uint64_t(std::min(engineGateSteps, 7u)) << 57) |
+               (std::uint64_t(std::min(farSkipStep, 15u)) << 60);
     }
     static Controls unpack(std::uint64_t value)
     {
@@ -97,13 +193,66 @@ struct Controls
                  (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 36)) != 0,
                  (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0,
                  (value & (std::uint64_t(1) << 38)) != 0, (value & (std::uint64_t(1) << 39)) != 0,
-                 (value & (std::uint64_t(1) << 40)) != 0, (value & (std::uint64_t(1) << 41)) != 0 };
+                 (value & (std::uint64_t(1) << 40)) != 0, (value & (std::uint64_t(1) << 41)) != 0,
+                 (value & (std::uint64_t(1) << 42)) != 0, unsigned((value >> 43) & 7u),
+                 unsigned((value >> 46) & 0xffu),
+                 (value & (std::uint64_t(1) << 35)) != 0,
+                 (value & (std::uint64_t(1) << 55)) != 0,
+                 unsigned((value >> 60) & 0xfu),
+                 (value & (std::uint64_t(1) << 54)) != 0,
+                 (value & (std::uint64_t(1) << 56)) != 0,
+                 unsigned((value >> 57) & 7u) };
     }
 };
 
 // UI and the native host share one atomic snapshot. No INI reads per FG call.
 Controls ReadControls();
 void WriteControls(Controls value);
+// Session-only diagnostic, live channel only. Not persisted and not part of
+// the packed control word, whose 64 bits are all assigned. When on, the
+// compose substitutes the object's own motion but leaves the depth the engine
+// wrote under the pixel. The transparent pass writes no depth of its own, so
+// the engine's value describes the content behind the surface while the
+// substituted motion describes the surface itself. The A/B separates "the
+// generator resolves occlusion against the substituted depth" from "the
+// substituted motion alone still ripples the mirror band". Default off keeps
+// the delivered behaviour.
+inline std::atomic<bool>& DepthKeepFlag() noexcept
+{
+    static std::atomic<bool> value { false };
+    return value;
+}
+inline void SetDepthKeep(bool enabled) noexcept { DepthKeepFlag().store(enabled, std::memory_order_relaxed); }
+inline bool DepthKeepEnabled() noexcept { return DepthKeepFlag().load(std::memory_order_relaxed); }
+// Diagnostic opaque-pipeline probe, off by default and persisted in the INI as
+// GlassFG/OpaqueProbe. Session value only: not part of the packed control word,
+// whose 64 bits are all assigned. When on, the pipeline cache admits the
+// depth-writing and unblended pipelines it normally refuses, so the capture can
+// be pointed at the opaque surfaces the user asked to compare against the
+// engine's own motion. The compiler half of the same flag decides whether such
+// a pipeline can be rewritten without losing its colour exports or its SV_Depth
+// export; an unblended target is treated as a fully opaque surface (weight 255)
+// because the game's blend state writes the source colour directly.
+inline std::atomic<bool>& OpaqueProbeFlag() noexcept
+{
+    static std::atomic<bool> value { false };
+    return value;
+}
+inline void SetOpaqueProbe(bool enabled) noexcept { OpaqueProbeFlag().store(enabled, std::memory_order_relaxed); }
+inline bool OpaqueProbeEnabled() noexcept { return OpaqueProbeFlag().load(std::memory_order_relaxed); }
+// Simultaneous stripe A/B for the delivered frame, off by default. The compose
+// keeps the object's motion in even 64-pixel column bands and leaves the
+// engine's value in odd bands, so both arms sample the same pan, the same
+// animation phase and the same frames. A temporal metric can then compare them
+// inside one capture instead of across two runs. Session-only diagnostic: not
+// part of the packed control word, whose 64 bits are all assigned.
+inline std::atomic<bool>& StripeProbeFlag() noexcept
+{
+    static std::atomic<bool> value { false };
+    return value;
+}
+inline void SetStripeProbe(bool enabled) noexcept { StripeProbeFlag().store(enabled, std::memory_order_relaxed); }
+inline bool StripeProbeEnabled() noexcept { return StripeProbeFlag().load(std::memory_order_relaxed); }
 // Bisect switch shared with the pipeline cache. Inline so every build target
 // (module, settings test, GPU fixtures) resolves it without extra linkage.
 inline std::atomic<bool>& GeometryPipelineCompilationFlag() noexcept

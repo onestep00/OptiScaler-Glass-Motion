@@ -39,7 +39,7 @@ MAE is in 8-bit RGB levels. The 2-pixel edge/depth variant reduced this edge sco
 
 Run preparation, execution and analysis separately with `--stage prepare`, `run` and `analyze`, or use the default `all`. Required preparation arguments are `--template <local-manifest> --geometry <ObjectMotion.exe> --executable <replay-exe> --output <fresh-directory>`. Use `--stage extend --output <directory>` to add the six `boundary1/2/4[_depth]` policies with no interior blend, then run those names with `--variants`. Their inputs reuse the same geometry and color; extension source identities are stored separately. Repeat baselines through `run.py --compare ... --expect-identical`.
 
-Local evidence: `work/glass-object-boundary-fg-v1/`, including source/binary identities, GPU raw outputs, exact uploaded MV/depth, input audits, manifests, native reports and `analysis.json`. Synthetic images were directly reviewed before switching to the real capture.
+Local evidence: `glass-object-boundary-fg-v1/`, including source/binary identities, GPU raw outputs, exact uploaded MV/depth, input audits, manifests, native reports and `analysis.json`. Synthetic images were directly reviewed before switching to the real capture.
 
 ## Actual Cyberpunk input sequence
 
@@ -59,7 +59,7 @@ Full frames and the actual three generated phases were directly inspected. In fr
 
 `review_recorded_boundaries.py` checks identical color identities and successful native reports before producing endpoint, generated-phase and full-frame comparisons. `--roi-map` supplies per-frame rectangles when the camera moves the cups to another screen location. Difference values describe output sensitivity, not quality. The optional `--video-variant <manifest-stem>` writes a slow full-frame comparison with actual 25/50/75 outputs and rendered endpoints; the 125-frame lossy preview is separate from authoritative raw outputs.
 
-Local evidence: `work/glass-recorded-boundary-fg-v1/` and `depth-boundary/` for native reports/input audits. `review-final/` contains the selected whole-frame/phase comparisons, actual HUDless preview, reviewed moving-location crops, color-identity checks and video. The earlier `review/` used a fixed screen rectangle; its frame-21 crop mostly shows people and must not be treated as a cup metric.
+Local evidence: `glass-recorded-boundary-fg-v1/` and `depth-boundary/` for native reports/input audits. `review-final/` contains the selected whole-frame/phase comparisons, actual HUDless preview, reviewed moving-location crops, color-identity checks and video. The earlier `review/` used a fixed screen rectangle; its frame-21 crop mostly shows people and must not be treated as a cup metric.
 
 ## Admission decision
 

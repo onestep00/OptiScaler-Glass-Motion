@@ -3,6 +3,7 @@
 #include "PackedMotionPass.h"
 #include "PackedMotionCapture.h"
 #include "ComputeRecording.h"
+#include "GeometryCommands.h"
 #include "CommandLifetime.h"
 #include "SurfaceQueueLink.h"
 #include "SurfaceSnapshotPool.h"
@@ -94,6 +95,7 @@ class NativeSession
 
     void discardRecording(const void* command, bool destroyed = false)
     {
+        objectPass.discardRecording(command);
         if (objectMode)
             objectProvider.discard(command, destroyed);
         else
@@ -492,6 +494,12 @@ class NativeSession
         }
         if (objectMode)
         {
+            // The colour of this evaluation, named by the frame generation call
+            // itself. Recorded on every evaluation and read only while a dump is
+            // outstanding, so the frame path pays two stores. Only the packed
+            // object path owns the dump, which is why this sits inside it.
+            if (inputs.color != nullptr)
+                objectPass.setDumpColor(inputs.color, states[1]);
             PackedMotionFrame objectFrame;
             if (inputs.index == 1)
             {
@@ -538,7 +546,8 @@ class NativeSession
                 }
             }
             auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
-                                               timing ? &timer : nullptr, allowAnyState);
+                                               timing ? &timer : nullptr, allowAnyState,
+                                               GetGeometryCommandStats().lastFrame);
             outputRecording |= prepared.motion != nullptr;
             if (controls.trace && log && TraceWanted())
             {
@@ -628,11 +637,53 @@ class NativeSession
     FILE* logFileHandle() const { return log; }
     bool initializedForDiagnostics() const { return initialized; }
     // Deferred compose submission (called from the host pre-submit hook).
-    bool executePending(ID3D12CommandQueue* queue)
+    bool pendingFor(const void* command) const { return objectMode && objectPass.pendingFor(command); }
+    bool executePending(ID3D12CommandQueue* queue, const void* submittedCommand)
     {
-        if (!objectMode || !objectPass.executePending(queue))
+        if (!objectMode || !objectPass.executePending(queue, submittedCommand))
             return false;
         composeInFlight = true;
+        return true;
+    }
+    // Second consumer (DLSS-NR). The neural rendering pass runs on the game's
+    // own command list, ahead of the frame generation batch, so the frame is
+    // composed inline here and handed back as this evaluate's guides. The frame
+    // generation substitution of the same frame reuses the pair.
+    bool secondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* motion, ID3D12Resource* depth,
+                              D3D12_RESOURCE_STATES motionArrival, D3D12_RESOURCE_STATES depthArrival, float jitterX,
+                              float jitterY, float scaleX, float scaleY, ID3D12Resource** outMotion,
+                              ID3D12Resource** outDepth)
+    {
+        if (outMotion != nullptr)
+            *outMotion = nullptr;
+        if (outDepth != nullptr)
+            *outDepth = nullptr;
+        if (!objectMode || !initialized || stopped || failed || command == nullptr || motion == nullptr ||
+            depth == nullptr)
+            return false;
+        const auto controls = ReadControls();
+        if (!controls.active() || !controls.nrMotion)
+            return false;
+        const auto description = motion->GetDesc();
+        if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || description.Width == 0 ||
+            description.Height == 0)
+            return false;
+        const auto engineFrame = GetGeometryCommandStats().lastFrame;
+        auto frame = objectProvider.acquireSecondConsumer(static_cast<std::uint32_t>(description.Width),
+                                                         description.Height, engineFrame);
+        if (!frame)
+            return false;
+        // The compose copies from the game's own motion and depth, so it starts
+        // from the states the caller declares for them. The composed pair it
+        // hands back is left in the frame generation input convention
+        // (COPY_DEST), which is what the pass is told for its own guides.
+        if (!objectPass.composeInline(command, frame, motion, depth, motionArrival, depthArrival, jitterX, jitterY,
+                                      scaleX, scaleY, controls))
+            return false;
+        if (outMotion != nullptr)
+            *outMotion = objectPass.motionOutput();
+        if (outDepth != nullptr)
+            *outDepth = objectPass.depthOutput();
         return true;
     }
     // Release diagnostics for the host log: proves that our own GPU work never

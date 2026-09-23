@@ -48,6 +48,13 @@ struct VertexConstantPair
 {
     unsigned space, binding, bytes, row;
 };
+// Capture-endpoint jitter convention. The audited Cyberpunk camera block keeps
+// the raw NDC jitter in row 51 and the UV offset is (x * 0.5, y * -0.5)
+// (CyberpunkCamera.h:32-42, docs/glass-engine-object-motion.md:98). A capture
+// delta therefore adds (current - previous) in that UV space. This single sign
+// flips the whole term for a live A/B; the 0.5 factors stay tied to the
+// documented convention and are not a free parameter.
+inline constexpr float kCaptureJitterUvSign = 1.0f;
 // Explicit original uint input signature ID/components. Diagnostic raw words
 // at bytes 24/28, mutually exclusive with the other diagnostic payloads.
 // Values have no inferred bone/history meaning.
@@ -81,11 +88,16 @@ struct NativeClipInputs
 // Preserves native inputs/calculation/discard; does not identify motion semantics,
 // change depth state, provide previous transforms, or select an object boundary.
 VertexHistoryShader ExtractNativeMotionTarget(std::string_view disassembly, unsigned targetIndex);
+// markMissingDelta applies to the pair-less store: record bytes 24/28 receive a
+// quiet NaN so a later paired frame rejects the missing pair (IsFinite) instead
+// of reading an older capture's words as its predecessor jitter. Pair and
+// diagnostic input payloads are unchanged.
 VertexHistoryShader RewriteVertexHistory(std::string_view disassembly,
                                          GeometryLayout layout = GeometryLayout::Contiguous,
                                          const VertexConstantPair* capture = nullptr,
                                          const VertexClipPair* clipPair = nullptr,
-                                         const VertexInputPair* inputPair = nullptr);
+                                         const VertexInputPair* inputPair = nullptr,
+                                         bool captureDelta = false, bool markMissingDelta = false);
 
 enum class MaterialSource
 {
@@ -130,17 +142,24 @@ struct MaterialCaptureConstants
     std::uint32_t frame, reverseDepth;
     std::uint32_t left, top, width, height;
     std::uint32_t base, stride, capacity, reserved;
+    // Material opacity at or above which a packed record is classed as covered.
+    // The packed store keeps the nearest covered record and keeps an uncovered
+    // record only while no covered one exists, so an unlimited number of
+    // overlapping transparent layers resolves to the nearest surface that the
+    // visible-border/opacity rule keeps, with one 8-byte record per pixel.
+    float opacityThreshold;
+    float reserved1, reserved2, reserved3;
     bool valid(std::uint64_t allocatedCapacity) const
     {
         return frame && width && height && stride >= width && capacity && capacity <= UINT32_MAX / 32 &&
                capacity <= allocatedCapacity && std::isfinite(viewportX) && std::isfinite(viewportY) &&
                std::isfinite(inverseWidth) && std::isfinite(inverseHeight) && inverseWidth > 0 && inverseHeight > 0 &&
-               std::isfinite(jitterDeltaX) && std::isfinite(jitterDeltaY) &&
+               std::isfinite(jitterDeltaX) && std::isfinite(jitterDeltaY) && std::isfinite(opacityThreshold) &&
                std::uint64_t(base) + std::uint64_t(height - 1) * stride + width <= capacity &&
                std::uint64_t(left) + width <= 32768 && std::uint64_t(top) + height <= 32768;
     }
 };
-static_assert(sizeof(MaterialCaptureConstants) == 64);
+static_assert(sizeof(MaterialCaptureConstants) == 80);
 
 // Preserves the original material computation/discard, replacing only its
 // color exports with (normalized MV.xy, mean RGB attenuation, device depth).
@@ -153,7 +172,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                                           unsigned firstHistoryRegister = UINT32_MAX,
                                           GeometryLayout layout = GeometryLayout::Contiguous,
                                           const NativeClipInputs* nativeInputs = nullptr,
-                                          bool preserveOriginalUavs = false);
+                                          bool preserveOriginalUavs = false,
+                                          bool captureDelta = false);
 // preserveOriginalUavs is an explicit in-place packed instrumentation contract.
 // Never enable it for an additional/replayed draw: original UAV writes must run
 // exactly once with the unchanged original bindings. Runtime admission is separate.

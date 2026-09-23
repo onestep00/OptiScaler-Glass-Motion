@@ -48,10 +48,10 @@ Standalone owner modules remain pinned with lifecycle forwarding active and CSV
 recording stopped. Current-process chained profiles are diagnostic artifacts,
 not reusable production signatures or a design for unbounded hook stacking.
 
-Local evidence: `work/glass-source-bootstrap-live-v{1,2}/`, especially
+Local evidence: `glass-source-bootstrap-live-v{1,2}/`, especially
 `candidates.bin.result`, `capture/{owners,source-query}.txt`,
 `producer-capture/analysis.json`, and
-`work/glass-node-draw-census-v6/capture/owned-source-join.json`.
+`glass-node-draw-census-v6/capture/owned-source-join.json`.
 The independent `NodeLifetimes` build/test used `/O2 /W4 /WX` and passed.
 
 ## Next integration constraint
@@ -87,10 +87,10 @@ of the array-source bootstrap above, not evidence that those arrays supply MV.
 A following native pixel capture returned five jobs but only five total pixels
 (0, 1, 4, 0, 0). Thus the selected chunk is unsuitable as proof of a full object
 silhouette. All jobs retired and the module unloaded. No FG input changed.
-Local evidence: `work/glass-current-native-bindings-v1/`,
-`work/glass-current-native-prepare-v1/capture/bindings.done`,
-`work/glass-current-native-pair-v3/analysis.json` and
-`work/glass-current-native-pixels-v1/analysis.json`.
+Local evidence: `glass-current-native-bindings-v1/`,
+`glass-current-native-prepare-v1/capture/bindings.done`,
+`glass-current-native-pair-v3/analysis.json` and
+`glass-current-native-pixels-v1/analysis.json`.
 
 ## Array-source and actual vertex capture
 
@@ -123,7 +123,7 @@ The source key, chunk, vertex/index buffers, layout and viewport must agree;
 same ordinal alone is not used. Source-array mutation and actual view identity
 remain unproven, so these are experimental correspondences, not production MV.
 
-`work/glass-array-vertices-v3/source-vertex-join.json` records the counts;
+`glass-array-vertices-v3/source-vertex-join.json` records the counts;
 `engine-vertex-motion.csv` and `.png` show 992 current-to-previous vertex vectors
 from one matched frame. This is a sparse vertex plot, not a raster silhouette or
 FG input. No original color or depth behavior was intentionally changed and no
@@ -151,8 +151,8 @@ The original PS contains no discard call. Native capture already has a separate
 no-discard, side-effect-free path preserving original attachments; a general
 coverage-only adaptation still needs depth/stencil and original-output tests.
 No guard was relaxed in this checkpoint. Local evidence:
-`work/glass-array-states-v1/capture/pipeline-states.csv` and the captured PS in
-`work/glass-array-native-bindings-v1/ps.ll`. The recording module unloaded and
+`glass-array-states-v1/capture/pipeline-states.csv` and the captured PS in
+`glass-array-native-bindings-v1/ps.ll`. The recording module unloaded and
 the game remained responding.
 
 ## Depth-writing coverage implementation (not deployed)
@@ -171,7 +171,7 @@ versus instrumented color and D32 depth over 256 pixels. An occluder removes
 surviving-reference and contributing-reference masks exactly; status is zero.
 The default native-motion GPU regression also passes with the changed compiler.
 Both were built with `/O2 /W4 /WX`. Artifacts are under
-`work/glass-depth-coverage-test-v1/`.
+`glass-depth-coverage-test-v1/`.
 
 This test does not yet exercise stencil writes, which the current game pipeline
 uses, or independently verify multi-target preservation for this new mode.
@@ -203,7 +203,7 @@ material classification. The first draw's empty coverage is still unresolved.
 
 All 128 jobs retired, both modules unloaded, and the game remained responding.
 FG input is unchanged. Evidence and per-instance visualization:
-`work/glass-array-depth-coverage-v{1,2}/`; v2 has `coverage-analysis.json` and
+`glass-array-depth-coverage-v{1,2}/`; v2 has `coverage-analysis.json` and
 `actual-instance-coverage.png`. The original shader/state preservation is from
 the independent GPU fixture; no live before/after color comparison was performed.
 
@@ -224,7 +224,7 @@ The new module built and ran in PID 70152, producing 64 completed captures:
 simultaneous census also observed only chunk zero for this selected mesh, so
 this run does not verify multi-chunk collection or full-object merging. The
 module unloaded with no pending captures. Local evidence:
-`work/glass-mesh-chunks-v1/capture/`. Temporal ownership and FG remain unchanged.
+`glass-mesh-chunks-v1/capture/`. Temporal ownership and FG remain unchanged.
 
 ## Same-frame mesh sampling correction in PID 72636
 
@@ -248,7 +248,7 @@ zero status errors. However, the two chunks belong to different proxy/registry
 slots despite sharing a mesh. They must NOT be merged as one object. The selected
 visualization has 705 pixels for one proxy and two pixels for the other. It is
 original-material coverage, not complete object contours or motion. No new MV or
-FG substitution occurred. Evidence: `work/glass-multichunk-p72636-v{1,2}/`;
+FG substitution occurred. Evidence: `glass-multichunk-p72636-v{1,2}/`;
 v2 `analysis.json` and `separate-object-chunks.png` preserve the separate identities.
 
 ### Consecutive diagnostic samples
@@ -262,7 +262,7 @@ displacements are 3.0322 and 1.2120 pixels. Other gaps are excluded rather than
 substituting older frames. Actual view identity, continuous GPU history and dense
 boundary MV remain unverified. Two samples do not establish sustained recording.
 All jobs retired and the module unloaded. Evidence:
-`work/glass-multichunk-p72636-v3/motion-analysis.json`. FG input is unchanged.
+`glass-multichunk-p72636-v3/motion-analysis.json`. FG input is unchanged.
 
 ### Diagnostic pipeline reuse
 
@@ -274,5 +274,5 @@ lookup or compiler work. In PID 72636, v4 captured 64 jobs with one pipeline bui
 and 63 reuses. All retired and the module unloaded. This removes repeated
 compilation, not buffer initialization/readback cost or all diagnostic overhead.
 The run yielded no exact N-1 samples; sustained GPU history still needs a different
-resource lifecycle. Evidence: `work/glass-multichunk-p72636-v4/capture/selection.status`
+resource lifecycle. Evidence: `glass-multichunk-p72636-v4/capture/selection.status`
 and `motion-analysis.json`. No performance bound or FG quality claim follows.

@@ -56,7 +56,7 @@ In the combined case, merging the masks lost 310/422 boundary pixels at the two 
 
 The comparison sheets were inspected directly. Their moving shapes are synthetic panes, not game objects, and the MV preview is an input-field illustration, not an FG-generated image. No new FG output, performance bound, driver compatibility or game quality acceptance follows from these results. The arithmetic is small; acquiring per-object geometry/material metadata can dominate cost and has no verified 1 ms bound.
 
-Local evidence: workspace `work/glass-object-motion-raster-final/` and `work/glass-object-motion-raster-final-517x293/`, each with `audit.json`, source/binary hashes, input records, GPU outputs and comparisons. Raw game inputs are not used or distributed.
+Local evidence: workspace `glass-object-motion-raster-final/` and `glass-object-motion-raster-final-517x293/`, each with `audit.json`, source/binary hashes, input records, GPU outputs and comparisons. Raw game inputs are not used or distributed.
 
 ## Official contracts
 

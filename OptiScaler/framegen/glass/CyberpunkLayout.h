@@ -19,6 +19,8 @@ struct CyberpunkLayout
         Upload,
         Backend,
         SetArray,
+        GroupedUpdate,
+        GroupAppend,
         Count
     };
     std::array<std::uint32_t, Count> functions {};
@@ -46,6 +48,9 @@ struct CyberpunkLayout
             target(Backend, 0x75, Target::Writable) + 8 != tick ||
             target(Backend, 0xa0, Target::Writable) + 8 != tick ||
             target(Run, 0x663, Target::Code) != functions[Append] ||
+            // 0x1e0 is the element append call. 0x246 is the container push
+            // (0x3cc59c), which is a different callee and never the append.
+            target(GroupedUpdate, 0x1e0, Target::Code) != functions[GroupAppend] ||
             target(Rigid, 0x67, Target::Code) != functions[Backend] ||
             target(Rigid, 0x8d, Target::Code) != functions[Upload] ||
             target(Skinned, 0x5b, Target::Code) != functions[Upload] ||

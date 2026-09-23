@@ -64,6 +64,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryDrawBatch.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkDraws.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)CyberpunkDraws.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkGroups.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)CyberpunkGroups.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GraphicsRootBindings.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)IndirectBindings.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkCamera.h" />

@@ -67,6 +67,9 @@ class GeometryObjectRegistry
         // by array-setter updates, so temporal history can survive per-frame
         // array submissions while still resetting when the owner is recreated.
         std::uint32_t lifetime = 0;
+        // Reader-visible version for the lock-free ticket below. Even = the
+        // slot is complete, odd = a writer is between the two bumps.
+        std::uint32_t version = 0;
     };
     mutable std::shared_mutex mutex;
     std::vector<Slot> slots;
@@ -97,9 +100,57 @@ class GeometryObjectRegistry
             nodes[n.next].previous = n.previous;
         n.bucket = n.previous = n.next = None;
     }
+    // Reader side of the slot lifetime ticket.
+    //
+    // The ticket is the hottest query in the mod: every engine packet asks for
+    // two of them and every captured draw validates one per element under a
+    // unique lock, so the shared_lock that used to guard the read cost more
+    // than the four fields it protected. Writers still hold the unique lock;
+    // the version makes the read a seqlock, so a reader can never combine a
+    // proxy from one registration with a generation from another and a setter
+    // that ran during the read is detected instead of accepted.
+    struct SlotSnapshot
+    {
+        std::uint64_t proxy = 0;
+        std::uint32_t generation = 0, lifetime = 0, arrayWriters = 0;
+    };
+    bool snapshot(std::uint32_t index, SlotSnapshot& value) const noexcept
+    {
+        const auto& slot = slots[index];
+        const std::atomic_ref<const std::uint32_t> version(slot.version);
+        const auto first = version.load(std::memory_order_acquire);
+        if (first & 1u)
+            return false; // A writer is between the bumps.
+        value.proxy = slot.proxy;
+        value.generation = slot.generation;
+        value.lifetime = slot.lifetime;
+        value.arrayWriters = slot.arrayWriters;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return version.load(std::memory_order_relaxed) == first;
+    }
+    // Marks one slot mutation. RAII, so an early return cannot leave the odd
+    // marker behind; nested marks stay correct because readers only require an
+    // unchanged version, not an even one.
+    struct Mutation
+    {
+        Slot& slot;
+        explicit Mutation(Slot& value) noexcept : slot(value)
+        {
+            std::atomic_ref<std::uint32_t>(slot.version).fetch_add(1, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_release);
+        }
+        Mutation(const Mutation&) = delete;
+        Mutation& operator=(const Mutation&) = delete;
+        ~Mutation() noexcept
+        {
+            std::atomic_thread_fence(std::memory_order_release);
+            std::atomic_ref<std::uint32_t>(slot.version).fetch_add(1, std::memory_order_relaxed);
+        }
+    };
     void erase(std::uint32_t index)
     {
         auto& slot = slots[index];
+        Mutation mark(slot);
         for (unsigned i = 0; !nodes.empty() && i < History; ++i)
             unlink(index * History + i);
         if (slot.proxy)
@@ -112,6 +163,7 @@ class GeometryObjectRegistry
     {
         auto& slot = slots[index];
         erase(index);
+        Mutation mark(slot);
         if (slot.generation == UINT32_MAX || slot.lifetime == UINT32_MAX)
             return false; // Never wrap into an old identity.
         ++slot.generation;
@@ -172,8 +224,10 @@ class GeometryObjectRegistry
     {
         if (!proxy || index >= slots.size())
             return 0;
-        std::shared_lock lock(mutex);
-        return slots[index].proxy == proxy && !slots[index].arrayWriters ? slots[index].generation : 0;
+        SlotSnapshot value;
+        if (!snapshot(index, value))
+            return 0;
+        return value.proxy == proxy && !value.arrayWriters ? value.generation : 0;
     }
     // Registration lifetime only. Safe to use as a temporal identity across
     // array-setter updates; 0 means the slot is not this proxy or is mid-update.
@@ -181,8 +235,10 @@ class GeometryObjectRegistry
     {
         if (!proxy || index >= slots.size())
             return 0;
-        std::shared_lock lock(mutex);
-        return slots[index].proxy == proxy && !slots[index].arrayWriters ? slots[index].lifetime : 0;
+        SlotSnapshot value;
+        if (!snapshot(index, value))
+            return 0;
+        return value.proxy == proxy && !value.arrayWriters ? value.lifetime : 0;
     }
     // Invalidate BEFORE the actual setter writes or reallocates the source.
     // The shared object generation now also covers observed array replacement.
@@ -192,6 +248,7 @@ class GeometryObjectRegistry
         if (!proxy || index >= slots.size()) return 0;
         std::unique_lock lock(mutex);
         auto& slot = slots[index];
+        Mutation mark(slot);
         if (slot.proxy != proxy) return 0;
         if (slot.generation == UINT32_MAX || slot.arrayWriters == UINT32_MAX)
         { erase(index); return 0; }
@@ -209,6 +266,7 @@ class GeometryObjectRegistry
         if (!proxy || !scope || index >= slots.size()) return false;
         std::unique_lock lock(mutex);
         auto& slot = slots[index];
+        Mutation mark(slot);
         if (slot.proxy != proxy || slot.arrayScope != scope || !slot.arrayWriters) return false;
         if (!--slot.arrayWriters) slot.arrayScope = 0;
         return true;
@@ -220,6 +278,7 @@ class GeometryObjectRegistry
             return false;
         std::unique_lock lock(mutex);
         auto& slot = slots[index];
+        Mutation mark(slot);
         if (slot.proxy != proxy || slot.generation != generation)
             return false;
         if (slot.mesh != mesh && !activate(proxy, index, mesh))
@@ -247,6 +306,7 @@ class GeometryObjectRegistry
         if (slots[index].proxy == proxy && slots[index].generation == generation)
         {
             auto& slot = slots[index];
+            Mutation mark(slot);
             for (unsigned i = 0; !nodes.empty() && i < History; ++i)
                 unlink(index * History + i);
             slot.cursor = 0;

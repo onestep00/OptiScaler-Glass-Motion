@@ -18,6 +18,7 @@
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
+#include <framegen/glass/GlassSecondConsumer.h>
 
 #include <mutex>
 #include <algorithm>
@@ -1783,7 +1784,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
 
 void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                            ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
-                           ID3D12CommandQueue* timingQueue, std::optional<D3D12_RESOURCE_STATES> callerOutputArrival)
+                           ID3D12CommandQueue* timingQueue, std::optional<D3D12_RESOURCE_STATES> callerOutputArrival,
+                           std::optional<D3D12_RESOURCE_STATES> guideArrival)
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
@@ -2545,12 +2547,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // function and the same way every upscaler in this tree reads it. Unset means the NGX contract
     // holds and they arrive shader-readable, which is what this pass assumed unconditionally before.
     const D3D12_RESOURCE_STATES depthArrival =
-        cfg.DepthResourceBarrier.has_value()
+        guideArrival.has_value()      ? guideArrival.value()
+        : cfg.DepthResourceBarrier.has_value()
             ? (D3D12_RESOURCE_STATES) cfg.DepthResourceBarrier.value()
             : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     const D3D12_RESOURCE_STATES motionArrival =
-        cfg.MVResourceBarrier.has_value()
+        guideArrival.has_value()      ? guideArrival.value()
+        : cfg.MVResourceBarrier.has_value()
             ? (D3D12_RESOURCE_STATES) cfg.MVResourceBarrier.value()
             : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
@@ -3196,7 +3200,47 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
 
     device->Release();
 
-    g_compose->Dispatch(cmdList, target, depth, motion, dest, frame, timingQueue, destArrival);
+    // Second consumer: the frame generation correction module composes the
+    // transparent-object motion and depth for this engine frame and hands them
+    // over here. Only this evaluate's guides change; the game's own textures
+    // keep the values every other consumer reads. The composed pair rests in the
+    // frame generation input convention, so the pass is told that is where its
+    // guides arrive and it restores them there.
+    std::optional<D3D12_RESOURCE_STATES> guideArrival;
+    {
+        // The state the game left its own guides in, read the same way this pass
+        // reads it below: the declared barrier when the game publishes one,
+        // otherwise the NGX contract. The inline compose copies from these two
+        // resources, so its transitions have to start from that state.
+        const D3D12_RESOURCE_STATES depthArrival =
+            Config::Instance()->DepthResourceBarrier.has_value()
+                ? (D3D12_RESOURCE_STATES) Config::Instance()->DepthResourceBarrier.value()
+                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        const D3D12_RESOURCE_STATES motionArrival =
+            Config::Instance()->MVResourceBarrier.has_value()
+                ? (D3D12_RESOURCE_STATES) Config::Instance()->MVResourceBarrier.value()
+                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        // The frame's sub-pixel projection jitter, in the same pixel convention
+        // the frame generation channel declares. The delivered motion removes
+        // the difference between this frame and the previous compose, so a game
+        // that supplies no jitter keeps the unchanged value.
+        float guideJitterX = 0.0f;
+        float guideJitterY = 0.0f;
+        params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &guideJitterX);
+        params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &guideJitterY);
+        ID3D12Resource* composedMotion = nullptr;
+        ID3D12Resource* composedDepth = nullptr;
+        if (GlassFg::SecondConsumerGuides(cmdList, motion, depth, motionArrival, depthArrival, guideJitterX,
+                                          guideJitterY, frame.MvScaleX, frame.MvScaleY, &composedMotion,
+                                          &composedDepth))
+        {
+            motion = composedMotion;
+            depth = composedDepth;
+            guideArrival = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+    }
+
+    g_compose->Dispatch(cmdList, target, depth, motion, dest, frame, timingQueue, destArrival, guideArrival);
 }
 
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,

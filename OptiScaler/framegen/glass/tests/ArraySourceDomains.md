@@ -16,8 +16,8 @@ preserves these fields separately from shared-buffer ownership. The scalar and
 actual wrapper/unwind fixtures pass alongside the existing five-test build.
 This diagnostic is not deployed. Cross-frame element lifetime, prior transform
 supply and render N-1 remain unproven; old kind5/flags1 rows remain unadmitted.
-Local build: `work/glass-array-source-live-v1/kind5-build/`. Contract:
-`work/glass-decompile/array-kind5-source-contract.json`.
+Local build: `glass-array-source-live-v1/kind5-build/`. Contract:
+`glass-decompile/array-kind5-source-contract.json`.
 
 The compacting producer at RVA `0x579ab8` obtains its definition through
 `0x57a1d4` and checked cast `0x57a1f4`. The cast reads type global `0x342de00`.
@@ -33,11 +33,11 @@ first/count at +0x78/+0x7C, and shared data at buffer+0x30. Its normal path form
 with a `worldTransformBuffer` layout. The empty-range cold branch is not certified
 by the normal-leaf comparison and must not be hooked from this evidence.
 
-Local evidence lives in `work/glass-native-material-v1/`:
+Local evidence lives in `glass-native-material-v1/`:
 `audit_array_source_identity.py`, `array-source-identity-342de00.json`,
 `callers-3cab98-3cbde0-579ab8-57b114.json` and
 `callers-3a2038-3c8508-2276c30.json`. Function disassemblies remain local in
-`work/glass-engine-identity-probe-v2/`; game bytecode is not distributed here.
+`glass-engine-identity-probe-v2/`; game bytecode is not distributed here.
 The audited executable SHA-256 is
 `a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`.
 RVAs are diagnostic evidence for that build, not portable production signatures.
@@ -143,9 +143,9 @@ provide only node provenance. All recovered caller contexts took two steps.
 No malformed wrapper header occurred. The bounded sample contained no non-prefix
 active mask, so it does not demonstrate an actual shifted compaction in the game.
 
-Local files: `work/glass-array-source-live-v1/preflight.json` and
+Local files: `glass-array-source-live-v1/preflight.json` and
 `capture-3/{array-sources.csv,updates.csv,source-index-mapping.json,analysis.json}`.
-The reusable local analyzer is `work/glass-native-material-v1/analyze_array_source_trace.py`.
+The reusable local analyzer is `glass-native-material-v1/analyze_array_source_trace.py`.
 Address tuples and same-invocation source ranges do not prove cross-frame
 lifetime, producer-to-draw frame matching or MV. Recording is stopped and the
 forwarding DLL remains pinned; the process was responding after Save. No new
@@ -189,6 +189,6 @@ temporary index-map construction from the mask check; its final build also
 passes and has not replaced the resident diagnostic. The production correction
 and MO2 files remain unchanged.
 
-Local evidence: `work/glass-array-source-live-v1/dynamic-live-p24404/preflight.json`,
+Local evidence: `glass-array-source-live-v1/dynamic-live-p24404/preflight.json`,
 `capture-1/{status.txt,analysis.json}` beneath that directory, and
-`work/glass-array-source-live-v1/dynamic-layout-final-build/`.
+`glass-array-source-live-v1/dynamic-layout-final-build/`.

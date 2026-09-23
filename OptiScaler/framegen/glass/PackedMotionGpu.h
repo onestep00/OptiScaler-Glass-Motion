@@ -1,3 +1,4 @@
+#include "PackedRecordDump.h"
 #pragma once
 #include "GlassControls.h"
 #include "GlassGpuTimer.h"
@@ -84,6 +85,12 @@ class PackedMotionGpu
     // [dispatched, packed_id, edge, interior].
     ID3D12Resource* counters = nullptr;
     ID3D12Resource* zeroCounters = nullptr;
+    // The guide descriptions the outputs were built from. A second consumer
+    // hands over the game's own textures, so the compose may only run when they
+    // are the same extent and format; a different pair would make the copy box
+    // or the format conversion invalid.
+    D3D12_RESOURCE_DESC motionDescription {};
+    D3D12_RESOURCE_DESC depthDescription {};
     // The counters are copy destination, then a UAV write by the compose shader,
     // then (only on a dump) a copy source. The state has to follow that order on
     // every driver; a UAV access while the resource is still COPY_DEST is a
@@ -101,10 +108,33 @@ class PackedMotionGpu
     // channel asks for a dump, so the correction path pays nothing by default.
     // 0 composed motion, 1 composed depth, 2 coverage counters,
     // 3 original motion, 4 original depth (same-frame comparison),
-    // 5 packed object records (engine coverage).
-    ID3D12Resource* readback[6] {};
-    UINT64 readbackBytes[6] {};
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[6] {};
+    // 5 packed object records (engine coverage),
+    // 6 the frame's HUD-less colour, so the motion the compose wrote can be
+    //   checked against the image it claims to describe. Allocated lazily on
+    //   the health thread once a colour resource has been observed.
+    ID3D12Resource* readback[7] {};
+    UINT64 readbackBytes[7] {};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint[7] {};
+    // Colour input of the frame the next dump will capture. The compose sets it
+    // from the frame generation evaluation; the copy and the write use it only
+    // while a dump is pending, so the normal path never touches it.
+    ID3D12Resource* dumpColorResource = nullptr;
+    D3D12_RESOURCE_STATES dumpColorState = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_DESC dumpColorDescription {};
+    bool dumpColorKnown = false;
+    bool dumpColorCopied = false;
+    // Set when the observed colour cannot be copied with the allocation this
+    // session already owns (a description change). The dump then serves the
+    // motion records alone with one counted line instead of stalling the live
+    // channel on a resource that would have to be replaced under an in-flight
+    // copy.
+    bool dumpColorAbandoned = false;
+    unsigned dumpColorFailures = 0;
+    // The engine frame the second consumer (the DLSS-NR seam) composed on its
+    // own command list. The frame generation substitution of the same frame
+    // reuses that pair instead of composing a second time.
+    std::uint64_t inlineFrame = 0;
+    bool inlineValid = false;
     unsigned packedCovered = 0;
     // Dump-only aggregate of the captured object motion, in the record's own
     // 1/8 px units. The composed texture value has to equal
@@ -113,6 +143,33 @@ class PackedMotionGpu
     std::uint64_t packedMotionPixels = 0, packedMotionSumAbsX = 0, packedMotionSumAbsY = 0;
     unsigned packedMotionMaxAbsX = 0, packedMotionMaxAbsY = 0, packedMotionSaturated = 0;
     float lastScaleX = 0.f, lastScaleY = 0.f;
+    // Sub-pixel projection jitter the provider declared for the frame whose
+    // object motion the compose is writing, plus the value the previous compose
+    // saw. The delivery removes their difference (the capture's projection
+    // convention) and the dump records the pair for the frame it captured, so
+    // the residual offset can be attributed to a specific term offline.
+    float previousJitterX = 0.f, previousJitterY = 0.f;
+    // False until one compose has established the predecessor pair. The first
+    // delivered frame after a load then uses a zero conversion instead of an
+    // unpaired offset.
+    bool jitterHistoryValid = false;
+    float dumpJitterX = 0.f, dumpJitterY = 0.f, dumpPreviousJitterX = 0.f, dumpPreviousJitterY = 0.f;
+    unsigned lastJitterMode = 0;
+    float lastJitterGain = 1.f;
+    // Effective engine-proximity gate radius of the last compose, 0 when the
+    // diagnostic gate is off. The dump header reports it next to the skip
+    // count so a capture names the threshold that produced it.
+    float lastEngineGatePx = 0.f;
+    // Diagnostic depth route of the last compose. The dump header reports it
+    // with the depth substitution count so a capture names the delivery it
+    // measured instead of the one the current request file would select.
+    bool lastDepthKeep = false;
+    // Debug mode word the last compose handed the shader (see the Constants
+    // block below: dump request, read skip, zero motion, gate off, depth keep,
+    // stripe A/B). The dump header reports it so a capture names the diagnostic
+    // that produced its frame instead of the state the live channel held at
+    // some other time.
+    unsigned lastDebugMode = 0;
     ID3D12Fence* dumpFence = nullptr;
     // Compose fence value that covers the readback copies of a pending dump.
     std::uint64_t dumpComposeValue = 0;
@@ -349,6 +406,34 @@ class PackedMotionGpu
     }
 
   public:
+    // Second consumer path. The DLSS-NR pass runs on the game's own command
+    // list, before the frame generation batch is submitted, so a compose
+    // submitted on the queue would execute ahead of the frame's own draw work
+    // and read a packed buffer that is still being written. The same dispatch
+    // body is recorded on the caller's list instead; the caller proved that the
+    // frame's producer submission already precedes this list.
+    bool recordInline(ID3D12GraphicsCommandList* command, const PackedMotionFrame& packed,
+                      ID3D12Resource* originalMotion, ID3D12Resource* originalDepth,
+                      D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState, float scaleX,
+                      float scaleY, float jitterX, float jitterY, Controls controls)
+    {
+        if (!command || !composeReady())
+        {
+            noteComposeSkip("inline");
+            return false;
+        }
+        if (!dispatch(command, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
+                      jitterX, jitterY, controls))
+            return false;
+        inlineFrame = packed.frame;
+        inlineValid = true;
+        return true;
+    }
+    bool inlineComposed(std::uint64_t frame) const { return inlineValid && inlineFrame == frame; }
+    void clearInline() { inlineValid = false; }
+
+  private:
+  public:
     PackedMotionGpu() = default;
     PackedMotionGpu(const PackedMotionGpu&) = delete;
     PackedMotionGpu& operator=(const PackedMotionGpu&) = delete;
@@ -378,22 +463,24 @@ class PackedMotionGpu
         }
     }
 
-    bool initialize(ID3D12Device* value, const D3D12_RESOURCE_DESC& motionDescription,
-                    const D3D12_RESOURCE_DESC& depthDescription, const wchar_t* shader, FILE* log)
+    bool initialize(ID3D12Device* value, const D3D12_RESOURCE_DESC& motionDesc, const D3D12_RESOURCE_DESC& depthDesc,
+                    const wchar_t* shader, FILE* log)
     {
-        if (device || !value || !shader || !log || motionDescription.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-            depthDescription.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !motionDescription.Width ||
-            motionDescription.Width > 32768 || !motionDescription.Height || motionDescription.Height > 32768 ||
-            motionDescription.Width != depthDescription.Width || motionDescription.Height != depthDescription.Height ||
-            motionDescription.Format != DXGI_FORMAT_R16G16B16A16_FLOAT ||
-            (depthDescription.Format != DXGI_FORMAT_R32_FLOAT && depthDescription.Format != DXGI_FORMAT_R32_TYPELESS))
+        if (device || !value || !shader || !log || motionDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            depthDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !motionDesc.Width ||
+            motionDesc.Width > 32768 || !motionDesc.Height || motionDesc.Height > 32768 ||
+            motionDesc.Width != depthDesc.Width || motionDesc.Height != depthDesc.Height ||
+            motionDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT ||
+            (depthDesc.Format != DXGI_FORMAT_R32_FLOAT && depthDesc.Format != DXGI_FORMAT_R32_TYPELESS))
             return false;
         device = value;
         this->logFile = log;
+        this->motionDescription = motionDesc;
+        this->depthDescription = depthDesc;
         const auto createStart = std::chrono::steady_clock::now();
         dumpFolder = std::filesystem::path(shader).parent_path();
-        width = static_cast<unsigned>(motionDescription.Width);
-        height = motionDescription.Height;
+        width = static_cast<unsigned>(motionDesc.Width);
+        height = motionDesc.Height;
         // Size/format evidence for crash attribution: a copy box larger than a
         // bound texture or a format mismatch is the first suspect when a driver
         // reset follows the first full-height frame.
@@ -503,7 +590,7 @@ class PackedMotionGpu
         parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         parameters[1].DescriptorTable = { 1, &range };
         parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        parameters[2].Constants = { 0, 0, 8 };
+        parameters[2].Constants = { 0, 0, 14 };
         D3D12_ROOT_SIGNATURE_DESC rootDescription { 3, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
         ID3DBlob* serialized = nullptr;
         ID3DBlob* errors = nullptr;
@@ -570,6 +657,83 @@ class PackedMotionGpu
         return ready;
     }
 
+    // True while a dump is queued or being written. The frame generation
+    // evaluation checks this before publishing its colour input, so the hot
+    // path pays one relaxed load and nothing else.
+    bool dumpWanted() const noexcept
+    {
+        return dumpPending || dumpRequests.load(std::memory_order_relaxed) != 0;
+    }
+
+    void setDumpColor(ID3D12Resource* resource, D3D12_RESOURCE_STATES state) noexcept
+    {
+        if (!resource)
+            return;
+        // Back buffers alternate, so the identity changes every frame while the
+        // description does not. The readback allocation is keyed on the
+        // description, never on the pointer.
+        dumpColorResource = resource;
+        dumpColorState = state;
+        dumpColorDescription = resource->GetDesc();
+        dumpColorKnown = true;
+    }
+
+    // The colour readback is sized from the resource the frame generation call
+    // actually published, so a format or extent change cannot silently corrupt
+    // the copy. Allocation happens here, on the health thread, never in a
+    // compose record.
+    bool prepareColorReadback()
+    {
+        if (!dumpColorKnown || dumpColorAbandoned)
+            return false;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+        UINT64 bytes = 0;
+        device->GetCopyableFootprints(&dumpColorDescription, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+        if (bytes == 0)
+            return false;
+        if (readback[6])
+        {
+            const auto& allocated = readbackFootprint[6].Footprint;
+            const bool same = readbackBytes[6] == bytes && allocated.Width == footprint.Footprint.Width &&
+                              allocated.Height == footprint.Footprint.Height &&
+                              allocated.Format == footprint.Footprint.Format &&
+                              allocated.RowPitch == footprint.Footprint.RowPitch;
+            if (!same)
+            {
+                dumpColorAbandoned = true;
+                if (logFile)
+                {
+                    std::fprintf(logFile,
+                                 "PACKED_DUMP color skip reason=shape_changed format=%u %ux%u bytes=%llu "
+                                 "allocated=%llu\n",
+                                 unsigned(dumpColorDescription.Format), unsigned(dumpColorDescription.Width),
+                                 unsigned(dumpColorDescription.Height), static_cast<unsigned long long>(bytes),
+                                 static_cast<unsigned long long>(readbackBytes[6]));
+                    std::fflush(logFile);
+                }
+            }
+            return same;
+        }
+        D3D12_HEAP_PROPERTIES properties {};
+        properties.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bufferDescription {};
+        bufferDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bufferDescription.Width = bytes;
+        bufferDescription.Height = 1;
+        bufferDescription.DepthOrArraySize = 1;
+        bufferDescription.MipLevels = 1;
+        bufferDescription.SampleDesc.Count = 1;
+        bufferDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ID3D12Resource* created = nullptr;
+        if (FAILED(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&created))))
+            return false;
+        readback[6] = created;
+        readbackBytes[6] = bytes;
+        readbackFootprint[6] = footprint;
+        return true;
+    }
+
     void dumpSubmitted(ID3D12CommandQueue* queue) noexcept
     {
         if (!dumpPending || !queue || !dumpFence)
@@ -589,13 +753,38 @@ class PackedMotionGpu
             // A counted request is prepared here, on the health thread that owns
             // this call, and only then becomes consumable by the next compose
             // record. The render thread never creates a committed resource.
-            if (dumpRequests.load(std::memory_order_acquire) != 0 && !readbackReady())
+            // The colour buffer is part of the dump when the frame generation
+            // evaluation has named one, so the request waits for it here rather
+            // than producing a frame whose motion cannot be checked against the
+            // image it describes.
+            const bool colorReady = !dumpColorKnown || dumpColorAbandoned || readback[6] != nullptr;
+            if (dumpRequests.load(std::memory_order_acquire) != 0 && (!readbackReady() || !colorReady))
             {
                 if (dumpPrepareAttempts < 4)
                 {
                     ++dumpPrepareAttempts;
-                    prepareReadback();
-                    if (readbackReady())
+                    if (!readbackReady())
+                        prepareReadback();
+                    if (!colorReady)
+                    {
+                        if (!prepareColorReadback())
+                            ++dumpColorFailures;
+                        if (dumpColorFailures >= 4)
+                        {
+                            // Bounded: the colour cannot be copied in this
+                            // session, so the dump is served with the motion,
+                            // depth and packed records and the reason is left
+                            // in the log. Nothing else waits for it.
+                            dumpColorAbandoned = true;
+                            if (logFile)
+                            {
+                                std::fprintf(logFile, "PACKED_DUMP color disabled reason=unavailable attempts=%u\n",
+                                             dumpColorFailures);
+                                std::fflush(logFile);
+                            }
+                        }
+                    }
+                    if (readbackReady() && (!dumpColorKnown || dumpColorAbandoned || readback[6]))
                         dumpPrepareAttempts = 0;
                 }
                 else
@@ -615,6 +804,30 @@ class PackedMotionGpu
             }
             return false;
         }
+        // A pending dump that no fence ever reports must not stay pending
+        // forever: the live channel would wait for a frame it will never read,
+        // and every later compose would keep recording its readback copies.
+        // 2026-09-16: a dump prepared on an entry that retired before this call
+        // saw it produced exactly that silent stall, so the deadline is checked
+        // before any fence reasoning.
+        {
+            const auto since = dumpPendingSinceMs.load(std::memory_order_acquire);
+            if (since != 0 && steadyNowMs() - since > 15000)
+            {
+                static std::atomic<unsigned> stale { 0 };
+                if (logFile && stale.fetch_add(1, std::memory_order_relaxed) < 8)
+                {
+                    std::fprintf(logFile, "PACKED_DUMP aborted reason=stale serial=%u frame=%u age_ms=%llu\n",
+                                 dumpSerial, dumpFrame,
+                                 static_cast<unsigned long long>(steadyNowMs() - since));
+                    std::fflush(logFile);
+                }
+                dumpPending = false;
+                dumpComposeValue = 0;
+                dumpPendingSinceMs.store(0, std::memory_order_release);
+                return false;
+            }
+        }
         if (!readback[0] || !readback[1])
             return false;
         // The readback copies are recorded into the compose list, so the
@@ -625,7 +838,14 @@ class PackedMotionGpu
         if (completion == nullptr)
             return false;
         const auto completed = completion->GetCompletedValue();
-        if (completed == UINT64_MAX || (dumpComposeValue != 0 && completed < dumpComposeValue))
+        const bool composeDone = completed != UINT64_MAX && (dumpComposeValue == 0 || completed >= dumpComposeValue);
+        // The copies are executed by the frame generation queue, which signals
+        // dumpFence after them on every present. That signal is an independent
+        // completion proof, and it is the one that survives a compose context
+        // that was reset or replaced between the recording and this call.
+        const bool queueDone = dumpFence != nullptr && dumpValue != 0 &&
+                               dumpFence->GetCompletedValue() >= dumpValue;
+        if (!composeDone && !queueDone)
         {
             // Abandon a dump whose compose never completes. Keeping it pending
             // records another copy set into every later compose and leaves the
@@ -660,13 +880,25 @@ class PackedMotionGpu
             }
             return false;
         }
-        void* data[6] {};
-        for (unsigned i = 0; i < 6; ++i)
+        const bool color = dumpColorCopied && readback[6] != nullptr;
+        void* data[7] {};
+        for (unsigned i = 0; i < (color ? 7u : 6u); ++i)
         {
             if (!readback[i])
                 continue;
-            if (FAILED(readback[i]->Map(0, nullptr, &data[i])) || !data[i])
+            const auto mapped = readback[i]->Map(0, nullptr, &data[i]);
+            if (FAILED(mapped) || !data[i])
             {
+                // Silent before 2026-09-16: a failed map cleared the pending
+                // dump with no line, so the live channel timed out with no
+                // reason attached to the frame it had asked for.
+                static std::atomic<unsigned> mapFailures { 0 };
+                if (logFile && mapFailures.fetch_add(1, std::memory_order_relaxed) < 8)
+                {
+                    std::fprintf(logFile, "PACKED_DUMP aborted reason=map_failed index=%u hr=0x%08lx serial=%u frame=%u\n",
+                                 i, static_cast<unsigned long>(mapped), dumpSerial, dumpFrame);
+                    std::fflush(logFile);
+                }
                 for (unsigned j = 0; j < i; ++j)
                     if (readback[j])
                         readback[j]->Unmap(0, nullptr);
@@ -694,6 +926,12 @@ class PackedMotionGpu
             writeMotion(base + L"-original-mv.ppm", static_cast<const std::byte*>(data[3]));
             writeDepth(base + L"-original-depth.ppm", static_cast<const std::byte*>(data[4]));
             writePacked(base + L"-packed.ppm", static_cast<const std::byte*>(data[5]));
+            const bool rawWritten = Glass::WritePackedRecord64((base + L"-packrec.bin").c_str(),
+                static_cast<const std::byte*>(data[5]), static_cast<std::size_t>(readbackBytes[5]),
+                width, height, dumpSerial, dumpFrame);
+            if (logFile)
+                std::fprintf(logFile, "PACKED_RAW %s serial=%u frame=%u path=%ls-packrec.bin\n",
+                    rawWritten ? "written" : "failed", dumpSerial, dumpFrame, base.c_str());
             WriteMotion32F((base + L"-original-mv.f32").c_str(),
                            readbackRow(static_cast<const std::byte*>(data[3]), 0, 0), width, height, motionStride,
                            dumpSerial, dumpFrame);
@@ -701,15 +939,25 @@ class PackedMotionGpu
         writeSamples(base + L".txt", static_cast<const std::byte*>(data[0]), static_cast<const std::byte*>(data[1]),
                      static_cast<const std::byte*>(data[2]), static_cast<const std::byte*>(data[3]),
                      static_cast<const std::byte*>(data[4]));
-        for (unsigned i = 0; i < 6; ++i)
+        if (color)
+        {
+            // The colour the generated frames have to match. Written as a PPM
+            // so the motion images and the scene can be compared without a
+            // decoder for the game's own container.
+            writeColor(base + L"-color.ppm", static_cast<const std::byte*>(data[6]));
+        }
+        for (unsigned i = 0; i < 7; ++i)
             if (readback[i])
                 readback[i]->Unmap(0, nullptr);
         if (logFile)
         {
-            std::fprintf(logFile, "PACKED_DUMP written serial=%u frame=%u path=%ls\n", dumpSerial, dumpFrame,
-                         base.c_str());
+            std::fprintf(logFile, "PACKED_DUMP written serial=%u frame=%u color=%u format=%u %ux%u path=%ls\n",
+                         dumpSerial, dumpFrame, color ? 1u : 0u, color ? unsigned(dumpColorDescription.Format) : 0u,
+                         color ? unsigned(dumpColorDescription.Width) : 0u,
+                         color ? unsigned(dumpColorDescription.Height) : 0u, base.c_str());
             std::fflush(logFile);
         }
+        dumpColorCopied = false;
         dumpPending = false;
         dumpComposeValue = 0;
         dumpPendingSinceMs.store(0, std::memory_order_release);
@@ -764,9 +1012,9 @@ class PackedMotionGpu
     ID3D12Fence* composeFenceHandle() const { return composeContexts[composeActive].fence; }
     std::uint64_t composeForced() const { return composeForcedReleases; }
     // Teardown gate: true only when no compose list of this object can still be
-    // executing on the GPU. A submission whose completion never arrives would
-    // otherwise block admission forever, so past the driver reset window the
-    // outputs are released with a counted, logged escape.
+    // executing on the GPU. Elapsed time is not completion evidence. Missing
+    // signals and device-removal sentinels retain ownership until the host
+    // performs explicit device teardown; ordinary retirement must keep waiting.
     bool drained()
     {
         bool complete = true;
@@ -782,12 +1030,6 @@ class PackedMotionGpu
                     context.pending = false;
                     continue;
                 }
-            }
-            if (std::chrono::steady_clock::now() - context.submittedAt > std::chrono::seconds(5))
-            {
-                context.pending = false;
-                ++composeForcedReleases;
-                continue;
             }
             complete = false;
         }
@@ -810,10 +1052,21 @@ class PackedMotionGpu
         }
     }
 
+    // Frame generation call phase of the compose being submitted. Diagnostic
+    // only: the values are printed next to the jitter pair so one delivered term
+    // can be attributed to one generated-frame slot. The default describes an
+    // evaluation with no provider frame token, which is what the offline tests
+    // and the single-consumer paths drive.
+    struct ComposeMark
+    {
+        unsigned multiFrameIndex = 0, multiFrameCount = 0;
+        std::uint64_t fgFrame = UINT64_MAX;
+    };
+
     bool submitCompose(ID3D12CommandQueue* queue, const PackedMotionFrame& packed, ID3D12Resource* originalMotion,
                        ID3D12Resource* originalDepth, D3D12_RESOURCE_STATES motionState,
-                       D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, Controls controls,
-                       GpuTimer* timer)
+                       D3D12_RESOURCE_STATES depthState, float scaleX, float scaleY, float jitterX, float jitterY,
+                       Controls controls, GpuTimer* timer, ComposeMark mark = {})
     {
         if (!queue)
         {
@@ -863,19 +1116,16 @@ class PackedMotionGpu
             ComposePhaseScope phase(ComposeRecordTiming(), logFile, "record", packed.frame, rows);
             const bool dispatched =
                 dispatch(context.list, packed, originalMotion, originalDepth, motionState, depthState, scaleX, scaleY,
-                         controls);
-            const bool recorded =
-                dispatched &&
-                (!controls.packedWriteBack ||
-                 writeBack(context.list, originalMotion, originalDepth, motionState, depthState, rows));
+                         jitterX, jitterY, controls, mark);
+            // FG-only policy: the game's motion and depth textures are also read
+            // by DLSS Super Resolution, Ray Reconstruction and the ray traced
+            // passes, so this path never writes them. The correction reaches the
+            // generator only through the DLSS-G parameter substitution.
+            const bool recorded = dispatched;
             if (timing)
                 timer->end(context.list, timing);
             if (!recorded)
-            {
-                if (dispatched)
-                    noteComposeSkip("writeback");
                 return false;
-            }
             if (FAILED(context.list->Close()))
             {
                 noteComposeSkip("close");
@@ -908,8 +1158,8 @@ class PackedMotionGpu
             timer->submitted(context.list, queue, context.fence, context.value);
         if (controls.trace && logFile && TraceWanted())
         {
-            std::fprintf(logFile, "TRACE_COMPOSE queue=%p frame=%u rows=%u writeback=%u\n", queue, packed.frame,
-                         (std::min)(height, (std::max)(1u, controls.packedRows)), controls.packedWriteBack ? 1u : 0u);
+            std::fprintf(logFile, "TRACE_COMPOSE queue=%p frame=%u rows=%u writeback=0\n", queue, packed.frame,
+                         (std::min)(height, (std::max)(1u, controls.packedRows)));
             std::fflush(logFile);
         }
         return true;
@@ -1115,6 +1365,83 @@ class PackedMotionGpu
         std::fclose(file);
     }
 
+    // The frame generation evaluation's own colour. Its format is the game's,
+    // so the writer covers the encodings the Streamline path has published and
+    // names the one it could not read instead of writing a file whose channels
+    // mean nothing.
+    void writeColor(const std::wstring& path, const std::byte* data)
+    {
+        FILE* file = _wfopen(path.c_str(), L"wb");
+        if (!file)
+            return;
+        const auto colorWidth = unsigned(dumpColorDescription.Width);
+        const auto colorHeight = unsigned(dumpColorDescription.Height);
+        std::fprintf(file, "P6\n%u %u\n255\n", colorWidth, colorHeight);
+        const auto stride = readbackFootprint[6].Footprint.RowPitch;
+        const auto offset = readbackFootprint[6].Offset;
+        unsigned unknownFormat = 0;
+        for (unsigned y = 0; y < colorHeight; ++y)
+        {
+            const auto* row = data + offset + UINT64(y) * stride;
+            for (unsigned x = 0; x < colorWidth; ++x)
+            {
+                std::byte pixel[3] { std::byte(128), std::byte(128), std::byte(128) };
+                switch (dumpColorDescription.Format)
+                {
+                case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+                case DXGI_FORMAT_R8G8B8A8_UNORM:
+                case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                    pixel[0] = row[x * 4 + 0];
+                    pixel[1] = row[x * 4 + 1];
+                    pixel[2] = row[x * 4 + 2];
+                    break;
+                case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+                case DXGI_FORMAT_B8G8R8A8_UNORM:
+                case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                    pixel[0] = row[x * 4 + 2];
+                    pixel[1] = row[x * 4 + 1];
+                    pixel[2] = row[x * 4 + 0];
+                    break;
+                case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+                case DXGI_FORMAT_R10G10B10A2_UNORM:
+                {
+                    unsigned value = 0;
+                    std::memcpy(&value, row + x * 4, sizeof(value));
+                    pixel[0] = std::byte((value & 0x3ffu) >> 2);
+                    pixel[1] = std::byte(((value >> 10) & 0x3ffu) >> 2);
+                    pixel[2] = std::byte(((value >> 20) & 0x3ffu) >> 2);
+                    break;
+                }
+                case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+                case DXGI_FORMAT_R16G16B16A16_FLOAT:
+                {
+                    const auto* half = reinterpret_cast<const unsigned short*>(row + x * 8);
+                    pixel[0] = toByte(halfToFloat(half[0]) * 255.f);
+                    pixel[1] = toByte(halfToFloat(half[1]) * 255.f);
+                    pixel[2] = toByte(halfToFloat(half[2]) * 255.f);
+                    break;
+                }
+                default:
+                    if (unknownFormat == 0)
+                        ++unknownFormat;
+                    break;
+                }
+                std::fwrite(pixel, 1, 3, file);
+            }
+        }
+        std::fclose(file);
+        if (unknownFormat != 0 && logFile)
+        {
+            static std::atomic<unsigned> logged { 0 };
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 4)
+            {
+                std::fprintf(logFile, "PACKED_DUMP color reason=unknown_format format=%u\n",
+                             unsigned(dumpColorDescription.Format));
+                std::fflush(logFile);
+            }
+        }
+    }
+
     // Engine coverage image: which pixels carry an object record, tinted by
     // object id and brightened by the depth key.
     void writePacked(const std::wstring& path, const std::byte* data)
@@ -1138,7 +1465,11 @@ class PackedMotionGpu
             {
                 const auto record = row[x];
                 const auto id = unsigned(record & 0x7fffu);
-                const auto depthKey = unsigned((record >> 46) & 0x3ffffu);
+                // The top bit of the 18-bit high key is the coverage class the
+                // capture set from the material opacity threshold; the low 17
+                // bits are the depth key.
+                const auto highKey = unsigned((record >> 46) & 0x3ffffu);
+                const auto depthKey = highKey & 0x1ffffu;
                 std::byte pixel[3] { std::byte(0), std::byte(0), std::byte(0) };
                 if (id)
                 {
@@ -1156,7 +1487,7 @@ class PackedMotionGpu
                     const auto hue = unsigned((id * 2654435761u) >> 24) & 0xffu;
                     pixel[0] = static_cast<std::byte>(64 + ((hue * 3) & 0xbf));
                     pixel[1] = static_cast<std::byte>(64 + ((hue * 5) & 0xbf));
-                    pixel[2] = static_cast<std::byte>(64 + (depthKey * 255u / 262143u));
+                    pixel[2] = static_cast<std::byte>(64 + (depthKey * 255u / 131071u));
                 }
                 std::fwrite(pixel, 1, 3, file);
             }
@@ -1174,11 +1505,51 @@ class PackedMotionGpu
             return;
         std::fprintf(file, "serial=%u frame=%u size=%ux%u engine_covered_pixels=%u engine_inputs=%u\n", dumpSerial,
                      dumpFrame, width, height, packedCovered, originalMotionData && originalDepthData ? 1u : 0u);
+        // The jitter pair of the dumped frame. Modes 1/2 use the previous one,
+        // modes 3/4 the current one, so the residual offset of a dump names the
+        // term that has to be removed.
+        std::fprintf(file, "jitter=(%.6f,%.6f) previous_jitter=(%.6f,%.6f) mode=%u gain=%.2f\n", dumpJitterX,
+                     dumpJitterY, dumpPreviousJitterX, dumpPreviousJitterY, lastJitterMode, lastJitterGain);
+        // The colour half of the frame this dump describes. Zero means the
+        // motion records stand alone, which is the pre-2026-09-19 shape of
+        // every earlier series.
+        std::fprintf(file, "color=%u format=%u extent=%ux%u\n", dumpColorCopied ? 1u : 0u,
+                     unsigned(dumpColorDescription.Format), unsigned(dumpColorDescription.Width),
+                     unsigned(dumpColorDescription.Height));
         if (counterData)
         {
             const auto* value = reinterpret_cast<const unsigned*>(counterData);
             std::fprintf(file, "dispatched_pixels=%u packed_pixels=%u edge_pixels=%u interior_pixels=%u\n", value[0],
                          value[1], value[2], value[3]);
+            // 2026-09-17 contamination audit: the material alpha of every packed
+            // pixel and what the compose did with it. The opacity buckets are
+            // <0.25, <0.5, <0.75 and >=0.75 of the packed pixels. The apply
+            // buckets are not covered, boundary band applied below the interior
+            // threshold, boundary take and interior take; their sum is the
+            // packed pixel count.
+            std::fprintf(file, "opacity_buckets=%u/%u/%u/%u apply_buckets=%u/%u/%u/%u\n", value[4], value[5],
+                         value[6], value[7], value[8], value[9], value[10], value[11]);
+            // Diagnostic engine-proximity gate: how many already-selected pixels
+            // kept the engine's own motion and depth, and the radius that did
+            // it. Slot 12 is written only while the gate is on, so a gate-off
+            // capture reports zero. The value is stable while the gate is off,
+            // which keeps the C22 flip comparison usable.
+            std::fprintf(file, "gate_skip=%u gate_px=%.4f\n", value[12], lastEngineGatePx);
+            // Diagnostic depth route of the dumped compose: 1 means the motion
+            // was substituted while the engine's depth under it stayed, and
+            // depth_sub counts the pixels whose depth the compose wrote (slot
+            // 13, zero for every frame of a depthkeep capture).
+            std::fprintf(file, "depthkeep=%u depth_sub=%u\n", lastDepthKeep ? 1u : 0u, value[13]);
+            // Simultaneous stripe A/B of the dumped compose (slot 14, byte 56).
+            // stripe_skip counts the pixels the coverage rule had selected and
+            // the stripe left on the engine's value: the delivered count of this
+            // frame is edge_pixels + interior_pixels - stripe_skip. Zero on every
+            // path without the stripe, so an earlier capture keeps its meaning.
+            // stripe names bit 5 of the mode word the compose handed the shader;
+            // the dump also prints the whole word so a capture can be attributed
+            // without the live status snapshot.
+            std::fprintf(file, "stripes=%u stripe_skip=%u debug_mode=%u\n",
+                         (lastDebugMode & 32u) ? 1u : 0u, value[14], lastDebugMode);
         }
         if (packedMotionPixels)
             std::fprintf(file,
@@ -1217,47 +1588,11 @@ class PackedMotionGpu
     }
 
   public:
-    // Integration without foreign resources: write the composed motion/depth
-    // back into the game's own FG inputs. Both targets are already in
-    // COPY_DEST, the state the FG boundary hands them over in.
-    bool writeBack(ID3D12GraphicsCommandList* command, ID3D12Resource* targetMotion, ID3D12Resource* targetDepth,
-                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState, unsigned rows)
-    {
-        if (!command || !targetMotion || !targetDepth || !motion || !depth)
-            return false;
-        transition(command, motion, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        transition(command, depth, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        if (motionState != D3D12_RESOURCE_STATE_COPY_DEST)
-            transition(command, targetMotion, motionState, D3D12_RESOURCE_STATE_COPY_DEST);
-        if (depthState != D3D12_RESOURCE_STATE_COPY_DEST)
-            transition(command, targetDepth, depthState, D3D12_RESOURCE_STATE_COPY_DEST);
-        // Only the rows the shader composed can differ from the engine's own
-        // inputs; copying the rest is pure bandwidth and would also clobber
-        // them with this module's scratch texture.
-        const unsigned copyRows = (std::min)(rows ? rows : height, height);
-        const D3D12_BOX box { 0, 0, 0, width, copyRows, 1 };
-        D3D12_TEXTURE_COPY_LOCATION source {}, target {};
-        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        source.pResource = motion;
-        target.pResource = targetMotion;
-        command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
-        source.pResource = depth;
-        target.pResource = targetDepth;
-        command->CopyTextureRegion(&target, 0, 0, 0, &source, &box);
-        if (motionState != D3D12_RESOURCE_STATE_COPY_DEST)
-            transition(command, targetMotion, D3D12_RESOURCE_STATE_COPY_DEST, motionState);
-        if (depthState != D3D12_RESOURCE_STATE_COPY_DEST)
-            transition(command, targetDepth, D3D12_RESOURCE_STATE_COPY_DEST, depthState);
-        transition(command, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        return true;
-    }
-
     bool dispatch(ID3D12GraphicsCommandList* command, const PackedMotionFrame& packed,
                   ID3D12Resource* originalMotion, ID3D12Resource* originalDepth,
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES depthState,
-                  float scaleX, float scaleY, Controls controls)
+                  float scaleX, float scaleY, float jitterX, float jitterY, Controls controls,
+                  ComposeMark mark = {})
     {
         lastScaleX = scaleX;
         lastScaleY = scaleY;
@@ -1343,19 +1678,44 @@ class PackedMotionGpu
             unsigned width, height;
             float scaleX, scaleY;
             unsigned edgeWidth;
-            float interiorStrength;
-            unsigned debug, reserved;
-        } constants { width, height, scaleX, scaleY, (std::min)(controls.edgeWidth, 4u), controls.coverage(),
-                       (dumpRequests.load(std::memory_order_relaxed) ? 1u : 0u) |
-                           (controls.packedSkipRead ? 2u : 0u),
-                       0 };
-        static_assert(sizeof(Constants) == 32);
+            // 0..1. Covered pixels whose material opacity reaches this value
+            // take the object motion and depth. Everything else keeps the
+            // engine's value.
+            float opacityThreshold;
+            unsigned debug, jitterMode;
+            float jitterX, jitterY;
+            float previousJitterX, previousJitterY;
+            float jitterGain;
+            // Engine-proximity gate radius in pixels (0 with the gate disabled).
+            // Bit 4 of the mode word above keeps the engine's depth under a
+            // substituted motion (live diagnostic). Keeps the block at 56 bytes.
+            float gatePx;
+            // The capture endpoint carries the frame-to-frame projection term,
+            // so the product default compose is mode 0 (no term) at gain 100 and
+            // the jitter mode below is a diagnostic. The engine's own motion is
+            // never read or written by this block.
+        };
+        // One named value for the shader's mode word: the dump header reports
+        // the same word, so a capture names the diagnostic it measured.
+        const unsigned debugMode = (dumpRequests.load(std::memory_order_relaxed) ? 1u : 0u) |
+                                   (controls.packedSkipRead ? 2u : 0u) | (controls.zeroMotion ? 4u : 0u) |
+                                   (controls.engineGate ? 0u : 8u) | (DepthKeepEnabled() ? 16u : 0u) |
+                                   (StripeProbeEnabled() ? 32u : 0u);
+        lastDebugMode = debugMode;
+        const Constants constants { width, height, scaleX, scaleY, (std::min)(controls.edgeWidth, 4u),
+                       controls.opacityThreshold(), debugMode,
+                       (std::min)(controls.jitterMode, 7u), jitterX, jitterY,
+                       jitterHistoryValid ? previousJitterX : jitterX,
+                       jitterHistoryValid ? previousJitterY : jitterY,
+                       float((std::min)(controls.jitterGain, 255u)) / 100.f,
+                       controls.engineGatePx() };
+        static_assert(sizeof(Constants) == 56);
         const auto packedSlot = packedView(packed.resource);
         command->SetDescriptorHeaps(1, &heap);
         command->SetComputeRootSignature(root);
         command->SetComputeRootDescriptorTable(0, gpu(packedSlot));
         command->SetComputeRootDescriptorTable(1, gpu(kPackedViewCount));
-        command->SetComputeRoot32BitConstants(2, 8, &constants, 0);
+        command->SetComputeRoot32BitConstants(2, 14, &constants, 0);
         command->SetPipelineState(pipeline);
         // The packed raster writes this buffer as a UAV/ROV during the draw, so
         // the compute read needs an explicit UAV barrier. Missing it is the
@@ -1382,7 +1742,7 @@ class PackedMotionGpu
         command->ResourceBarrier(1, &counterBarrier);
         // Staged coverage: run the real dispatch over the configured top rows so
         // a pathological cost cannot time out the GPU; the rest of the frame
-        // keeps the copied original motion. Raise GlassFG/PackedRows after a
+        // keeps the copied original motion. Raise GlassFG/ComposeRows after a
         // clean run; the INI and settings UI control this without a rebuild.
         const auto rows = (std::min)(height, (std::max)(1u, controls.packedRows));
         // Isolation: the copies and the swap stay, only the compute dispatch is
@@ -1454,6 +1814,26 @@ class PackedMotionGpu
                 if (depthState != D3D12_RESOURCE_STATE_COPY_SOURCE)
                     transition(command, originalDepth, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState);
             }
+            // The frame's colour, so the motion the compose wrote can be read
+            // against the image it describes. The resource and its state come
+            // from the frame generation evaluation itself, and the copy only
+            // happens while a dump has been requested.
+            dumpColorCopied = dumpColorKnown && !dumpColorAbandoned && readback[6] != nullptr &&
+                              dumpColorResource != nullptr;
+            if (dumpColorCopied)
+            {
+                if (dumpColorState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                    transition(command, dumpColorResource, dumpColorState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION source {}, target {};
+                source.pResource = dumpColorResource;
+                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                target.pResource = readback[6];
+                target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                target.PlacedFootprint = readbackFootprint[6];
+                command->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+                if (dumpColorState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+                    transition(command, dumpColorResource, D3D12_RESOURCE_STATE_COPY_SOURCE, dumpColorState);
+            }
             // Engine coverage: the packed object records themselves.
             transition(command, packed.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                        D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1461,6 +1841,12 @@ class PackedMotionGpu
             transition(command, packed.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             dumpFrame = packed.frame;
+            // The jitter pair belongs to the captured frame: the offline
+            // residual has to be attributable to one of the two terms.
+            dumpJitterX = jitterX;
+            dumpJitterY = jitterY;
+            dumpPreviousJitterX = previousJitterX;
+            dumpPreviousJitterY = previousJitterY;
             dumpRequests.fetch_sub(1, std::memory_order_relaxed);
             dumpPending = true;
             dumpPendingSinceMs.store(steadyNowMs(), std::memory_order_release);
@@ -1497,12 +1883,53 @@ class PackedMotionGpu
         transition(command, depth, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         transition(command, selection, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // Diagnostic: a dump can only be read back every 36-37 frames, so its
+        // header cannot say which (jitter, previous) pair produced a captured
+        // vector. One line per compose carries that pair for the frame number the
+        // dump header reports, which is what separates a wrong frame offset from
+        // a wrong jitter term. Flushed every 32 lines: the line has to be
+        // readable while the field is still running, but one flush per compose
+        // would be the dominant cost of the path being measured.
+        if (controls.jitterLog && logFile)
+        {
+            static std::atomic<unsigned> jitterLines { 0 };
+            std::fprintf(logFile, "PACKED_JITTER frame=%u j=%.6f,%.6f p=%.6f,%.6f mode=%u gain=%.3f\n", packed.frame,
+                         jitterX, jitterY, jitterHistoryValid ? previousJitterX : jitterX,
+                         jitterHistoryValid ? previousJitterY : jitterY, (std::min)(controls.jitterMode, 7u),
+                         float(std::min(controls.jitterGain, 255u)) / 100.f);
+            // The call phase of the same compose. A separate line on purpose:
+            // the frame reader above is parsed with an end-anchored expression
+            // (.exploratory/scratch/jitterlog_fit_20260918.py:70), so its format
+            // stays byte-identical and the new fields join on `frame`.
+            std::fprintf(logFile, "PACKED_COMPOSE_MARK frame=%u mfidx=%u mfcount=%u fgframe=%llu\n", packed.frame,
+                         mark.multiFrameIndex, mark.multiFrameCount,
+                         static_cast<unsigned long long>(mark.fgFrame));
+            if ((jitterLines.fetch_add(1, std::memory_order_relaxed) & 31u) == 31u)
+                std::fflush(logFile);
+        }
+        // The next compose sees this frame as its predecessor, which is the
+        // frame whose jitter a material-side motion computation misses when it
+        // does not carry the previous projection's sub-pixel offset.
+        previousJitterX = jitterX;
+        previousJitterY = jitterY;
+        jitterHistoryValid = true;
+        lastJitterMode = (std::min)(controls.jitterMode, 7u);
+        lastJitterGain = float(std::min(controls.jitterGain, 255u)) / 100.f;
+        lastEngineGatePx = controls.engineGate ? controls.engineGatePx() : 0.f;
+        lastDepthKeep = DepthKeepEnabled();
         return true;
     }
 
     ID3D12Resource* motionOutput() const { return motionRead; }
     ID3D12Resource* depthOutput() const { return depthRead; }
     ID3D12Resource* selectionOutput() const { return selection; }
+    bool acceptsGuides(const D3D12_RESOURCE_DESC& motionValue, const D3D12_RESOURCE_DESC& depthValue) const
+    {
+        return device != nullptr && motionValue.Width == motionDescription.Width &&
+               motionValue.Height == motionDescription.Height && motionValue.Format == motionDescription.Format &&
+               depthValue.Width == depthDescription.Width && depthValue.Height == depthDescription.Height &&
+               depthValue.Format == depthDescription.Format;
+    }
     void releaseAfterGpuDrain()
     {
         for (auto** resource : { &motion, &depth, &selection, &motionRead, &depthRead })

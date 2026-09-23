@@ -80,8 +80,8 @@ addresses have multiple nonzero owner keys elsewhere in the trace. The array
 source trace has 266 proxy addresses with differing source tuples. Neither
 observation is permission to reuse a pointer as a persistent object ID.
 
-Local artifacts: `work/glass-native-material-v1/timeline-1789222297206303900/`,
-`work/glass-array-source-live-v1/walk-timeline-1/`. Local launch/analyze tools are
+Local artifacts: `glass-native-material-v1/timeline-1789222297206303900/`,
+`glass-array-source-live-v1/walk-timeline-1/`. Local launch/analyze tools are
 `timeline_workflow.py` and `analyze_object_timeline.py`. Raw game data is not
 distributed. Actual object MV and FG correction remain incomplete.
 

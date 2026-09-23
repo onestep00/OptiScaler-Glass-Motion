@@ -103,20 +103,46 @@ void draw(std::uint32_t count, std::uint32_t start)
     auto value = ReadCyberpunkGeometryDraw(callsite, geometry.indexCount, count, 0, 0, start);
     if (!value.objects.empty())
     {
+        const auto shapeBefore = ReadCyberpunkShapeStats();
         const auto shape = ReadCyberpunkMeshShape(value);
         require(shape && shape.vertices == 24 && shape.indices == 60 && shape.streams == 2 &&
                     shape.vertexBuffer == 12 && shape.indexBuffer == 13 && shape.indexOffset == 128 &&
                     shape.streamOffsets[0] == 256 && shape.streamOffsets[1] == 2048,
                 "Actual mesh chunk allocation range mismatch");
+        require(ReadCyberpunkShapeStats().rejected == shapeBefore.rejected,
+                "Accepted mesh read reported as a rejection");
         put(chunkBytes.data(), 7 * 0xf8 + 0xec, std::uint16_t(0));
         require(!ReadCyberpunkMeshShape(value), "Empty vertex allocation admitted");
         put(chunkBytes.data(), 7 * 0xf8 + 0xec, std::uint16_t(24));
         put(chunkBytes.data(), 7 * 0xf8 + 0xe8, std::uint32_t(59));
         require(!ReadCyberpunkMeshShape(value), "Unrelated index count admitted");
         put(chunkBytes.data(), 7 * 0xf8 + 0xe8, std::uint32_t(60));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xcc, std::uint32_t(0));
+        require(!ReadCyberpunkMeshShape(value), "Zero stream count admitted");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xcc, std::uint32_t(2));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xcc, std::uint32_t(6));
+        require(!ReadCyberpunkMeshShape(value), "Stream count above five admitted");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xcc, std::uint32_t(2));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xd0, std::uint8_t(3));
+        require(!ReadCyberpunkMeshShape(value), "Unknown index type admitted");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xd0, std::uint8_t(1));
+        put(chunkBytes.data(), 7 * 0xf8 + 0xd4, std::uint32_t(129));
+        require(!ReadCyberpunkMeshShape(value), "Misaligned index offset admitted");
+        put(chunkBytes.data(), 7 * 0xf8 + 0xd4, std::uint32_t(128));
         put(meshBytes.data(), 0xac, std::uint32_t(7));
         require(!ReadCyberpunkMeshShape(value), "Outside chunk array admitted");
         put(meshBytes.data(), 0xac, std::uint32_t(8));
+        const auto shapeAfter = ReadCyberpunkShapeStats();
+        require(shapeAfter.fields == shapeBefore.fields + 6 && shapeAfter.header == shapeBefore.header + 1 &&
+                    shapeAfter.rejected == shapeBefore.rejected + 7,
+                "Mesh shape rejection reasons not attributed");
+        require(shapeAfter.fieldsVertices == shapeBefore.fieldsVertices + 1 &&
+                    shapeAfter.fieldsIndices == shapeBefore.fieldsIndices + 1 &&
+                    shapeAfter.fieldsStreams == shapeBefore.fieldsStreams + 1 &&
+                    shapeAfter.fieldsStreamRange == shapeBefore.fieldsStreamRange + 1 &&
+                    shapeAfter.fieldsIndexType == shapeBefore.fieldsIndexType + 1 &&
+                    shapeAfter.fieldsIndexOffset == shapeBefore.fieldsIndexOffset + 1,
+                "Field rejection split not attributed");
     }
     observed.assign(value.objects.begin(), value.objects.end());
     observedHeader = value;
@@ -155,7 +181,10 @@ void flush(bool skin = false, std::uint32_t global = UINT32_MAX)
     }
     require(ReadCyberpunkGeometryDraw(callsite, geometry.indexCount, 1, 0, 0, origin).objects.empty(),
             "Mapping escaped the flush callback");
+    const auto scopeBefore = ReadCyberpunkShapeStats();
     require(!ReadCyberpunkMeshShape(observedHeader), "Chunk read escaped draw scope");
+    require(ReadCyberpunkShapeStats().noFlush == scopeBefore.noFlush + 1,
+            "Out-of-scope mesh read not attributed");
 }
 void fixtureRun(void*, void*, void*)
 {
@@ -275,6 +304,9 @@ int main()
 {
     try
     {
+        // The live module keeps the engine hooks idle until the settings layer
+        // enables the correction; the fixture drives them directly.
+        GlassFg::SetHooksIdle(false);
         fixture = std::make_unique<GlassFg::EngineDrawState>();
         fixture->registry = std::make_shared<GlassFg::GeometryObjectRegistry>(8);
         fixture->tick = &tick;

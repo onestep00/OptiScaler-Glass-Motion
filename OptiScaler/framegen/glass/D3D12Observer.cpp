@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "D3D12Observer.h"
 #include "ComputeRecording.h"
+#include "GlassHookProbe.h"
 #include <hooks/Hook_Utils.h>
 #include <detours/detours.h>
 #include <tlhelp32.h>
@@ -45,8 +46,13 @@ template <auto Method> using MethodType = typename rewrite_signature<decltype(Me
 MethodType<&Command::Reset> originalReset = nullptr;
 HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12PipelineState* pipeline)
 {
+    const HookCostScope cost(ObserverHookCost(), true);
     Call call;
-    const auto result = originalReset(command, allocator, pipeline);
+    HRESULT result = E_FAIL;
+    {
+        HookCostPause pause(cost);
+        result = originalReset(command, allocator, pipeline);
+    }
     if (call.active)
         callbacks.reset(callbacks.context, command, SUCCEEDED(result), pipeline);
     return result;
@@ -54,9 +60,11 @@ HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12
 MethodType<&Command::Close> originalClose = nullptr;
 HRESULT WINAPI close(Command* command)
 {
+    const HookCostScope cost(ObserverHookCost(), true);
     Call call(stateTracked(command));
     if (call.active)
         callbacks.mutation(callbacks.context, command);
+    cost.Stop();
     return originalClose(command);
 }
 
@@ -64,9 +72,11 @@ HRESULT WINAPI close(Command* command)
     MethodType<&Class::Name> original##Name = nullptr;                                                                 \
     void WINAPI hook##Name Declaration                                                                                 \
     {                                                                                                                  \
+        const HookCostScope cost(ObserverHookCost(), true);                                          \
         Call call(stateTracked(command));                                                                              \
         if (call.active)                                                                                               \
             callbacks.mutation(callbacks.context, command);                                                            \
+        cost.Stop();                                                                                                   \
         original##Name Arguments;                                                                                      \
     }                                                                                                                  \
     static_assert(std::is_same_v<decltype(&hook##Name), MethodType<&Class::Name>>);
@@ -105,6 +115,7 @@ GLASS_SETTER(SetProgram, ID3D12GraphicsCommandList10,
 MethodType<&Command::ResourceBarrier> originalBarrier = nullptr;
 void WINAPI barrier(Command* command, UINT count, const D3D12_RESOURCE_BARRIER* barriers)
 {
+    const HookCostScope cost(ObserverHookCost(), true);
     bool selected = false;
     constexpr auto read = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -115,13 +126,17 @@ void WINAPI barrier(Command* command, UINT count, const D3D12_RESOURCE_BARRIER* 
                         barriers[i].Transition.StateBefore == D3D12_RESOURCE_STATE_DEPTH_WRITE &&
                         barriers[i].Transition.StateAfter == read;
     Call call(selected);
-    originalBarrier(command, count, barriers);
+    {
+        HookCostPause pause(cost);
+        originalBarrier(command, count, barriers);
+    }
     if (call.active)
         callbacks.barrier(callbacks.context, command, count, barriers);
 }
 MethodType<&ID3D12CommandQueue::ExecuteCommandLists> originalSubmit = nullptr;
 void WINAPI submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands)
 {
+    const HookCostScope cost(ObserverHookCost(), true);
     Call call;
     // Preserve identities through post-submit completion bookkeeping, even if
     // another app thread drops its own reference immediately after submission.
@@ -130,7 +145,10 @@ void WINAPI submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* con
             commands[i]->AddRef();
     if (call.active && callbacks.beforeSubmit)
         callbacks.beforeSubmit(callbacks.context, queue, count, commands);
-    originalSubmit(queue, count, commands);
+    {
+        HookCostPause pause(cost);
+        originalSubmit(queue, count, commands);
+    }
     if (call.active)
     {
         callbacks.submit(callbacks.context, queue, count, commands);
@@ -141,8 +159,13 @@ void WINAPI submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* con
 MethodType<&ID3D12CommandQueue::Signal> originalSignal = nullptr;
 HRESULT WINAPI signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value)
 {
+    const HookCostScope cost(ObserverHookCost(), true);
     Call call;
-    const auto result = originalSignal(queue, fence, value);
+    HRESULT result = E_FAIL;
+    {
+        HookCostPause pause(cost);
+        result = originalSignal(queue, fence, value);
+    }
     if (call.active && SUCCEEDED(result))
         callbacks.signal(callbacks.context, queue, fence, value);
     return result;
@@ -150,8 +173,13 @@ HRESULT WINAPI signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 valu
 MethodType<&ID3D12CommandQueue::Wait> originalWait = nullptr;
 HRESULT WINAPI wait(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value)
 {
+    const HookCostScope cost(ObserverHookCost(), true);
     Call call;
-    const auto result = originalWait(queue, fence, value);
+    HRESULT result = E_FAIL;
+    {
+        HookCostPause pause(cost);
+        result = originalWait(queue, fence, value);
+    }
     if (call.active && SUCCEEDED(result))
         callbacks.wait(callbacks.context, queue, fence, value);
     return result;

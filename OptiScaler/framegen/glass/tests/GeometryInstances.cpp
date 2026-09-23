@@ -4,6 +4,7 @@
 #include "../GeometryCreation.h"
 #include "../GeometryPipelineStream.h"
 #include "../GeometryCommands.h"
+#include "../GlassHookProbe.h"
 #include "../GeometryDrawCapture.h"
 #include "../GeometryCoverageRecorder.h"
 #include "../GeometryCoverageLayout.h"
@@ -281,6 +282,9 @@ int wmain(int argc, wchar_t** argv)
         {
             require(GlassFg::StartGeometryViews(g.d.Get()), "Install render-target descriptor observer");
             require(GlassFg::StartGeometryCommands(g.d.Get()), "Install public command observer");
+            // The production hooks return immediately until the settings layer
+            // enables the correction; the observer fixture has to enable them.
+            GlassFg::SetHooksIdle(false);
         }
         ExperimentDrawCheck experimentCheck;
         ModuleRecorderCheck moduleRecorderCheck;
@@ -645,7 +649,10 @@ int wmain(int argc, wchar_t** argv)
             upload(mappingBuffer.Get(), mapping.data(), sizeof(mapping));
             GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame, 0,
                                                    0, 0, W, H, 0, W,
-                                                   packedMotion ? W * H : CapturePixels, 0 };
+                                                   packedMotion ? W * H : CapturePixels, 0,
+                                                   // Opacity threshold 0: this fixture
+                                                   // keeps every record covered.
+                                                   0.f, 0.f, 0.f, 0.f };
             upload(pixelConstants.Get(), &pc, sizeof(pc));
             const float fc[] { frame * .31f, frame * .023f, frame * -.017f, 0 };
             const UINT current = frame & 1, previous = current ^ 1;
@@ -879,8 +886,12 @@ int wmain(int argc, wchar_t** argv)
                                 const auto my = quantizeMotion(mv[1] * H);
                                 const auto weight = packedFallback ? 0u : static_cast<UINT>(
                                     std::clamp(double(originalPixel[3]), 0.0, 1.0) * 255.0);
-                                const auto encodedDepth = static_cast<UINT>((.4 + object * .03) * 262143.0);
-                                const auto depthKey = 262143u - encodedDepth;
+                                // Key layout: 17 bits of depth with the covered
+                                // class bit on top. This fixture leaves the
+                                // opacity threshold at 0, so every record is
+                                // covered.
+                                const auto encodedDepth = static_cast<UINT>((.4 + object * .03) * 131071.0);
+                                const auto depthKey = (131071u - encodedDepth) | 0x20000u;
                                 const UINT64 candidate = (UINT64(depthKey & 0x3ffff) << 46) |
                                                          (UINT64(UINT(mx) & 0x7ff) << 35) |
                                                          (UINT64(UINT(my) & 0x7ff) << 24) |

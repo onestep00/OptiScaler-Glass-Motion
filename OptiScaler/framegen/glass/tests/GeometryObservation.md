@@ -195,8 +195,8 @@ mesh: chunk zero has 468 indices and an observed pipeline, while chunk one has
 72 indices and pipeline identity zero. Matching source metadata is not complete
 view or lifetime proof. A fresh same-process binding capture saved 148 rows but
 only chunk zero / pipeline 1376, with no GPU copies. The module unloaded cleanly.
-Evidence: `work/glass-multichunk-inventory-v1/analysis.json` and
-`work/glass-missing-chunk-bindings-v1/capture-live/`.
+Evidence: `glass-multichunk-inventory-v1/analysis.json` and
+`glass-missing-chunk-bindings-v1/capture-live/`.
 
 The observation cache previously required enabled depth with ALL writes. This
 excluded read-only pipelines even when the separate material compiler could not
@@ -204,7 +204,7 @@ prepare them. That diagnostic restriction is removed; all existing stage, size,
 entry and byte limits remain. Original-only entries still cannot authorize replay
 or FG substitution. Real independent read-only and depth-disabled PSOs now retain
 their exact depth flags and have no instrumented PSO or extended root. The test
-built with `/O2 /W4 /WX` and passed in `work/glass-observation-general-v1/`.
+built with `/O2 /W4 /WX` and passed in `glass-observation-general-v1/`.
 
 The missing live chunk's descriptor is still unknown, so its rejection is not
 proven to be the depth predicate. Cache exhaustion, unsupported descriptors and
@@ -234,7 +234,7 @@ observes one material failure, then successful vertex-only preparation, unchange
 retained bytes/entry count, unchanged original PS bytes and duplicate suppression.
 It passes with `VERTEX_RECOVERY_OK` and `GEOMETRY_OBSERVATION_OK` under `/O2 /W4 /WX`.
 This compiles real D3D12 PSOs but does not submit game draws or prove live recovery.
-Local binary: `work/glass-observation-general-v1/retry.exe`.
+Local binary: `glass-observation-general-v1/retry.exe`.
 
 ## Batch native preparation
 

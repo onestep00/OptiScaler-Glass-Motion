@@ -347,7 +347,7 @@ PID 24404에서 CPU 메타데이터만 기록하는 한 곳의 진단 훅으로 
 
 ## 근거와 재실행
 
-실행 파일 및 두 원본 캐시 SHA-256은 [완료 계획](CompletionPlan.md)에 기록했다. 실행 시 동일성을 다시 검증한다. 바이너리, 원본 셰이더, 캡처는 저장소에 배포하지 않는다. 로컬 `work/glass-native-material-v1/` 자료:
+실행 파일 및 두 원본 캐시 SHA-256은 [완료 계획](CompletionPlan.md)에 기록했다. 실행 시 동일성을 다시 검증한다. 바이너리, 원본 셰이더, 캡처는 저장소에 배포하지 않는다. 로컬 `glass-native-material-v1/` 자료:
 
 - `merge_native_velocity_inventory.py`, `native-velocity-union/index.json`: 기존 출력 연결과 추가 PS 의존성의 합집합. 단순 슬롯 번호로 추가하지 않음.
 - `native-previous-supply-union.json`, `native-projection-operands-union.json`: 899 VS의 입력·주소·모디파이어 및 투영 비교.

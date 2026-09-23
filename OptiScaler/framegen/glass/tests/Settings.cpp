@@ -21,7 +21,7 @@ void require(bool ok, const char* what)
 static void healthChecks()
 {
     GlassFg::GeometryHealth value;
-    value.capabilities = 127;
+    value.capabilities = 255;
     value.sampledMs = 1000;
     value.counts[GlassFg::GeometryPackets] = 100;
     value.counts[GlassFg::GeometryCompiled] = 5;
@@ -66,10 +66,10 @@ int wmain(int argc, wchar_t** argv)
         auditDirectory = std::filesystem::absolute(argv[1]);
         require(std::filesystem::create_directory(auditDirectory), "fresh audit directory required");
         auto initial = GlassFg::ReadControls();
-        require(!initial.enabled && initial.strength == 100 && initial.measureGpuTime, "defaults");
+        require(!initial.enabled && initial.opacityPercent == 50 && initial.measureGpuTime, "defaults");
         GlassFg::WriteControls({ true, 500 });
         auto current = GlassFg::ReadControls();
-        require(current.enabled && current.strength == 100, "clamp");
+        require(current.enabled && current.opacityPercent == 100, "clamp");
         auto path = GlassFg::settingsPath();
         {
             std::ofstream f(path);
@@ -79,7 +79,7 @@ int wmain(int argc, wchar_t** argv)
         GlassFg::WriteControls({ false, 1 });
         require(GlassFg::load(), "reload");
         current = GlassFg::ReadControls();
-        require(current.enabled && current.strength == 37 && current.measureGpuTime, "round trip");
+        require(current.enabled && current.opacityPercent == 37 && current.measureGpuTime, "round trip");
         // The grouped-array order probe and the packet-order identity switch are
         // separate diagnostics: a live session must be able to turn the probe on
         // without changing which element key the correction uses.
@@ -100,10 +100,89 @@ int wmain(int argc, wchar_t** argv)
             require(GlassFg::save(local), "save packet-local order");
         }
         require(GlassFg::load() && GlassFg::ReadControls().packetLocalOrder, "packet-local order round trip");
+        // The capture path computes its object motion in jittered projection
+        // space, so delivery subtracts the capture endpoint delta and the
+        // compose term stays at zero (mode 0, gain 100). The value is fixed in
+        // code: an old INI entry or the retired marker cannot select a
+        // diagnostic mode, because a stale file once forced the compose term
+        // back on and re-added about +1.0*J per frame. Only the live control
+        // channel (glass-debug.request) opens the diagnostic modes.
+        {
+            auto defaults = GlassFg::ReadControls();
+            require(defaults.jitterMode == 0 && defaults.jitterGain == 100, "jitter delivery default");
+            auto stored = defaults;
+            stored.jitterMode = 5;
+            stored.jitterGain = 100;
+            require(GlassFg::save(stored), "save a diagnostic jitter mode");
+            CSimpleIniA file;
+            require(file.LoadFile(path.c_str()) >= 0 &&
+                        !file.KeyExists("GlassFG", "JitterCompensation") &&
+                        !file.KeyExists("GlassFG", "JitterGainPercent"),
+                    "jitter keys are not written");
+            require(GlassFg::load() && GlassFg::ReadControls().jitterMode == 0 &&
+                        GlassFg::ReadControls().jitterGain == 100,
+                    "a file cannot select a delivery mode");
+            file.SetLongValue("GlassFG", "JitterCompensation", 3);
+            file.SetLongValue("GlassFG", "JitterGainPercent", 100);
+            require(file.SaveFile(path.c_str()) >= 0, "write legacy jitter keys");
+            require(GlassFg::load() && GlassFg::ReadControls().jitterMode == 0 &&
+                        GlassFg::ReadControls().jitterGain == 100,
+                    "legacy jitter keys cannot select a delivery mode");
+            const auto marker = GlassFg::settingsPath().parent_path() / L"glass-jitter.on";
+            {
+                std::ofstream f(marker);
+                f << "diagnostic\n";
+            }
+            require(GlassFg::load() && GlassFg::ReadControls().jitterMode == 0 &&
+                        GlassFg::ReadControls().jitterGain == 100,
+                    "the retired marker cannot select a delivery mode");
+            std::error_code cleanup;
+            std::filesystem::remove(marker, cleanup);
+        }
         require(GlassFg::save({ true, 37 }) && GlassFg::load(), "restore array probe");
         require(!GlassFg::ReadControls().arrayProbe && GlassFg::ReadControls().groupedOrder &&
                     !GlassFg::ReadControls().packetLocalOrder,
                 "array probe restored");
+        // Renamed options: the current names round trip, the old spellings still
+        // load, and saving leaves exactly one name owning each value.
+        {
+            auto renamed = GlassFg::ReadControls();
+            renamed.farSkipStep = 6;
+            renamed.packedRows = 900;
+            renamed.arrayMapping = true;
+            require(GlassFg::save(renamed), "save renamed options");
+            require(GlassFg::load(), "reload renamed options");
+            auto loaded = GlassFg::ReadControls();
+            require(loaded.farSkipStep == 6 && loaded.packedRows == 900 && loaded.arrayMapping,
+                    "renamed option round trip");
+            CSimpleIniA renamedIni;
+            require(renamedIni.LoadFile(path.c_str()) >= 0, "reread renamed options");
+            require(renamedIni.GetLongValue("GlassFG", "SkipFartherThanMeters", -1) == 150, "far meters stored");
+            require(renamedIni.GetLongValue("GlassFG", "ComposeRows", -1) == 900, "compose rows stored");
+            require(std::string(renamedIni.GetValue("GlassFG", "PackedRows", "")) == "", "legacy rows removed");
+            require(std::string(renamedIni.GetValue("GlassFG", "ArrayMapping", "")) == "",
+                    "legacy array mapping removed");
+        }
+        {
+            std::ofstream f(path);
+            f << "[GlassFG]\nEnabled=true\nPackedRows=777\nGroupedOrder=false\nSkipFartherThanMeters=50\n";
+        }
+        require(GlassFg::load(), "legacy names reload");
+        {
+            auto legacy = GlassFg::ReadControls();
+            require(legacy.packedRows == 777 && !legacy.groupedOrder && legacy.farSkipStep == 2,
+                    "legacy names honored");
+        }
+        require(GlassFg::save({ true, 37 }) && GlassFg::load(), "restore renamed");
+        require(GlassFg::ReadControls().packedRows == 240 && GlassFg::ReadControls().groupedOrder &&
+                    !GlassFg::ReadControls().arrayMapping && GlassFg::ReadControls().farSkipStep == 0,
+                "renamed restored");
+        // The rename blocks rewrote the whole file; restore the unrelated
+        // section and the threshold the read-only check below expects.
+        {
+            std::ofstream f(path);
+            f << "[Unrelated]\nKeep=preserved\n[GlassFG]\nEnabled=true\nInteriorOpacityPercent=37\n";
+        }
         CSimpleIniA ini;
         require(ini.LoadFile(path.c_str()) >= 0, "reread");
         require(std::string(ini.GetValue("Unrelated", "Keep", "")) == "preserved", "other section damaged");
@@ -111,18 +190,20 @@ int wmain(int argc, wchar_t** argv)
         bool denied = GlassFg::save({ false, 99 });
         SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
         require(!denied, "readonly overwrite");
-        require(GlassFg::load() && GlassFg::ReadControls().strength == 37, "failed save changed original");
+        require(GlassFg::load() && GlassFg::ReadControls().opacityPercent == 37, "failed save changed original");
         {
             std::ofstream f(path);
-            f << "[GlassFG]\nEnabled=true\nStrength=-25\n";
+            f << "[GlassFG]\nEnabled=true\nInteriorOpacityPercent=-25\n";
         }
-        require(GlassFg::load() && GlassFg::ReadControls().strength == 0, "negative clamp");
-        require(!GlassFg::ReadControls().active(), "zero active");
+        require(GlassFg::load() && GlassFg::ReadControls().opacityPercent == 0, "negative clamp");
+        // Threshold 0 is a valid request: every covered pixel takes the object
+        // motion, so the correction stays active.
+        require(GlassFg::ReadControls().active(), "zero threshold active");
         {
             std::ofstream f(path);
-            f << "[GlassFG]\nStrength=invalid\n";
+            f << "[GlassFG]\nInteriorOpacityPercent=invalid\n";
         }
-        require(GlassFg::load() && !GlassFg::ReadControls().enabled && GlassFg::ReadControls().strength == 100,
+        require(GlassFg::load() && !GlassFg::ReadControls().enabled && GlassFg::ReadControls().opacityPercent == 50,
                 "malformed fallback");
         GlassFg::WriteControls({ true, 50, true });
         GlassFg::PublishGpuMilliseconds(.123);

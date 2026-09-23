@@ -9,7 +9,11 @@ RWByteAddressBuffer packedMotion : register(u0);
 
 uint64_t packCandidate(uint depth, int motionX, int motionY, uint weight, uint objectId)
 {
-    return ((uint64_t(depth) & 0x3ffff) << 46) |
+    // 17 bits of depth with the covered/uncovered class bit on top: the same
+    // layout the capture's packed store writes, so the reference implements the
+    // identical unsigned max.
+    const uint64_t key = (uint64_t(depth) & 0x1ffffu) | (weight >= 128u ? 0x20000ull : 0ull);
+    return (key << 46) |
            ((uint64_t(uint(motionX) & 0x7ff)) << 35) |
            ((uint64_t(uint(motionY) & 0x7ff)) << 24) |
            ((uint64_t(weight & 0xff)) << 16) |

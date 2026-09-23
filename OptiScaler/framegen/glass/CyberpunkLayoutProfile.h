@@ -76,6 +76,18 @@ inline constexpr Reference arrayReferences[] {
     { 0x264, 0x268, Target::Code },
     { 0x272, 0x276, Target::Code },
 };
+// Grouped instance-array update (mesh vtable +0xf0). Audited body of 730 bytes.
+// Reference 0x1e0 is the element append; the layout cross-checks it against
+// GroupAppend, so a build that inlines or redirects that call fails closed.
+// 0x246 is the container push to 0x3cc59c and must not be used for that check.
+inline constexpr Reference groupedUpdateReferences[] {
+    { 0x1e, 0x22, Target::Code },   { 0x4c, 0x50, Target::Code },   { 0x75, 0x79, Target::Code },
+    { 0xe5, 0xe9, Target::Code },   { 0x143, 0x147, Target::Code }, { 0x1e0, 0x1e4, Target::Code },
+    { 0x246, 0x24a, Target::Code }, { 0x2b9, 0x2bd, Target::Code },
+};
+// Element append into the group's 48-byte container. The audited body has no
+// call rel32, so the whole 176 bytes stay in the hash and no operand is masked.
+inline constexpr std::array<Reference, 0> groupAppendReferences {};
 inline constexpr RelocatableCode::Profile functions[] {
     { 161, 0x8a953f8e5b8de2b7ull, registerReferences }, { 59, 0x6b1d0915dfa05790ull, removeReferences },
     { 521, 0x1114e8e80bbfb0e6ull, updateReferences },   { 1812, 0x1b01b46553f7def1ull, runReferences },
@@ -83,5 +95,7 @@ inline constexpr RelocatableCode::Profile functions[] {
     { 214, 0x8c6d363d91a36eaull, skinnedReferences },   { 219, 0x73cfc17215913d02ull, uploadReferences },
     { 585, 0x62183a4a9eac8718ull, backendReferences },
     { 630, 0x5bccf1fceae351f9ull, arrayReferences },
+    { 730, 0xe2422d46ca6696feull, groupedUpdateReferences },
+    { 176, 0xb576d0760bd1f7e5ull, groupAppendReferences },
 };
 } // namespace GlassFg::CyberpunkProfile

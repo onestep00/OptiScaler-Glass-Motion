@@ -24,7 +24,7 @@ raw-input regressions also passed. This is not a game performance measurement.
 
 ## Live evidence preceding this source change
 
-Local diagnostics in `work/glass-input-words-v1/` are not distributed:
+Local diagnostics in `glass-input-words-v1/` are not distributed:
 
 - Shader evaluation of previous bone data matched 620 original N-1 local vertices
   exactly across four pairs. The engine's current Z input matched the prior X

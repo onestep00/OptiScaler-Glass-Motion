@@ -1,6 +1,7 @@
 #pragma once
 #include "GlassFgPass.h"
 #include "PackedMotionGpu.h"
+#include "PackedRecordingOwners.h"
 
 namespace GlassFg
 {
@@ -32,8 +33,18 @@ class PackedMotionPass
     D3D12_RESOURCE_STATES pendingMotionState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES pendingDepthState = D3D12_RESOURCE_STATE_COMMON;
     float pendingScaleX = 1.f, pendingScaleY = 1.f;
+    // Provider-declared sub-pixel projection jitter of the prepared frame. The
+    // compose records it into its own jitter pair for the compensation modes.
+    float pendingJitterX = 0.f, pendingJitterY = 0.f;
+    // Frame generation call phase of the prepared evaluation: the provider's
+    // MultiFrameIndex/Count and the Streamline frame token. Diagnostic only; the
+    // compose log carries them so a delivered jitter term can be attributed to
+    // one generated-frame slot instead of to the whole engine frame.
+    PackedMotionGpu::ComposeMark pendingMark {};
     Controls pendingControls {};
     bool pendingValid = false;
+    Inputs pendingInputs {};
+    PackedRecordingOwners pendingOwners;
     // Host timer for the deferred compose sample; never owned here.
     GpuTimer* pendingTimer = nullptr;
     // Streamline evaluates the same frame generation inputs once per back-buffer
@@ -46,6 +57,11 @@ class PackedMotionPass
     ID3D12Resource* reuseMotion = nullptr;
     ID3D12Resource* reuseDepth = nullptr;
     bool reuseValid = false;
+    // Second consumer (DLSS-NR). The frame composed inline on the game's own
+    // command list, and the engine pair it was composed from, so the frame
+    // generation substitution of the same frame can reuse it.
+    PackedInlineKey inlineKey {};
+    bool inlineServed = false;
 
   public:
     bool initialize(ID3D12Device* device, const D3D12_RESOURCE_DESC (&descriptions)[3],
@@ -66,7 +82,8 @@ class PackedMotionPass
     }
     PreparedInputs prepare(ID3D12GraphicsCommandList* value, const Inputs& inputs,
                            const PackedMotionFrame& objectFrame, const D3D12_RESOURCE_STATES (&states)[3],
-                           Controls controls, GpuTimer* timer, bool allowAnyState = false)
+                           Controls controls, GpuTimer* timer, bool allowAnyState = false,
+                           std::uint32_t engineFrame = 0)
     {
         if (!initialized || !value || !inputs.valid() || !controls.active() ||
             (!allowAnyState &&
@@ -84,7 +101,8 @@ class PackedMotionPass
         // extending that reuse indefinitely.
         if (inputs.frame == UINT64_MAX)
         {
-            if (!batchReady || untaggedReuse >= 4)
+            if (!batchReady || untaggedReuse >= 4 || !MatchUntaggedFrame(inputs, batch, packed.frame, engineFrame) ||
+                (pendingValid && !pendingOwners.add(value)))
             {
                 invalidateHistory();
                 return {};
@@ -123,6 +141,13 @@ class PackedMotionPass
             invalidateHistory();
             if (!frame || inputs.frame == UINT64_MAX || frame.fgFrame != inputs.frame)
                 return {};
+            // A recorded NR compose is not evidence that its list was submitted
+            // before this FG batch. FG prepares its own ordered compose.
+            if (pendingValid && (pendingFrame.frame != frame.frame ||
+                                 pendingFrame.resource != frame.resource ||
+                                 !inputs.sameRenderedFrame(pendingInputs) ||
+                                 controls.packed() != pendingControls.packed()))
+                return {};
             // Staged activation: the copy+swap contract is exercised first.
             // The full-screen packed compute dispatch is the new GPU work that
             // correlated with driver TDRs on 2026-09-14, so it stays disabled
@@ -136,6 +161,10 @@ class PackedMotionPass
                 return {};
             }
             const bool wasPending = pendingValid;
+            if (!wasPending)
+                pendingOwners.clear();
+            if (!pendingOwners.add(value))
+                return {};
             if (substitutedFrames > composedFrames + 1)
             {
                 static std::atomic<unsigned> stalled { 0 };
@@ -156,12 +185,16 @@ class PackedMotionPass
                 return {};
             }
             pendingFrame = frame;
+            pendingInputs = inputs;
             pendingMotion = inputs.motion;
             pendingDepth = inputs.depth;
             pendingMotionState = states[0];
             pendingDepthState = states[2];
             pendingScaleX = inputs.scaleX;
             pendingScaleY = inputs.scaleY;
+            pendingJitterX = inputs.jitterX;
+            pendingJitterY = inputs.jitterY;
+            pendingMark = { inputs.index, inputs.count, inputs.frame };
             pendingControls = controls;
             pendingTimer = timer;
             pendingValid = true;
@@ -191,6 +224,8 @@ class PackedMotionPass
         }
         else if (batchReady && inputs.sameRenderedFrame(batch))
         {
+            if (pendingValid && !pendingOwners.add(value))
+                return {};
             // The provider evaluates one rendered frame several times: the
             // generated-frame slots and one evaluation per back-buffer list.
             // Every one of them has to read the corrected texture. The first
@@ -221,12 +256,97 @@ class PackedMotionPass
                                     controls.packedLayer ? gpu.selectionOutput() : nullptr);
     }
     std::uint64_t renderedDispatches() const { return dispatches; }
+    // Second consumer entry: compose the frame on the caller's command list.
+    ID3D12Resource* motionOutput() const { return gpu.motionOutput(); }
+    ID3D12Resource* depthOutput() const { return gpu.depthOutput(); }
+    bool composeInline(ID3D12GraphicsCommandList* command, const PackedMotionFrame& frame,
+                       ID3D12Resource* motion, ID3D12Resource* depth, D3D12_RESOURCE_STATES motionState,
+                       D3D12_RESOURCE_STATES depthState, float jitterX, float jitterY, float scaleX, float scaleY,
+                       Controls controls)
+    {
+        if (!initialized || !command || !frame || !motion || !depth || !controls.active() || !controls.nrMotion)
+            return false;
+        // The upscaler can evaluate more than once per frame (one per back
+        // buffer) with the same pair. The first call already recorded the
+        // compose for this frame; a second full-frame dispatch on another list
+        // would write the same textures twice and pay for it.
+        controls.packedSubstitute = true;
+        controls.zeroMotion = false;
+        if (pendingValid)
+            return false;
+        const PackedInlineKey key {command, frame.resource, motion, depth, frame.frame,
+                                   scaleX, scaleY, jitterX, jitterY, controls.packed()};
+        if (inlineServed && inlineKey == key)
+            return true;
+        if (!gpu.acceptsGuides(motion->GetDesc(), depth->GetDesc()))
+        {
+            // The compose textures are built for one guide extent and format. A
+            // different pair cannot be copied or read correctly, and without
+            // this line the skip is indistinguishable from the option being off.
+            static std::atomic<unsigned> shape { 0 };
+            if (auto* log = gpu.logHandle())
+            {
+                if (shape.fetch_add(1, std::memory_order_relaxed) < 4)
+                {
+                    std::fprintf(log, "PACKED_SECOND skip reason=guide_shape\n");
+                    std::fflush(log);
+                }
+            }
+            return false;
+        }
+        // The second consumer reads the whole guide surface. The copy into the
+        // compose textures therefore covers the full frame even while the frame
+        // generation substitution is still staged, and the zero-motion
+        // diagnostic -- which is a frame-generation-only baseline -- must not
+        // empty the guides the neural rendering pass reprojects with.
+        controls.packedSubstitute = true;
+        controls.zeroMotion = false;
+        if (!gpu.recordInline(command, frame, motion, depth, motionState, depthState, scaleX, scaleY, jitterX,
+                              jitterY, controls))
+            return false;
+        inlineKey = key;
+        inlineServed = true;
+        // Bounded attribution: the frame generation reuse of this pair and a
+        // compose that never ran are both silent otherwise.
+        static std::atomic<unsigned> served { 0 };
+        if (auto* log = gpu.logHandle())
+        {
+            if (served.fetch_add(1, std::memory_order_relaxed) < 8)
+            {
+                std::fprintf(log, "PACKED_SECOND serve frame=%u state=%u/%u jitter=%.3f,%.3f scale=%.3f,%.3f\n",
+                             frame.frame, unsigned(motionState), unsigned(depthState), jitterX, jitterY, scaleX,
+                             scaleY);
+                std::fflush(log);
+            }
+        }
+        return true;
+    }
     // Session teardown: a compose prepared for a retired FG command must not be
     // submitted afterwards.
     void cancelPending()
     {
         pendingValid = false;
         pendingTimer = nullptr;
+        pendingOwners.clear();
+        substitutedFrames = composedFrames;
+    }
+    bool pendingFor(const void* value) const { return pendingValid && pendingOwners.contains(value); }
+    void discardRecording(const void* value)
+    {
+        if (inlineKey.command == value)
+        {
+            inlineServed = false;
+            inlineKey = {};
+            gpu.clearInline();
+        }
+        pendingOwners.discard(value);
+        if (pendingValid && pendingOwners.empty())
+            cancelPending();
+        if (command == value)
+        {
+            reuseValid = false;
+            invalidateHistory();
+        }
     }
     // Release gate used by the host before the session resources are freed.
     bool drained() { return gpu.drained(); }
@@ -239,8 +359,10 @@ class PackedMotionPass
     bool reloadShader(const wchar_t* shader, FILE* log) { return gpu.reload(shader, log); }
     // Submit the deferred compose on the FG queue. Called from the host's
     // pre-submit hook after the packed producer wait.
-    bool executePending(ID3D12CommandQueue* queue)
+    bool executePending(ID3D12CommandQueue* queue, const void* submittedCommand)
     {
+        if (pendingValid && !pendingOwners.contains(submittedCommand))
+            return false;
         if (!pendingValid)
         {
             // Bounded attribution: without it "no compose was prepared" and
@@ -259,8 +381,11 @@ class PackedMotionPass
         auto* timer = pendingTimer;
         pendingTimer = nullptr;
         const auto result = gpu.submitCompose(queue, pendingFrame, pendingMotion, pendingDepth, pendingMotionState,
-                                              pendingDepthState, pendingScaleX, pendingScaleY, pendingControls, timer);
-        pendingValid = false;
+                                              pendingDepthState, pendingScaleX, pendingScaleY, pendingJitterX,
+                                              pendingJitterY, pendingControls, timer, pendingMark);
+        cancelPending();
+        // A deferred compose overwrote the output of any earlier NR recording.
+        inlineServed = false;
         if (result)
             ++composedFrames;
         return result;
@@ -268,12 +393,17 @@ class PackedMotionPass
     // Live diagnostics: one-frame motion/depth dump and submit correlation.
     void requestDump() { gpu.requestDump(); }
     bool serviceDump() { return gpu.serviceDump(); }
+    // The colour resource the frame generation evaluation published, plus the
+    // state it declared for it. Recorded on every evaluation and read only
+    // while a dump is outstanding, so the frame path pays two stores.
+    void setDumpColor(ID3D12Resource* resource, D3D12_RESOURCE_STATES state) { gpu.setDumpColor(resource, state); }
     void dumpSubmitted(ID3D12CommandQueue* queue) { gpu.dumpSubmitted(queue); }
     ID3D12Resource* selection() const { return gpu.selectionOutput(); }
     void releaseAfterGpuDrain()
     {
         gpu.releaseAfterGpuDrain();
         initialized = false;
+        inlineServed = false;
         invalidateHistory();
     }
 };

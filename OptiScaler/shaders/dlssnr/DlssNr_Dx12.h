@@ -89,7 +89,12 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
                   ID3D12CommandQueue* timingQueue = nullptr,
-                  std::optional<D3D12_RESOURCE_STATES> outputArrival = std::nullopt);
+                  std::optional<D3D12_RESOURCE_STATES> outputArrival = std::nullopt,
+                  // Where this evaluate's depth and motion guides are found. Unset means the NGX
+                  // contract (shader-readable) or the configured barrier override. A caller that
+                  // substitutes its own composed pair sets the state that pair rests in, so the
+                  // pass transitions it correctly and puts it back the same way.
+                  std::optional<D3D12_RESOURCE_STATES> guideArrival = std::nullopt);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.

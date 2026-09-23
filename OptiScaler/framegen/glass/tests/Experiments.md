@@ -176,7 +176,7 @@ capture remains stopped until an explicit module load. Independent tests are at
 8155e51. Only these two installed files changed. Existing settings, ASI unlock,
 and both the game/CET version.dll files retained their measured hashes. Backup
 and prepared module/config live in the local workspace's
-`work/glass-experiment-host-deployment-v1/` with an installation manifest.
+`glass-experiment-host-deployment-v1/` with an installation manifest.
 The game was stopped during installation. A user-launched MO2 session is required
 to verify RootBuilder staging, control events, target data and actual recapture.
 No game launch, new contours, object MV or FG correction is established here.
@@ -439,7 +439,7 @@ The standalone observer was loaded into the existing PID 56340 with no restart.
 Its exact-body profile admitted all three current functions before attaching;
 Start returned 0. DLL SHA-256 is
 84FEC9917E6BB5FF6461E2859F39406353E06E908B9E0B7B2DFFC11227B99EBE.
-It remains explicitly pinned at work/glass-instance-producer-live-v1/observer.dll;
+It remains explicitly pinned at glass-instance-producer-live-v1/observer.dll;
 Save returned 0 and recording is disabled. This resident observer is separate from
 the replaceable coverage module and must not be reported as unloaded.
 

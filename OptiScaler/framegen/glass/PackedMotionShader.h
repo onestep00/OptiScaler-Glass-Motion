@@ -24,11 +24,20 @@ inline std::string CapturePackedMotion(std::string instrumentation, unsigned ins
         instrumentation.erase(firstOutput);
 
     return instrumentation + R"(  %glass.depthfinite = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.s2)
+  %glass.viewstamp = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 1)
+  %glass.farload = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 3)
+  %glass.farbits = extractvalue %dx.types.CBufRet.i32 %glass.farload, 3
+  %glass.farcut = bitcast i32 %glass.farbits to float
+  %glass.faron = fcmp ogt float %glass.farcut, 0.000000e+00
+  %glass.farunder = fcmp olt float %glass.p3, %glass.farcut
+  %glass.faroff = xor i1 %glass.faron, true
+  %glass.farok = or i1 %glass.faroff, %glass.farunder
   %glass.recordok0 = and i1 %glass.ok, %glass.finite
   %glass.recordok1 = and i1 %glass.recordok0, %glass.depthfinite
   %glass.mapok = icmp ne i32 %glass.mapindex, -1
   %glass.recordok2 = and i1 %glass.recordok1, %glass.mapok
-  %glass.recordok = and i1 %glass.recordok2, %glass.hasall
+  %glass.recordok3 = and i1 %glass.recordok2, %glass.farok
+  %glass.recordok = and i1 %glass.recordok3, %glass.hasall
   br i1 %glass.recordok, label %glass.packedbounds, label %glass.packedend
 glass.packedbounds:
   %glass.roi = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 2)
@@ -93,14 +102,29 @@ glass.packedquantize:
   %glass.dlower = select i1 %glass.dlow, float 0.000000e+00, float %glass.s2
   %glass.dhigh = fcmp ogt float %glass.dlower, 1.000000e+00
   %glass.dclamped = select i1 %glass.dhigh, float 1.000000e+00, float %glass.dlower
-  %glass.dscaled = fmul float %glass.dclamped, 2.621430e+05
+  ; 17 bits of depth leave the top bit of the 18-bit high key free for the
+  ; covered/uncovered class. The store is an unsigned max, so a covered record
+  ; always outranks an uncovered one and the nearest wins inside each class.
+  ; One 8-byte record per pixel therefore resolves any number of overlapping
+  ; transparent layers: the nearest surface that the visible-border/opacity
+  ; rule keeps wins, and a nearly transparent layer never hides a visible one
+  ; behind it.
+  %glass.dscaled = fmul float %glass.dclamped, 1.310710e+05
   %glass.depth = fptoui float %glass.dscaled to i32
-  %glass.stamp = call %dx.types.CBufRet.i32 @dx.op.cbufferLoadLegacy.i32(i32 59, %dx.types.Handle %glass.cb, i32 1)
-  %glass.reverse = extractvalue %dx.types.CBufRet.i32 %glass.stamp, 3
-  %glass.forwarddepth = sub i32 262143, %glass.depth
+  %glass.reverse = extractvalue %dx.types.CBufRet.i32 %glass.viewstamp, 3
+  %glass.forwarddepth = sub i32 131071, %glass.depth
   %glass.isreverse = icmp ne i32 %glass.reverse, 0
   %glass.depthkey = select i1 %glass.isreverse, i32 %glass.depth, i32 %glass.forwarddepth
-  %glass.depth64 = zext i32 %glass.depthkey to i64
+  %glass.thresholdload = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %glass.cb, i32 4)
+  %glass.threshold = extractvalue %dx.types.CBufRet.f32 %glass.thresholdload, 0
+  %glass.weightf = uitofp i32 %glass.weight to float
+  ; Exact float value of 1/255: LLVM IR rejects decimals that are not
+  ; representable in the destination type without rounding.
+  %glass.weightnorm = fmul float %glass.weightf, 3.9215688593685626983642578125e-03
+  %glass.coverok = fcmp oge float %glass.aclamped, %glass.threshold
+  %glass.coverbit = select i1 %glass.coverok, i32 131072, i32 0
+  %glass.key = or i32 %glass.depthkey, %glass.coverbit
+  %glass.depth64 = zext i32 %glass.key to i64
   %glass.mx64 = zext i32 %glass.mxbits to i64
   %glass.my64 = zext i32 %glass.mybits to i64
   %glass.weight64 = zext i32 %glass.weight to i64

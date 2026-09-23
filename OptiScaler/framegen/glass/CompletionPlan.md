@@ -29,7 +29,7 @@
 | 배열 원소별 원본 MV | 독립 이동/재배열과 이전 입력/출력의 연속 연결 | 미확인. 전체 상태별 조사에 포함 |
 | 전체 투명 객체 경계/MV/FG | 전체 화면 원본 입력과 보정 출력의 검증 | 미완료 |
 
-위 기록의 숫자는 해당 로컬 증거 범위다. 업데이트된 캐시/실행 파일에는 다시 검증한다. 로컬 근거는 workspace의 `work/glass-native-material-v1/` 아래 `native-instance-input-audit.json`, `captured-group-motion-audit.json`, `original-queue-contract.json`이다. 원본 바이너리와 캡처는 Git에 포함하지 않는다.
+위 기록의 숫자는 해당 로컬 증거 범위다. 업데이트된 캐시/실행 파일에는 다시 검증한다. 로컬 근거는 workspace의 `glass-native-material-v1/` 아래 `native-instance-input-audit.json`, `captured-group-motion-audit.json`, `original-queue-contract.json`이다. 원본 바이너리와 캡처는 Git에 포함하지 않는다.
 
 ## 실행 순서와 통과 조건
 
@@ -104,7 +104,7 @@ OptiScaler 모듈 경계를 유지하고 기존 version.dll/ASI MFG 해제 경�
 
 ### 7. 게임 재시작 없는 실험 경로
 
-상주 모듈 코드를 바꾸면 프로세스 재시작이 필요하다. 그 밖의 실험은 재시작 없이 파일 채널로 처리한다. `Glass\glass-debug.request`에 한 줄 명령을 쓰고 `Glass\glass-debug.response`를 읽는다. 상태 확인은 `status`, 경계 디스패치 토글은 `packed=on|off`, 행 수는 `rows=N`, 가장자리 폭은 `edge=N`, 내부 강도는 `strength=N`이다. `soft-reload`는 네이티브 FG 기록을 retire한 뒤 다음 평가에서 재승인하고 packed 카운터를 초기화한다. `reload-shader`는 `Glass\GlassObjectMotion.hlsl`을 디스크에서 다시 컴파일한다. 도구는 `work/glass-live-tools/glass-ctl.ps1`이다.
+상주 모듈 코드를 바꾸면 프로세스 재시작이 필요하다. 그 밖의 실험은 재시작 없이 파일 채널로 처리한다. `Glass\glass-debug.request`에 한 줄 명령을 쓰고 `Glass\glass-debug.response`를 읽는다. 상태 확인은 `status`, 경계 디스패치 토글은 `packed=on|off`, 행 수는 `rows=N`, 가장자리 폭은 `edge=N`, 내부 불투명도 임계는 `opacity=N`이다. `soft-reload`는 네이티브 FG 기록을 retire한 뒤 다음 평가에서 재승인하고 packed 카운터를 초기화한다. `reload-shader`는 `Glass\GlassObjectMotion.hlsl`을 디스크에서 다시 컴파일한다. 도구는 `glass-live-tools/glass-ctl.ps1`이다.
 
 월드 객체 재등록이 필요한 실험은 게임 안 Load Game으로 처리한다. 설치된 프레임워크 중 RedHotTools의 리로드 계열은 redscript·TweakDB·아카이브 자료용이고, red4ext는 GameState 콜백만 제공하며, CET는 자체 Lua 모드만 리로드한다. 상주 DXGI 모듈이나 엔진 렌더 상태를 재시작하는 기능은 없다.
 
@@ -175,7 +175,7 @@ TDR 원인은 새 GPU 작업과 FG 입력 교체를 분리해서 판정한다. `
 - 2026-09-13 합집합 투영 비교: 899 VS에서 다른 정점 SSA 872개, 동일 SSA 4개, 복합 계산 미분류 23개다. 기존 분류의 한계를 유지한다. 29개 정규화된 리소스 종류/슬롯 조합은 조사 묶음이며, 동일한 생산자·객체 대응·이전 프레임 계약을 뜻하지 않는다.
 - 2026-09-13 이전 정점 공통 바인딩: 원본 상수 업로더 `0x1f27c0`이 논리 행 7~17을 b3에 기록함을 확인했다. t9 이전 정점용 논리 행 8·9·10은 b3 행 1·2·3이며 해당 233 VS 모두 같은 행을 읽는다. 드로우/생산 측의 parity 접근 경로와 초기 양쪽 버퍼 복사도 연결했다. 원본 compute 선택의 5개 이름은 3개 CS 바이너리를 공유한다. `native-preskin-pipeline.json`에 함수 15개와 키/프로그램·상수 매핑 근거를 기록했다. 실제 N-1·큐·객체/그룹별 admission은 미완료다.
 
-위 정적 조사의 실행 파일 SHA-256은 `a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`, 재질 캐시는 `339145371a3b5aaa08eb4ef82d558f445b632e28603ee0f3b4860270dfc3ccfa`, 정적 캐시는 `bff160947aba8df144200247adc39b44c26322360628d875f7c7218ad26c59ff`다. 재실행 도구는 해당 입력 또는 선행 증거의 해시를 검증한다. 로컬 증거는 `work/glass-native-material-v1/`의 다음 파일이다.
+위 정적 조사의 실행 파일 SHA-256은 `a7de82945c03e041fc7339fcf9066224d98db2f5d80fea50f7947bb350a60991`, 재질 캐시는 `339145371a3b5aaa08eb4ef82d558f445b632e28603ee0f3b4860270dfc3ccfa`, 정적 캐시는 `bff160947aba8df144200247adc39b44c26322360628d875f7c7218ad26c59ff`다. 재실행 도구는 해당 입력 또는 선행 증거의 해시를 검증한다. 로컬 증거는 `glass-native-material-v1/`의 다음 파일이다.
 
 - `native-previous-supply-all-passes.json`: 이전 clip 출력의 리소스/주소/원본 모디파이어 의존성.
 - `native-mv-output-links.json`: 원본 VS/PS 쌍과 분기별 MV 출력 연결.

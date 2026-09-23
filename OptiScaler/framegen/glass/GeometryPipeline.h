@@ -40,6 +40,10 @@ HRESULT CreateGeometryRoot(ID3D12Device* device, ID3D12RootSignature* originalId
 // Packed variants that had to fall back to coverage-only capture because the
 // material exports could not be read safely. Diagnostics only.
 std::uint64_t ReadPackedCoverageFallbackCount() noexcept;
+// Packed variants that had to compile without the capture constant pair
+// because the audited b1/space0 block was absent, ambiguous or oversized.
+// Those keep the pre-pair tag payload and carry no capture jitter delta.
+std::uint64_t ReadPackedCaptureFallbackCount() noexcept;
 
 // Instantiate on a worker, reuse for PSOs, and retain the compiler through all
 // calls. No compilation, file I/O or PSO creation belongs in a draw callback.
@@ -57,9 +61,18 @@ class GeometryCompiler
                            Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
     // Retains the original material draw and atomically records one nearest
     // transparent-layer payload per screen pixel. Requires SM 6.6/int64 ops.
+    // With a capture pair the record tag also carries the two raw words of the
+    // named constant row and the paired pixel shader adds their frame-to-frame
+    // UV difference to the packed motion. A pipeline whose shader does not
+    // expose that binding is recompiled without the pair instead of rejected,
+    // and `pairMissing` then reports true: the pair-less variant adds a zero
+    // delta, so its recorded motion is the raw jittered difference and not the
+    // engine's motion convention. The caller has to withhold that variant from
+    // delivery (F-01).
     HRESULT createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
-                               Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error);
+                               Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
+                               const VertexConstantPair* capture = nullptr, bool* pairMissing = nullptr);
     HRESULT createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,

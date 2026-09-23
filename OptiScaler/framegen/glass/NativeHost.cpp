@@ -108,6 +108,28 @@ struct Runtime
     ID3D12Resource* correctedMotion[4] {};
     unsigned correctedMotionNext = 0;
     uint64_t unsubstitutedReusedMotion = 0, unsubstitutedFreshMotion = 0;
+    // Evaluations that are provably not the frame generator: the upscaler and
+    // Ray Reconstruction read the same MotionVectors/Depth names. They are
+    // counted and passed through untouched, so "the correction never touched
+    // another NGX feature" is a number in the status, not a claim. No
+    // substitution counter is needed for them: reaching a substitution would
+    // require passing this gate, which returns before any session exists.
+    uint64_t nonFrameGenerationEvaluations = 0;
+    // Evaluations the DLSS-G provider hook proved are the frame generator even
+    // though the driver-level parameter table named only MotionVectors/Depth.
+    // The provider created that handle for NVSDK_NGX_Feature_FrameGeneration, so
+    // the identity does not come from the parameter names and the upscaler or
+    // Ray Reconstruction, which never register that way, stay untouched.
+    uint64_t providerConfirmedEvaluations = 0, providerUnconfirmedEvaluations = 0;
+    // Evaluations admitted on the calling module's identity instead of the
+    // handle the provider created. Counted apart from providerConfirmed so the
+    // log shows which of the two proofs the live session actually used.
+    uint64_t callerConfirmedEvaluations = 0;
+    // Every substituted evaluation is read back afterwards: the shared
+    // parameter names have to hold the engine's own textures again, otherwise
+    // the next feature that reads them (the upscaler or Ray Reconstruction)
+    // would receive our composed motion. restoreFailures has to stay 0.
+    uint64_t restoreChecks = 0, restoreFailures = 0;
     // Runtime extent change: the frame-generation inputs were rebuilt at a new
     // size. The draw capture is process-resident, so it is released and rebuilt
     // at a quiescent point (no active or retiring session) instead of leaving
@@ -150,6 +172,13 @@ struct Runtime
                         static_cast<unsigned long long>(entry->session.packedComposeForced()));
                     std::fflush(log);
                 }
+                // A dump recorded into this entry's compose list has to be read
+                // out before the entry and its readback targets go away. The
+                // compose fence is already drained at this point, so this is a
+                // non-blocking map. 2026-09-16: without this the request that
+                // landed on an entry which retired before the health pass saw
+                // it left the live channel waiting for a frame forever.
+                entry->session.serviceDump();
                 entry->session.releaseAfterGpuDrain();
                 entry.reset();
             }
@@ -259,7 +288,6 @@ std::atomic<unsigned> dumpRetries { 0 };
 std::atomic<bool> attachPending = false;
 // The driver-level frame generation block carries no Streamline frame token, so
 // the packed capture is keyed by this counter instead.
-std::atomic<std::uint64_t> driverFrameCounter { 0 };
 
 
 std::filesystem::path packedShaderPath()
@@ -396,6 +424,8 @@ D3D12Callbacks makeCallbacks()
                 const bool current = candidate == r.activeCommand.load(std::memory_order_acquire);
                 if (!known && !current)
                     continue;
+                if (!e.session.pendingFor(candidate))
+                    continue;
                 {
                     static std::atomic<unsigned> unmatched { 0 };
                     if (r.log != nullptr && !known && current && unmatched.fetch_add(1, std::memory_order_relaxed) < 4)
@@ -416,7 +446,7 @@ D3D12Callbacks makeCallbacks()
                         // separately from the rest of the compose scope so a
                         // block can be told apart from a descheduled thread.
                         TimingScope queue(ComposeQueueTiming());
-                        queued = e.session.executePending(q);
+                        queued = e.session.executePending(q, candidate);
                     }
                     // The marker now describes the queued compose on the GPU, not
                     // the CPU window, so it is written only when one was queued.
@@ -719,7 +749,8 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     const auto sessionStart = std::chrono::steady_clock::now();
     if (!entry->session.initializePacked(device.Get(), entry->descriptions,
                                          (shaders / L"GlassObjectMotion.hlsl").c_str(), r.log,
-                                         { AcquirePackedMotionFrame, DiscardPackedMotionRecording }))
+                                         { AcquirePackedMotionFrame, AcquirePackedMotionFrameForSecondConsumer,
+                                           DiscardPackedMotionRecording }))
     {
         r.unavailable = true;
         return {};
@@ -765,6 +796,36 @@ void RequestPackedDump() noexcept
     dumpRequested.store(true, std::memory_order_release);
 }
 
+// Second consumer (DLSS 5 neural rendering). Called from the neural rendering
+// evaluate before the model runs, with the guides that evaluate would otherwise
+// read. On success the caller substitutes the returned pair for this evaluate
+// only; the engine's own textures keep the values the game wrote.
+bool SecondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* motion, ID3D12Resource* depth,
+                          D3D12_RESOURCE_STATES motionArrival, D3D12_RESOURCE_STATES depthArrival, float jitterX,
+                          float jitterY, float scaleX, float scaleY, ID3D12Resource** outMotion,
+                          ID3D12Resource** outDepth) noexcept
+{
+    try
+    {
+        if (outMotion != nullptr)
+            *outMotion = nullptr;
+        if (outDepth != nullptr)
+            *outDepth = nullptr;
+        if (command == nullptr || motion == nullptr || depth == nullptr)
+            return false;
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.active)
+            return false;
+        return r.active->session.secondConsumerGuides(command, motion, depth, motionArrival, depthArrival, jitterX,
+                                                      jitterY, scaleX, scaleY, outMotion, outDepth);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* featureKey,
                             const StreamlineFrame& frame) noexcept
 {
@@ -775,27 +836,29 @@ bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* feat
         if (!controls.active() || !command || !featureKey)
             return false;
 
-        // Bounded diagnostics: a silent no-op path has to be visible without
-        // letting the log grow without bound.
+        // FG-only policy: this path used to deliver the correction by copying
+        // the composed motion and depth into the game's own textures. Those
+        // textures are shared with DLSS-SR, Ray Reconstruction and the ray
+        // traced passes, so the copy was removed; the DLSS-G parameter
+        // substitution in EvaluateNativeFG is the only delivery path. The frame
+        // is still logged (bounded) so a future change that reroutes Streamline
+        // frame generation through here is visible instead of silent.
+        Inputs probe;
+        probe.motion = frame.motion;
+        probe.depth = frame.depth;
+        probe.color = frame.color;
+        probe.index = frame.index;
+        probe.count = frame.count;
+        probe.reset = frame.reset;
+        probe.scaleX = frame.scaleX;
+        probe.scaleY = frame.scaleY;
+        probe.jitterX = frame.jitterX;
+        probe.jitterY = frame.jitterY;
+        probe.clipToPrevious = frame.clipToPrevious;
+        probe.frame = frame.frame;
         static std::atomic<unsigned> calls { 0 };
         const auto call = calls.fetch_add(1, std::memory_order_relaxed);
         const bool report = call < 3 || call % 600 == 0;
-
-        Inputs inputs;
-        inputs.motion = frame.motion;
-        inputs.depth = frame.depth;
-        inputs.color = frame.color;
-        inputs.index = frame.index;
-        inputs.count = frame.count;
-        inputs.reset = frame.reset;
-        inputs.scaleX = frame.scaleX;
-        inputs.scaleY = frame.scaleY;
-        inputs.jitterX = frame.jitterX;
-        inputs.jitterY = frame.jitterY;
-        inputs.clipToPrevious = frame.clipToPrevious;
-        inputs.frame = frame.frame;
-        const bool valid = inputs.valid();
-
         if (report)
         {
             std::lock_guard lock(r.mutex);
@@ -807,29 +870,15 @@ bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* feat
             if (r.log)
             {
                 std::fprintf(r.log,
-                             "SL_FRAME call=%u motion=%p depth=%p color=%p scale=%.4f,%.4f frame=%llu valid=%u\n",
+                             "SL_FRAME call=%u motion=%p depth=%p color=%p scale=%.4f,%.4f frame=%llu valid=%u "
+                             "policy=fg_only in_place=0\n",
                              call + 1, static_cast<void*>(frame.motion), static_cast<void*>(frame.depth),
                              static_cast<void*>(frame.color), frame.scaleX, frame.scaleY,
-                             static_cast<unsigned long long>(frame.frame), valid ? 1u : 0u);
+                             static_cast<unsigned long long>(frame.frame), probe.valid() ? 1u : 0u);
                 std::fflush(r.log);
             }
         }
-        if (!valid)
-            return false;
-
-        // Delivery reuses the engine-input write-back path: the composed motion
-        // and depth are copied into the game's own textures, so the frame
-        // generation provider keeps its resources and the unlocker is untouched.
-        controls.packedSubstitute = false;
-        controls.packedWriteBack = true;
-        std::lock_guard lock(r.mutex);
-        auto entry = acquire(r, command, reinterpret_cast<const NVSDK_NGX_Handle*>(featureKey), inputs, controls);
-        if (!entry)
-            return false;
-        const D3D12_RESOURCE_STATES states[3] { frame.motionState, D3D12_RESOURCE_STATE_COMMON, frame.depthState };
-        entry->session.prepare(command, inputs, states, controls, true);
-        StreamlineFrameCounter().fetch_add(1, std::memory_order_relaxed);
-        return true;
+        return false;
     }
     catch (...)
     {
@@ -911,6 +960,32 @@ void NoteNgxFeature(unsigned feature, unsigned handleId, const char* provider) n
     }
 }
 
+void NoteProviderFrameGenerationIdentity(bool confirmed, unsigned handleId, const char* motionKey) noexcept
+{
+    try
+    {
+        static std::atomic<unsigned> logged { 0 };
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 4)
+            return;
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "NATIVE_FG_PROVIDER confirmed=%u handle=%u motionKey=%s\n", confirmed ? 1u : 0u,
+                         handleId, motionKey != nullptr ? motionKey : "-");
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
 void NoteNgxCreate(unsigned feature, unsigned handleId, const char* route) noexcept
 {
     try
@@ -956,9 +1031,6 @@ void NoteNvngxLoad(const wchar_t* name, bool redirect) noexcept
 {
     try
     {
-        static std::atomic<unsigned> logged { 0 };
-        if (logged.fetch_add(1, std::memory_order_relaxed) >= 16)
-            return;
         auto& r = runtime();
         std::lock_guard lock(r.mutex);
         if (!r.logAttempted)
@@ -994,6 +1066,114 @@ void NoteHookStage(const wchar_t* name, unsigned stage) noexcept
         if (r.log)
         {
             std::fprintf(r.log, "GLASS_NGX_HOOK module=%ls stage=%u\n", name ? name : L"-", stage);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void NoteFrameGenerationHandle(bool creation, const void* handle, unsigned handleId, bool confirmed) noexcept
+{
+    try
+    {
+        static std::atomic<unsigned> created { 0 }, createdLogged { 0 }, evaluatedLogged { 0 };
+        if (creation)
+        {
+            if (createdLogged.fetch_add(1, std::memory_order_relaxed) >= 12)
+                return;
+            created.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            // An evaluation is only informative once a creation has been seen;
+            // spending the budget on the startup evaluations would hide the
+            // ones that follow it.
+            if (created.load(std::memory_order_relaxed) == 0)
+                return;
+            if (evaluatedLogged.fetch_add(1, std::memory_order_relaxed) >= 12)
+                return;
+        }
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_FG_HANDLE event=%s handle=%p id=%u confirmed=%u\n",
+                         creation ? "create" : "evaluate", handle, handleId, confirmed ? 1u : 0u);
+            std::fflush(r.log);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void NoteFrameGenerationCaller(const void* address, const void* handle, unsigned handleId,
+                               bool classified) noexcept
+{
+    try
+    {
+        // Only the opening evaluations are informative: they show which module
+        // issues the driver-level calls, and after that the classification is
+        // cached and every line would repeat the same path. The counter check
+        // runs before any module lookup, so the steady state costs one atomic.
+        static std::atomic<unsigned> logged { 0 };
+        if (logged.load(std::memory_order_relaxed) >= 24)
+            return;
+        MEMORY_BASIC_INFORMATION info {};
+        const void* base = nullptr;
+        if (address != nullptr && VirtualQuery(address, &info, sizeof(info)) == sizeof(info))
+            base = info.AllocationBase;
+        // A repeated caller adds nothing: every evaluation of the session comes
+        // from the same one or two modules, so only a change of the caller
+        // allocation is worth a line.
+        static std::atomic<const void*> lastBase { nullptr };
+        if (base != nullptr && lastBase.load(std::memory_order_relaxed) == base)
+            return;
+        if (logged.fetch_add(1, std::memory_order_relaxed) >= 24)
+            return;
+        lastBase.store(base, std::memory_order_relaxed);
+        wchar_t path[MAX_PATH] {};
+        HMODULE module = nullptr;
+        if (address != nullptr &&
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCWSTR>(address), &module) &&
+            module != nullptr)
+            GetModuleFileNameW(module, path, MAX_PATH);
+        if (path[0] == L'\0' && address != nullptr)
+        {
+            // The over-the-air Streamline plugins are mapped as images without a
+            // loader entry, so their name has to come from the mapping.
+            if (base != nullptr)
+            {
+                static const auto getMappedFileName = []() {
+                    const auto kernel = GetModuleHandleW(L"kernel32.dll");
+                    return kernel != nullptr
+                               ? reinterpret_cast<DWORD(WINAPI*)(HANDLE, LPVOID, LPWSTR, DWORD)>(
+                                     GetProcAddress(kernel, "GetMappedFileNameW"))
+                               : nullptr;
+                }();
+                if (getMappedFileName != nullptr)
+                    getMappedFileName(GetCurrentProcess(), const_cast<void*>(base), path, MAX_PATH);
+            }
+        }
+        auto& r = runtime();
+        std::lock_guard lock(r.mutex);
+        if (!r.logAttempted)
+        {
+            r.logAttempted = true;
+            r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+        }
+        if (r.log)
+        {
+            std::fprintf(r.log, "GLASS_FG_CALLER handle=%p id=%u classified=%u caller=%ls\n", handle, handleId,
+                         classified ? 1u : 0u, path[0] != L'\0' ? path : L"-");
             std::fflush(r.log);
         }
     }
@@ -1155,6 +1335,12 @@ NativeHostStatus ReadNativeHostStatus() noexcept
     }
     status.unsubstitutedReusedMotion = r.unsubstitutedReusedMotion;
     status.unsubstitutedFreshMotion = r.unsubstitutedFreshMotion;
+    status.nonFrameGenerationEvaluations = r.nonFrameGenerationEvaluations;
+    status.providerConfirmedEvaluations = r.providerConfirmedEvaluations;
+    status.providerUnconfirmedEvaluations = r.providerUnconfirmedEvaluations;
+    status.callerConfirmedEvaluations = r.callerConfirmedEvaluations;
+    status.restoreChecks = r.restoreChecks;
+    status.restoreFailures = r.restoreFailures;
     for (unsigned i = 0; i < 2; ++i)
     {
         status.evaluationsByPath[i] = r.evaluationsByPath[i];
@@ -1206,6 +1392,18 @@ void ReportNativeHostLog() noexcept
                      static_cast<unsigned long long>(status.evaluationsByPath[1]),
                      static_cast<unsigned long long>(status.preparedByPath[0]),
                      static_cast<unsigned long long>(status.preparedByPath[1]));
+        // DLSS FG only: the non-generator evaluations that were passed through
+        // without a session or a swap, and the read-back that proves the shared
+        // parameter names were returned to the engine's own textures.
+        std::fprintf(log,
+                     "NATIVE_HOST_FG_ONLY nonfg_passed=%llu provider_confirmed=%llu provider_unconfirmed=%llu "
+                     "caller_confirmed=%llu restore_checked=%llu restore_failed=%llu\n",
+                     static_cast<unsigned long long>(status.nonFrameGenerationEvaluations),
+                     static_cast<unsigned long long>(status.providerConfirmedEvaluations),
+                     static_cast<unsigned long long>(status.providerUnconfirmedEvaluations),
+                     static_cast<unsigned long long>(status.callerConfirmedEvaluations),
+                     static_cast<unsigned long long>(status.restoreChecks),
+                     static_cast<unsigned long long>(status.restoreFailures));
         ReportGeometryHost(log);
         std::fflush(log);
     }
@@ -1248,9 +1446,42 @@ void WarmPackedShaderOnce() noexcept
     }
 }
 
+namespace
+{
+// Frame generation identity learned at runtime. Only the frame generator names
+// the DLSS-G parameter set, so a handle observed with those names stays the
+// generator even when a later evaluation of the same handle arrives with just
+// the shared MotionVectors/Depth alias. Bounded, lock free and purely additive:
+// an unknown handle is never treated as frame generation, so no session, GPU
+// work or parameter replacement can happen on the upscaler or Ray
+// Reconstruction, which read the same two names on their own evaluations.
+constexpr unsigned kFrameGenerationHandles = 8;
+bool frameGenerationHandle(unsigned id, bool learn) noexcept
+{
+    static std::atomic<unsigned> handles[kFrameGenerationHandles] {};
+    static std::atomic<unsigned> count { 0 };
+    if (id == 0)
+        return false;
+    const auto used = (std::min)(count.load(std::memory_order_acquire), kFrameGenerationHandles);
+    for (unsigned i = 0; i < used; ++i)
+        if (handles[i].load(std::memory_order_relaxed) == id)
+            return true;
+    if (!learn)
+        return false;
+    const auto slot = count.fetch_add(1, std::memory_order_acq_rel);
+    if (slot < kFrameGenerationHandles)
+    {
+        handles[slot].store(id, std::memory_order_release);
+        return true;
+    }
+    return false;
+}
+} // namespace
+
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                   NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
-                                  NativeEvaluate original)
+                                  NativeEvaluate original, bool providerFrameGeneration, bool dlssgProviderModule,
+                                  bool frameGenerationCaller)
 {
     if (!original)
         return NVSDK_NGX_Result_FAIL_FeatureNotFound;
@@ -1379,6 +1610,94 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                 inputs.scaleY = scale.y;
             }
         }
+        // Frame generation identity gate. The correction may only run on an
+        // evaluation that carries the DLSS-G parameter set, or on a handle that
+        // was already observed as the generator, or on an evaluation the
+        // DLSS-G provider hook proved belongs to a handle the provider created
+        // for NVSDK_NGX_Feature_FrameGeneration. Every other evaluation is the
+        // upscaler or Ray Reconstruction reading the shared MotionVectors/Depth
+        // names, and is passed straight through: no session, no GPU work and no
+        // parameter replacement of any kind.
+        // A driver-level evaluation whose parameter table carries no DLSSG.* key
+        // can still be the generator: when the dedicated provider module is not
+        // loaded, Streamline's frame generation plugin evaluates through the
+        // generic NGX core and its handle can predate this hook. The calling
+        // module is then the identity, and it is the same class of proof the
+        // provider hook gives: neither the upscaler nor Ray Reconstruction is
+        // evaluated from the frame generation plugin.
+        const bool callerIdentity = frameGenerationCaller && !inputs.frameGeneration;
+        const bool providerIdentity = (providerFrameGeneration || callerIdentity) && !inputs.frameGeneration;
+        // The identity the table itself carries. A frame generation evaluation
+        // that names the textures MotionVectors/Depth still publishes at least
+        // one DLSSG.* key, and no upscaler or Ray Reconstruction table does, so
+        // this is admitted and also teaches the handle for the rest of the
+        // session (the branch below registers it like any other generator).
+        static std::atomic<unsigned> tableIdentityLogged { 0 };
+        if (dlssgProviderModule && tableIdentityLogged.fetch_add(1, std::memory_order_relaxed) < 6)
+        {
+            std::lock_guard lock(r.mutex);
+            if (!r.logAttempted)
+            {
+                r.logAttempted = true;
+                r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+            }
+            if (r.log)
+            {
+                std::fprintf(r.log, "GLASS_FG_TABLE handle=%u mask=%x identity=%u key=%s\n",
+                             handle != nullptr ? handle->Id : 0u, inputs.identityMask ? inputs.identityMask : 0u,
+                             inputs.frameGeneration ? 1u : 0u, inputs.motionKey != nullptr ? inputs.motionKey : "-");
+                std::fflush(r.log);
+            }
+        }
+        if (inputs.frameGeneration)
+        {
+            frameGenerationHandle(handle != nullptr ? handle->Id : 0u, true);
+        }
+        else if (!frameGenerationHandle(handle != nullptr ? handle->Id : 0u, false) && !providerIdentity)
+        {
+            {
+                std::lock_guard lock(r.mutex);
+                ++r.evaluationsByPath[1];
+                ++r.nonFrameGenerationEvaluations;
+                if (dlssgProviderModule)
+                    ++r.providerUnconfirmedEvaluations;
+                static std::atomic<unsigned> gateLogged { 0 };
+                if (gateLogged.fetch_add(1, std::memory_order_relaxed) < 4)
+                {
+                    if (!r.logAttempted)
+                    {
+                        r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
+                        r.logAttempted = r.log != nullptr;
+                    }
+                    if (r.log)
+                    {
+                        std::fprintf(r.log,
+                                     "NATIVE_FG_GATE skip handle=%u motionKey=%s provider=%u mask=%x evaluations=%llu\n",
+                                     handle != nullptr ? handle->Id : 0u,
+                                     inputs.motionKey != nullptr ? inputs.motionKey : "-",
+                                     providerFrameGeneration ? 1u : 0u,
+                                     inputs.identityMask ? inputs.identityMask : 0u,
+                                     static_cast<unsigned long long>(r.nonFrameGenerationEvaluations));
+                        std::fflush(r.log);
+                    }
+                }
+            }
+            return original(command, handle, parameters, callback);
+        }
+        if (providerIdentity)
+        {
+            // The provider hook only wraps DLSS-G providers, and it reports the
+            // handles those providers created for the frame generation feature.
+            // The driver-level table names only MotionVectors/Depth, so this is
+            // the identity the gate has to use; it is also what keeps the
+            // correction off every upscaler and Ray Reconstruction handle,
+            // which never register there.
+            std::lock_guard lock(r.mutex);
+            ++r.providerConfirmedEvaluations;
+            if (callerIdentity)
+                ++r.callerConfirmedEvaluations;
+            NoteProviderFrameGenerationIdentity(true, handle != nullptr ? handle->Id : 0u, inputs.motionKey);
+        }
         std::lock_guard lock(r.mutex);
         entry = acquire(r, command, handle, inputs, controls);
         if (!entry)
@@ -1437,7 +1756,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                         const auto commandsFrame = GetGeometryCommandStats().lastFrame;
                         const auto healthFrame = ReadGeometryHealth().frame;
                         const auto engineFrame = commandsFrame != 0 ? commandsFrame : healthFrame;
-                        inputs.frame = engineFrame != 0 ? engineFrame : ++driverFrameCounter;
+                        inputs.frame = engineFrame != 0 ? engineFrame : UINT64_MAX;
                         static std::atomic<unsigned> driverPrepared { 0 };
                         if (r.log && driverPrepared.fetch_add(1, std::memory_order_relaxed) < 4)
                         {
@@ -1469,6 +1788,12 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     else
     {
         std::lock_guard lock(r.mutex);
+        // A caller that already verified the feature id still cannot be served
+        // when the parameter table exposes neither naming convention; counting
+        // that apart from the alias refusals keeps the missing correction
+        // attributable to the read probe instead of to the identity gate.
+        if (providerFrameGeneration || dlssgProviderModule)
+            ++r.providerUnconfirmedEvaluations;
         // Bounded diagnostic: which keys the provider did not supply. Without it
         // a rejected frame leaves no trace at all.
         static std::atomic<unsigned> readMisses { 0 };
@@ -1588,6 +1913,41 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
     if (entry)
     {
         std::lock_guard lock(r.mutex);
+        // Read back the shared parameter names instead of trusting the scope:
+        // once the evaluate returned they must hold the engine's own textures
+        // again, or the next feature reading them would receive our motion.
+        if (applied)
+        {
+            ++r.restoreChecks;
+            const char* motionNames[] { prepared.motionKey, prepared.motionAlias };
+            const char* depthNames[] { prepared.depthKey, prepared.depthAlias };
+            bool restored = true;
+            for (const char* name : motionNames)
+            {
+                ID3D12Resource* current = nullptr;
+                if (name != nullptr && parameters != nullptr && parameters->Get(name, &current) == 1 &&
+                    current != prepared.originalMotion)
+                    restored = false;
+            }
+            for (const char* name : depthNames)
+            {
+                ID3D12Resource* current = nullptr;
+                if (name != nullptr && parameters != nullptr && parameters->Get(name, &current) == 1 &&
+                    current != prepared.originalDepth)
+                    restored = false;
+            }
+            if (!restored)
+            {
+                ++r.restoreFailures;
+                if (r.log && r.restoreFailures <= 4)
+                {
+                    std::fprintf(r.log, "GLASS_PARAM_RESTORE failed count=%llu index=%u frame=%llu\n",
+                                 static_cast<unsigned long long>(r.restoreFailures), inputs.index,
+                                 static_cast<unsigned long long>(inputs.frame));
+                    std::fflush(r.log);
+                }
+            }
+        }
         --entry->evaluations;
         ++r.evaluations;
         r.lastResult = static_cast<unsigned>(result);

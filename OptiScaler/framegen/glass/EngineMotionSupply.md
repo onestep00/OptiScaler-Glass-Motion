@@ -183,7 +183,7 @@ The full cache velocity-VS inventory now contains 879 unique binaries and is
 available for this comparison. Do not assume a root MotionMatrix covers array
 elements simply because the common declaration bit can be enabled.
 
-Local tools/evidence added under `work/glass-native-material-v1/`:
+Local tools/evidence added under `glass-native-material-v1/`:
 
 - `audit_opaque_velocity.py`, `opaque-velocity-audit/index.json`: all cache velocity VS extraction/signatures; no live grouped-motion admission.
 - `capture_velocity_groups.py`: existing unloadable census extended to opaque draws.
@@ -262,7 +262,7 @@ Local evidence: `startup-native-output-latest.json`,
 `shared-native-motion-matches.json`, `native-grafted/index.json`,
 `native-grafted/verification.json`, and
 `native-graft-gpu-1789233454907652200/capture-1789233464654268300/analysis.json`.
-All paths in this paragraph are under `work/glass-native-material-v1/`.
+All paths in this paragraph are under `glass-native-material-v1/`.
 
 ## Broader original shader reuse, 2026-09-13
 
@@ -360,7 +360,7 @@ planner does not yet classify every writer, so its 103 tail candidates are not
 103 approved declarations. Actual writer spans, grouped proxy capabilities,
 previous deformation inputs and upload/draw ownership still gate expansion.
 
-Local evidence in `work/glass-native-material-v1/`: `motion-slot-plan.json`,
+Local evidence in `glass-native-material-v1/`: `motion-slot-plan.json`,
 `motion-slot-audit/footprints.json`, `modifier-writer-audit/constructors.json`,
 `native-grafted/index.json`, `native-grafted/verification.json` and
 `native-grafted/admission-checks.json`. The latter checks reject malformed
@@ -559,7 +559,7 @@ evidence for the recorded executable, not the startup compatibility mechanism.
 Local evidence: `native-instance-input-audit.json` (all 879 VS),
 `native-batch-gate-audit.json` (ten exact native instruction ranges checked against
 the executable SHA), and `audit_native_batch_gate.py`, under
-`work/glass-native-material-v1/`. No game attachment, new DLL deployment, new
+`glass-native-material-v1/`. No game attachment, new DLL deployment, new
 full-screen MV or FG substitution occurred during this audit.
 
 ## Exact pair direct-writer audit, 2026-09-13
@@ -601,7 +601,7 @@ names. No DLL was deployed and no new game MV was produced in this step.
 
 Local evidence: `audit_native_writer_layouts.py`, `native-writer-layouts.json`,
 `motion-writer-slot-audit.json`, and `pending-motion-declarations/manifest.json`
-under `work/glass-native-material-v1/`.
+under `glass-native-material-v1/`.
 
 ## Live supplier context target, 2026-09-13
 
@@ -631,7 +631,7 @@ forwards calls after Save.
 
 Local evidence: `MotionContextProbe.cpp`, `context-probe-latest.json`, and
 `context-live-1789265826318681500/{preflight.json,analysis.json,capture/}` under
-`work/glass-native-material-v1/`. Loaded diagnostic SHA-256:
+`glass-native-material-v1/`. Loaded diagnostic SHA-256:
 `d9872c13268986d1075989de51acfada5acbe969a8d1ce00bb58078d1181fede`.
 
 ## Original preskinned input bridge, 2026-09-13
@@ -679,7 +679,7 @@ The ten-shader check also rejects repeated/conflicting input declarations and a
 deliberately wrong native previous-matrix row. No new DLL was deployed in this
 step. Local artifacts are `missing-native-contract-audit.json`,
 `native-preskinned-supply.json` and `native-preskinned-grafted/` under
-`work/glass-native-material-v1/`.
+`glass-native-material-v1/`.
 
 ## Framework investigation
 

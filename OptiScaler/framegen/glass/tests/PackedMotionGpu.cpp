@@ -91,8 +91,14 @@ static void drain(ID3D12Device* device, ID3D12CommandQueue* queue)
 
 static UINT64 pack(float depth, bool reverse, int mx, int my, unsigned alpha, unsigned id)
 {
-    const auto depthBits = static_cast<unsigned>(std::clamp(depth, 0.f, 1.f) * 262143.f);
-    const auto depthKey = reverse ? depthBits : 262143u - depthBits;
+    // 17 bits of depth with the covered class bit on top. The capture marks a
+    // record covered when its material opacity reaches the dispatch threshold,
+    // so the fixture has to encode the same class the reconstructed pixel
+    // shader would write. These fixtures dispatch with 50%, which the 8-bit
+    // alpha reaches at 128.
+    const auto depthBits = static_cast<unsigned>(std::clamp(depth, 0.f, 1.f) * 131071.f);
+    const auto covered = alpha >= 128u ? 0x20000u : 0u;
+    const auto depthKey = (reverse ? depthBits : 131071u - depthBits) | covered;
     return (UINT64(depthKey) << 46) | (UINT64(unsigned(mx) & 0x7ffu) << 35) |
            (UINT64(unsigned(my) & 0x7ffu) << 24) | (UINT64(alpha & 0xffu) << 16) |
            (reverse ? 0x8000u : 0u) | (id & 0x7fffu);
@@ -144,12 +150,17 @@ static int runDump(const wchar_t* shader)
             "initialize");
     GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
     require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                         D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), { true, 50, false, 2 }),
+                         D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f,
+                         { true, 50, false, 2 }),
             "dispatch");
     gpu.requestDump();
+    // The readback buffers are allocated by the health thread's service call, so
+    // the request has to be prepared before the frame that consumes it.
+    (void)gpu.serviceDump();
     frame.frame = 2;
     require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                         D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), { true, 50, false, 2 }),
+                         D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f,
+                         { true, 50, false, 2 }),
             "dump dispatch");
     checked(command->Close(), "close");
     ID3D12CommandList* lists[] = { command.Get() };
@@ -273,7 +284,7 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
                 "compute list");
         require(gpu.dispatch(computeList.Get(), frame, motion.Get(), depth.Get(),
                              D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST, float(Width),
-                             float(Height), { true, 50, false, 2 }),
+                             float(Height), 0.f, 0.f, { true, 50, false, 2 }),
                 "manual dispatch");
         checked(computeList->Close(), "manual close");
         ID3D12CommandList* manualLists[] = { computeList.Get() };
@@ -332,7 +343,8 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         checked(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "gate fence");
         require(SUCCEEDED(queue->Wait(gate.Get(), 1)), "gate wait");
         require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                  D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), controls, nullptr),
+                                  D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f, controls,
+                                  nullptr),
                 "partial submitCompose");
         // The release gate must refuse to free the outputs while the submitted
         // compose can still be executing.
@@ -363,15 +375,19 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         // too wide).
         require(std::abs(composedOutside - 9.0f) > .01f && std::abs(composedOutside - .0625f) > .01f,
                 "input copy or dispatch reached rows outside the composed range");
-        require(std::abs(engineEdge - .0625f) < .001f, "partial write-back did not reach the edge pixel");
-        require(std::abs(engineOutside - 9.0f) < .01f, "partial write-back copied rows outside the composed range");
-        std::printf("PACKED_MOTION_PARTIAL_OK rows=%u edge=1 outside_untouched=1 gate_blocks_release=1\n",
+        // FG-only policy: even with a write-back request the engine's own motion
+        // texture has to stay exactly as the game produced it, because DLSS-SR,
+        // Ray Reconstruction and the ray traced passes read the same texture.
+        require(std::abs(engineEdge - 9.0f) < .01f, "write-back policy modified the engine input");
+        require(std::abs(engineOutside - 9.0f) < .01f, "write-back policy modified rows outside the composed range");
+        std::printf("PACKED_MOTION_PARTIAL_OK rows=%u edge=1 outside_untouched=1 engine_input_untouched=1 "
+                    "gate_blocks_release=1\n",
                     partialRows);
         gpu.releaseAfterGpuDrain();
         return 0;
     }
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
+                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f,
                               { true, 50, false, 2 }, nullptr),
             "submitCompose");
     if (const auto removed = device->GetDeviceRemovedReason(); removed != S_OK)
@@ -437,13 +453,50 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
     require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f, "out-of-band compose did not reach the edge pixel");
     read->Unmap(0, nullptr);
     std::printf("PACKED_MOTION_COMPOSE_OK submit_compose=1 fence_ready=1 edge_pixel=1 background=1\n");
-    // Write-back integration: with PackedWriteBack the composed result must be
-    // copied into the engine's own inputs, which is how the product delivers
-    // the correction without handing a foreign resource to the FG runtime.
+    // FG-only policy: a write-back request must not touch the engine's own
+    // inputs. The correction is delivered only by the DLSS-G parameter
+    // substitution, so DLSS-SR, Ray Reconstruction and the ray traced passes
+    // keep reading the game's textures.
     GlassFg::Controls writeBack { true, 50, false, 2 };
     writeBack.packedWriteBack = true;
+    // The engine input carries a known sentinel so a write-back that reached it
+    // is distinguishable from an untouched texture. Fresh GPU allocations are
+    // not valid evidence.
+    {
+        UINT64 sentinelBytes = 0;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT sentinelFootprint {};
+        const auto sentinelDescription = motion->GetDesc();
+        device->GetCopyableFootprints(&sentinelDescription, 0, 1, 0, &sentinelFootprint, nullptr, nullptr,
+                                      &sentinelBytes);
+        auto sentinelUpload = buffer(device.Get(), sentinelBytes, D3D12_HEAP_TYPE_UPLOAD,
+                                     D3D12_RESOURCE_STATE_GENERIC_READ);
+        void* sentinelData = nullptr;
+        checked(sentinelUpload->Map(0, nullptr, &sentinelData), "engine sentinel map");
+        std::memset(sentinelData, 0, size_t(sentinelBytes));
+        for (unsigned y = 0; y < Height; ++y)
+        {
+            auto* row = reinterpret_cast<HALF*>(static_cast<std::byte*>(sentinelData) +
+                                                y * sentinelFootprint.Footprint.RowPitch);
+            for (unsigned x = 0; x < Width * 4; ++x)
+                row[x] = DirectX::PackedVector::XMConvertFloatToHalf(9.0f);
+        }
+        sentinelUpload->Unmap(0, nullptr);
+        allocator->Reset();
+        command->Reset(allocator.Get(), nullptr);
+        D3D12_TEXTURE_COPY_LOCATION sentinelSource {}, sentinelTarget {};
+        sentinelSource.pResource = sentinelUpload.Get();
+        sentinelSource.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        sentinelSource.PlacedFootprint = sentinelFootprint;
+        sentinelTarget.pResource = motion.Get();
+        sentinelTarget.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        command->CopyTextureRegion(&sentinelTarget, 0, 0, 0, &sentinelSource, nullptr);
+        checked(command->Close(), "engine sentinel close");
+        queue->ExecuteCommandLists(1, lists);
+        drain(device.Get(), queue.Get());
+    }
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), writeBack, nullptr),
+                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f, writeBack,
+                              nullptr),
             "submitCompose write-back");
     for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
         Sleep(5);
@@ -473,10 +526,10 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         auto* row = reinterpret_cast<const HALF*>(static_cast<const std::byte*>(engineData) +
                                                   8 * engineFootprint.Footprint.RowPitch);
         const auto value = DirectX::PackedVector::XMConvertHalfToFloat(row[4 * 4 + 0]);
-        require(std::abs(value - .0625f) < .001f, "write-back did not reach the engine input edge pixel");
+        require(std::abs(value - 9.0f) < .01f, "write-back request modified the engine input edge pixel");
     }
     engineRead->Unmap(0, nullptr);
-    std::printf("PACKED_MOTION_WRITEBACK_OK engine_input_edge=1\n");
+    std::printf("PACKED_MOTION_WRITEBACK_RETIRED_OK engine_input_untouched=1\n");
     gpu.releaseAfterGpuDrain();
     return 0;
 }
@@ -585,7 +638,7 @@ static int runScale(const wchar_t* shader)
     for (unsigned i = 0; i < Dispatches; ++i)
         require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
-                             { true, 50, false, 2, true, Height, true }),
+                             0.f, 0.f, { true, 50, false, 2, true, Height, true }),
                 "dispatch");
     // The owned outputs end in COPY_DEST after every dispatch; read one sample
     // back to prove the batch produced real values rather than a no-op.
@@ -718,9 +771,19 @@ int wmain(int argc, wchar_t** argv)
         GlassFg::PackedMotionGpu gpu;
         require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), argv[1], stdout), "initialize");
         GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
+        // Two dispatches with different declared jitter. The first seeds the
+        // predecessor pair (conversion is zero for that frame); the second
+        // removes (current - previous) = (1, 0) px, so every delivered object
+        // pixel carries the measured convention conversion plus the object
+        // motion. This is the offline A/B that separates the delivered field
+        // from the uncorrected one.
         require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
-                             { true, 50, false, 2 }), "dispatch");
+                             .5f, .5f, { true, 50, false, 2 }), "seed dispatch");
+        frame.frame = 2;
+        require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
+                             1.5f, .5f, { true, 50, false, 2 }), "dispatch");
 
         std::array<ID3D12Resource*, 3> outputs { gpu.motionOutput(), gpu.depthOutput(), gpu.selectionOutput() };
         std::array<D3D12_RESOURCE_STATES, 3> states { D3D12_RESOURCE_STATE_COPY_DEST,
@@ -771,17 +834,27 @@ int wmain(int argc, wchar_t** argv)
         };
         require(motionAt(1, 1, 0) == background[0] && depthAt(1, 1) == backgroundDepth &&
                 selectionAt(1, 1) == 0, "background changed");
-        require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f &&
+        // The convention term adds (1 px / 32 px) = .03125 to x on this frame.
+        require(std::abs(motionAt(4, 8, 0) - .09375f) < .001f &&
                 std::abs(motionAt(4, 8, 1) + .05f) < .001f && std::abs(depthAt(4, 8) - .8f) < .001f &&
                 selectionAt(4, 8) > .99f, "reverse-depth edge mismatch");
-        // Shipped interior weight: opacity plus the strength-scaled remainder.
-        const float interiorOpacity = 128.f / 255.f, interiorStrength = .5f;
-        const float weight = interiorOpacity + (1.f - interiorOpacity) * interiorStrength;
-        require(std::abs(motionAt(10, 10, 0) - (background[0] * (1 - weight) + .0625f * weight)) < .001f &&
-                std::abs(motionAt(10, 10, 1) - (background[1] * (1 - weight) - .05f * weight)) < .001f &&
-                depthAt(10, 10) == backgroundDepth,
-                "weighted interior mismatch");
-        require(std::abs(motionAt(20, 9, 0) + .09375f) < .001f &&
+        // Interior at or above the opacity threshold (the dispatch passes 50%):
+        // the object's own motion and depth replace the engine's value exactly.
+        // No blend is applied, so the value equals the boundary value.
+        require(std::abs(motionAt(10, 10, 0) - .09375f) < .001f &&
+                std::abs(motionAt(10, 10, 1) + .05f) < .001f && std::abs(depthAt(10, 10) - .8f) < .001f &&
+                selectionAt(10, 10) > .99f,
+                "interior above the threshold did not take the object motion");
+        // Interior below the threshold keeps the engine's motion and depth byte
+        // for byte: the pixel belongs to the content behind the surface.
+        // The engine background is stored as half, so the y component compares
+        // against the same round trip the upload performed.
+        require(motionAt(24, 10, 0) == background[0] &&
+                motionAt(24, 10, 1) == DirectX::PackedVector::XMConvertHalfToFloat(
+                    DirectX::PackedVector::XMConvertFloatToHalf(background[1])) &&
+                depthAt(24, 10) == backgroundDepth && selectionAt(24, 10) == 0,
+                "interior below the threshold changed");
+        require(std::abs(motionAt(20, 9, 0) + .0625f) < .001f &&
                 std::abs(depthAt(20, 9) - .3f) < .001f, "forward-depth edge mismatch");
         for (unsigned y = 0; y < Height; ++y)
             for (unsigned x = 0; x < Width; ++x)
@@ -797,8 +870,8 @@ int wmain(int argc, wchar_t** argv)
             }
         for (auto& read : reads) read->Unmap(0, nullptr);
         gpu.releaseAfterGpuDrain();
-        std::puts("PACKED_MOTION_GPU_OK background_preserved=1 exact_inner_edge=1 weighted_interior=1 "
-                  "forward_depth=1 reverse_depth=1 passes=1");
+        std::puts("PACKED_MOTION_GPU_OK background_preserved=1 exact_inner_edge=1 threshold_interior=1 "
+                  "forward_depth=1 reverse_depth=1 jitter_convention=1 passes=1");
         return 0;
     }
     catch (const std::exception& error)

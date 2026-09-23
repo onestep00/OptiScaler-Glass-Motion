@@ -12,6 +12,11 @@ New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
 $objectDirectory = $buildDirectory.TrimEnd('\') + '\'
 $common = @('/nologo', '/std:c++20', '/EHsc', '/O2', '/MD', '/D_CRT_SECURE_NO_WARNINGS',
             "/I$PSScriptRoot", "/Fo$objectDirectory")
+$selectionExe = Join-Path $buildDirectory 'PackedMotionSelection.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'PackedMotionSelection.cpp') "/Fe$selectionExe"
+if ($LASTEXITCODE -ne 0) { throw 'Packed frame selection test build failed' }
+& $selectionExe
+if ($LASTEXITCODE -ne 0) { throw 'Packed frame selection contract failed' }
 $materialExe = Join-Path $buildDirectory 'MaterialCaptureBlend.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'MaterialCaptureBlend.cpp') "/Fe$materialExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 if ($LASTEXITCODE -ne 0) { throw 'Material capture blend test build failed' }
@@ -37,6 +42,11 @@ $arrayMapExe = Join-Path $buildDirectory 'ArrayMapping.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Array mapping test build failed' }
 & $arrayMapExe
 if ($LASTEXITCODE -ne 0) { throw 'Array mapping contract failed' }
+$hookGateExe = Join-Path $buildDirectory 'HookGate.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'HookGate.cpp') "/Fe$hookGateExe"
+if ($LASTEXITCODE -ne 0) { throw 'Hook gate test build failed' }
+& $hookGateExe
+if ($LASTEXITCODE -ne 0) { throw 'Hook gate contract failed' }
 $motionDumpExe = Join-Path $buildDirectory 'MotionDump.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'MotionDump.cpp') "/Fe$motionDumpExe"
 if ($LASTEXITCODE -ne 0) { throw 'Motion dump test build failed' }
@@ -66,6 +76,24 @@ $observerExe = Join-Path $buildDirectory 'ObservedSession.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Observed session test build failed' }
 & $observerExe (Join-Path $PSScriptRoot '..\GlassSurface.hlsl') (Join-Path $PSScriptRoot '..\GlassRegion.hlsl')
 if ($LASTEXITCODE -ne 0) { throw 'Observed session callback or lifetime test failed' }
+
+$memoExe = Join-Path $buildDirectory 'PipelineCacheMemo.exe'
+& $compiler @common '/DNOMINMAX' "/I$optiDirectory" "/I$optiDirectory\include" `
+    "/I$optiDirectory\include" `
+    "/I$repository\external\FidelityFX-SDK\sdk\tools\ffx_shader_compiler\libs\dxc\inc" `
+    (Join-Path $PSScriptRoot 'PipelineCacheMemo.cpp') (Join-Path $PSScriptRoot '../GeometryPipeline.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryCoverageRecorder.cpp') (Join-Path $PSScriptRoot '../DxilVertexHistory.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryPipelineCache.cpp') (Join-Path $PSScriptRoot 'GeometryCommandFixture.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryCommands.cpp') (Join-Path $PSScriptRoot '../GeometryViews.cpp') `
+    (Join-Path $PSScriptRoot '../GeometryCreation.cpp') "/Fe$memoExe" /link d3d12.lib dxgi.lib `
+    (Join-Path $optiDirectory 'library\detours\detours.lib')
+if ($LASTEXITCODE -ne 0) { throw 'Pipeline cache memo test build failed' }
+$memoFixture = Join-Path $repository 'artifacts\glass-geometry-shader'
+if (!(Test-Path -LiteralPath (Join-Path $memoFixture 'instances.dxil'))) {
+    throw "geometry shader fixtures missing; run build_geometry_shader.ps1 to produce $memoFixture"
+}
+& $memoExe $memoFixture (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll')
+if ($LASTEXITCODE -ne 0) { throw 'Pipeline cache memo contract failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'
 $sources = @((Join-Path $PSScriptRoot 'Settings.cpp'),

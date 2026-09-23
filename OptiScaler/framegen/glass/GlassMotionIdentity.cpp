@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GlassMotionIdentity.h"
+#include "GlassArrayMapping.h"
 #include "CyberpunkDraws.h"
 #include "CyberpunkObjects.h"
 #include "GeometryCommands.h"
@@ -17,7 +18,8 @@ namespace
 std::atomic<std::uint64_t> resolvedCount = 0, rejectedCount = 0, noOwnerCount = 0, noViewCount = 0,
                            noLifetimeCount = 0, noElementIndexCount = 0, noViewStateCount = 0,
                            noViewUnknownCount = 0, noViewDescriptorCount = 0, noElementParentCount = 0,
-                           noElementOrderCount = 0;
+                           noElementOrderCount = 0, noViewNoRecordCount = 0, noViewNullResourceCount = 0,
+                           elementMappedCount = 0, elementUnmappedCount = 0;
 
 // Deterministic mesh-topology identity. The shape has no topology id of its own
 // and VertexHistoryKey requires a nonzero topology value.
@@ -74,14 +76,23 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
         // is used only when the draw has no depth binding.
         const auto* raster = ReadGeometryRasterState(command);
         std::uint64_t view = 0;
+        bool namedViewRecord = false;
         if (raster && raster->targetsKnown)
         {
-            if (raster->depthView && raster->depthView->resource)
-                view = raster->depthView->resource;
-            else
-                for (UINT i = 0; i < raster->targetCount; ++i)
-                    if (raster->targetViews[i] && raster->targetViews[i]->resource)
-                    { view = raster->targetViews[i]->resource; break; }
+            if (raster->depthView)
+            {
+                namedViewRecord = true;
+                if (raster->depthView->resource)
+                    view = raster->depthView->resource;
+            }
+            for (UINT i = 0; i < raster->targetCount && !view; ++i)
+            {
+                if (!raster->targetViews[i])
+                    continue;
+                namedViewRecord = true;
+                if (raster->targetViews[i]->resource)
+                    view = raster->targetViews[i]->resource;
+            }
         }
         if (!view)
         {
@@ -90,7 +101,15 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
             else if (!raster->targetsKnown)
                 noViewUnknownCount.fetch_add(1, std::memory_order_relaxed);
             else
+            {
                 noViewDescriptorCount.fetch_add(1, std::memory_order_relaxed);
+                // The aggregate above hides whether the draw named no view
+                // record or named records whose resource field is still zero.
+                if (namedViewRecord)
+                    noViewNullResourceCount.fetch_add(1, std::memory_order_relaxed);
+                else
+                    noViewNoRecordCount.fetch_add(1, std::memory_order_relaxed);
+            }
             reject(noViewCount);
             return false;
         }
@@ -138,6 +157,26 @@ bool resolveIdentity(const void*, ID3D12GraphicsCommandList* command, const Geom
                 reject(noElementIndexCount);
                 return false;
             }
+            if (span.orderKind == 2)
+            {
+                // Grouped update. The packet ordinal is a position inside this
+                // update, not an object identity: the engine rebuilds the pool
+                // from a selected 16-bit source-index list every frame. The
+                // grouped hook publishes that list item for each pool ordinal it
+                // appended, so the history key follows the object when the
+                // selection changes. A miss keeps the ordinal (previous
+                // behaviour) and is counted, so a live session shows whether the
+                // engine mapping actually reached this proxy and range.
+                const auto member = LookupArrayMapping(span.parent.proxy, span.transformIndex + ordinal,
+                                                       span.transformIndex, span.count);
+                if (member != UINT32_MAX)
+                {
+                    sourceIndex = member;
+                    elementMappedCount.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                    elementUnmappedCount.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         key.object = {owner.proxy, owner.mesh, owner.slot, lifetime};
         key.view = view;
@@ -178,10 +217,14 @@ GlassMotionIdentityStats ReadGlassMotionIdentityStats() noexcept
     value.noViewState = noViewStateCount.load(std::memory_order_relaxed);
     value.noViewUnknown = noViewUnknownCount.load(std::memory_order_relaxed);
     value.noViewDescriptor = noViewDescriptorCount.load(std::memory_order_relaxed);
+    value.noViewNoRecord = noViewNoRecordCount.load(std::memory_order_relaxed);
+    value.noViewNullResource = noViewNullResourceCount.load(std::memory_order_relaxed);
     value.noLifetime = noLifetimeCount.load(std::memory_order_relaxed);
     value.noElementIndex = noElementIndexCount.load(std::memory_order_relaxed);
     value.noElementParent = noElementParentCount.load(std::memory_order_relaxed);
     value.noElementOrder = noElementOrderCount.load(std::memory_order_relaxed);
+    value.elementMapped = elementMappedCount.load(std::memory_order_relaxed);
+    value.elementUnmapped = elementUnmappedCount.load(std::memory_order_relaxed);
     return value;
 }
 } // namespace GlassFg

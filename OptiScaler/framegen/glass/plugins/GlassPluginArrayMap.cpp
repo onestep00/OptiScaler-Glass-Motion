@@ -10,6 +10,12 @@
 // This plugin attaches both functions at runtime (no process restart) and logs
 // the resulting element -> source-index mapping so the resident module can use
 // engine data instead of rejecting grouped arrays.
+//
+// Do not run this plugin next to the module's own engine group hooks
+// (CyberpunkGroups.cpp), which attach the same 0x9c19e8 from 2026-09-17 and
+// publish to the same table (GlassArrayMapping). Both routes hooking one
+// function would produce two entries for one append range. The plugin route is
+// kept for sessions that must run without the engine hooks.
 #include <windows.h>
 #include <detours.h>
 #include "../DetourThreads.h"
@@ -111,6 +117,11 @@ struct Group
 // object identity that thread A is about to publish.
 thread_local Group current {};
 std::atomic<unsigned> appends { 0 };
+// The next live window has to separate "the append hook never ran" from "it ran
+// but the source was outside the object's element array" and from "it ran before
+// the mesh hook published a valid array". The 2026-09-17 02:0x sessions only
+// logged ARRAY_MAP appends=0 with empty firstIndices, which fits all three.
+std::atomic<unsigned> appendRejects { 0 }, appendInvalidContext { 0 }, appendSamples { 0 };
 thread_local std::uint32_t firstIndices[64] {};
 thread_local unsigned firstCount = 0;
 std::atomic<std::uint64_t> publishedFrames { 0 };
@@ -206,6 +217,30 @@ void noteOwnerScan(std::uintptr_t proxy, unsigned long long call) noexcept
     slot.nextCall = call + OwnerRetryInterval;
 }
 
+// The fallback must never be able to run on every call again. The 2026-09-17
+// 01:58 collapse showed the 64-entry memo alone does not bound it once the
+// distinct-proxy population outgrows the table (585 proxies in the 65 s
+// window), and the same path had already burned eleven cores on 2026-09-14.
+// The monitor thread refills this budget; the render path only spends it, so
+// one beat can pay for at most OwnerScanBurst scans no matter the call rate.
+// Default is off: the append-derived mapping is the original engine path, and
+// the scan produced 26 publishes in a 27-minute session.
+constexpr unsigned OwnerScanBurst = 2;
+std::atomic<unsigned> ownerScanBudget { 0 };
+std::atomic<bool> ownerScanEnabled { false };
+std::atomic<unsigned long long> ownerScans { 0 };
+
+bool takeOwnerScanBudget() noexcept
+{
+    unsigned budget = ownerScanBudget.load(std::memory_order_relaxed);
+    while (budget)
+    {
+        if (ownerScanBudget.compare_exchange_weak(budget, budget - 1, std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
+
 void hookedAppend(void* container, std::uintptr_t sourceMatrix)
 {
     (void)container;
@@ -216,14 +251,25 @@ void hookedAppend(void* container, std::uintptr_t sourceMatrix)
         if (call <= 4)
             directLog("append_enter=%u source=%llx valid=%u", call,
                       static_cast<unsigned long long>(sourceMatrix), current.valid ? 1u : 0u);
-        if (current.valid && sourceMatrix >= current.arrayBase &&
-            sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30)
+        const bool inRange = current.valid && sourceMatrix >= current.arrayBase &&
+                             sourceMatrix < current.arrayBase + std::uint64_t(current.count) * 0x30;
+        if (appendSamples.fetch_add(1, std::memory_order_relaxed) < 8)
+            directLog("append_sample=%u source=%llx base=%llx count=%u index=%lld in_range=%u", call,
+                      static_cast<unsigned long long>(sourceMatrix),
+                      static_cast<unsigned long long>(current.arrayBase), current.count,
+                      inRange ? static_cast<long long>((sourceMatrix - current.arrayBase) / 0x30) : -1ll,
+                      inRange ? 1u : 0u);
+        if (inRange)
         {
             const auto index = std::uint32_t((sourceMatrix - current.arrayBase) / 0x30);
             if (firstCount < std::size(firstIndices))
                 firstIndices[firstCount++] = index;
             appends.fetch_add(1, std::memory_order_relaxed);
         }
+        else if (current.valid)
+            appendRejects.fetch_add(1, std::memory_order_relaxed);
+        else
+            appendInvalidContext.fetch_add(1, std::memory_order_relaxed);
     }
     --inFlight;
 }
@@ -297,8 +343,9 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
                 ArrayMappingDraft draft;
                 // Bounded fallback: at most one probe per proxy per
                 // OwnerRetryInterval grouped calls on this thread.
-                if (ownerScanAllowed(proxy, call))
+                if (ownerScanAllowed(proxy, call) && takeOwnerScanBudget())
                 {
+                    ownerScans.fetch_add(1, std::memory_order_relaxed);
                     noteOwnerScan(proxy, call);
                     if (buildMappingFromOwner(proxy, current.count, draft))
                     {
@@ -335,10 +382,13 @@ void hookedGrouped(std::uintptr_t proxy, std::uintptr_t previousValid)
             {
                 char text[256] {};
                 std::snprintf(text, sizeof(text),
-                              "ARRAY_MAP proxy=%llx count=%u output_start=%u flags=%04x appends=%u "
-                              "indices=%u,%u,%u,%u,%u,%u",
+                              "ARRAY_MAP proxy=%llx count=%u output_start=%u flags=%04x appends=%u append=%u "
+                              "invalid=%u reject=%u indices=%u,%u,%u,%u,%u,%u",
                               static_cast<unsigned long long>(current.proxy), current.count, current.outputStart,
-                              current.flags, appends.load(std::memory_order_relaxed), firstIndices[0], firstIndices[1],
+                              current.flags, appends.load(std::memory_order_relaxed),
+                              appendCalls.load(std::memory_order_relaxed),
+                              appendInvalidContext.load(std::memory_order_relaxed),
+                              appendRejects.load(std::memory_order_relaxed), firstIndices[0], firstIndices[1],
                               firstIndices[2], firstIndices[3], firstIndices[4], firstIndices[5]);
                 directLog("%s", text);
             }
@@ -625,9 +675,16 @@ DWORD WINAPI monitorLoop(LPVOID) noexcept
         if (monitorStop.load(std::memory_order_relaxed))
             break;
         flushLog();
-        directLog("beat=%u grouped=%u append=%u basehits=%u flaghits=%u", ++beat,
+        if (ownerScanEnabled.load(std::memory_order_relaxed))
+            ownerScanBudget.store(OwnerScanBurst, std::memory_order_relaxed);
+        directLog("beat=%u grouped=%u append=%u invalid=%u reject=%u basehits=%u flaghits=%u ownerscan=%u scans=%u",
+                  ++beat,
                   groupedCalls.load(std::memory_order_relaxed), appendCalls.load(std::memory_order_relaxed),
-                  hitsBase.load(std::memory_order_relaxed), hitsFlag.load(std::memory_order_relaxed));
+                  appendInvalidContext.load(std::memory_order_relaxed),
+                  appendRejects.load(std::memory_order_relaxed),
+                  hitsBase.load(std::memory_order_relaxed), hitsFlag.load(std::memory_order_relaxed),
+                  ownerScanEnabled.load(std::memory_order_relaxed) ? 1u : 0u,
+                  static_cast<unsigned>(ownerScans.load(std::memory_order_relaxed)));
     }
     return 0;
 }
@@ -687,8 +744,10 @@ extern "C" __declspec(dllexport) bool GlassPluginAttach(const GlassPluginApi* ap
     const bool skipGrouped = markerPresent(L"plugin-grouped.off");
     const bool skipAppend = markerPresent(L"plugin-append.off");
     const bool passThrough = markerPresent(L"plugin-passthrough.on");
-    directLog("attach switches grouped=%u append=%u passthrough=%u", skipGrouped ? 0u : 1u,
-              skipAppend ? 0u : 1u, passThrough ? 1u : 0u);
+    const bool ownerScan = markerPresent(L"plugin-ownerscan.on");
+    ownerScanEnabled.store(ownerScan, std::memory_order_relaxed);
+    directLog("attach switches grouped=%u append=%u passthrough=%u ownerscan=%u", skipGrouped ? 0u : 1u,
+              skipAppend ? 0u : 1u, passThrough ? 1u : 0u, ownerScan ? 1u : 0u);
     GlassFg::DetourThreads threads;
     if (!threads.gather() || DetourTransactionBegin() != NO_ERROR)
     {
@@ -862,7 +921,33 @@ int main()
     ArrayMappingDraft duplicate;
     if (buildMappingFromOwner(reinterpret_cast<std::uintptr_t>(object), 40, duplicate))
         ++failures;
-    std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u mapping_built=%d\n",
+    // The next live window separates "hook never entered" (append=0) from
+    // "entered but out of range" (reject>0) and from "entered before the mesh
+    // hook published a valid array" (invalid>0), so the counters must move
+    // exactly once per append.
+    current.proxy = 0x1000;
+    current.arrayBase = reinterpret_cast<std::uintptr_t>(object);
+    current.count = 2;
+    current.outputStart = 0;
+    current.valid = true;
+    const auto entersBefore = appendCalls.load();
+    const auto rejectsBefore = appendRejects.load();
+    const auto invalidBefore = appendInvalidContext.load();
+    hookedAppend(nullptr, current.arrayBase);
+    hookedAppend(nullptr, current.arrayBase + 2 * 0x30);
+    if (appendCalls.load() != entersBefore + 2 || appendRejects.load() != rejectsBefore + 1 ||
+        appendInvalidContext.load() != invalidBefore)
+        ++failures;
+    current.valid = false;
+    hookedAppend(nullptr, 0);
+    if (appendInvalidContext.load() != invalidBefore + 1 || appendCalls.load() != entersBefore + 3)
+        ++failures;
+    current.proxy = 0;
+    current.arrayBase = 0;
+    current.count = 0;
+    current.outputStart = 0;
+    std::printf("PLUGIN_SELFTEST failures=%d bogus_value_ignored=1 group_shape_found=%u mapping_built=%d "
+                "append_counters_checked=1\n",
                 failures, found, mapped ? 1 : 0);
     return failures ? 1 : 0;
 }
@@ -908,6 +993,241 @@ int main()
             ++failures;
     }
     std::printf("PLUGIN_CONTRACT_TEST failures=%d reversed_selection_preserved=1\n", failures);
+    return failures ? 1 : 0;
+}
+#endif
+
+#ifdef GLASS_PLUGIN_HOOKBENCH
+// Offline cost of the exact hook bodies that run on the render threads.
+//
+// On 2026-09-17 01:58 the live log recorded ~19,400 grouped calls per second
+// (7,760 per engine frame) while the engine frame rate collapsed from 23 fps
+// to 2.5 fps. This bench answers whether the body itself can pay for that, so
+// "hook body cost" and "detour patch cost" can be separated. The trampoline is
+// replaced by a stub that walks the same element appends the engine's grouped
+// path performs, and the logger is the same 64 KiB buffered FILE* the live
+// build opens.
+#include <chrono>
+#include <thread>
+#include <vector>
+
+namespace
+{
+// Live rates from the 01:58 window: grouped calls per second and per engine
+// frame at 2.5 engine fps.
+constexpr unsigned long long LiveGroupedCallsPerSecond = 19400;
+constexpr unsigned long long LiveGroupedCallsPerEngineFrame = 7760;
+
+std::atomic<unsigned long long> benchPublished { 0 };
+std::atomic<unsigned long long> benchTrampoline { 0 };
+unsigned long long benchElementsPerCall = 0;
+std::uintptr_t benchElementBase = 0;
+std::uintptr_t benchProxyTable[1024] {};
+unsigned benchProxyCount = 1;
+
+void benchPublish(const GlassArrayMappingEntry*) noexcept
+{
+    benchPublished.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Stands in for the original grouped path: the engine walks the selected
+// elements and calls the append function once per element.
+void benchTrampolineBody(std::uintptr_t, std::uintptr_t) noexcept
+{
+    benchTrampoline.fetch_add(1, std::memory_order_relaxed);
+    for (unsigned long long i = 0; i < benchElementsPerCall; ++i)
+        hookedAppend(nullptr, benchElementBase + i * 0x30);
+}
+
+struct HookBenchResult
+{
+    double nsPerCall = 0.0;
+    unsigned long long calls = 0;
+    unsigned long long scans = 0;
+};
+
+HookBenchResult runHookPattern(const char* name, unsigned threadCount, unsigned long long callsPerThread,
+                               std::uintptr_t proxy)
+{
+    std::atomic<bool> start { false };
+    std::vector<std::thread> threads;
+    for (unsigned id = 0; id < threadCount; ++id)
+    {
+        threads.emplace_back(
+            [&]()
+            {
+                while (!start.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                for (unsigned long long i = 0; i < callsPerThread; ++i)
+                    hookedGrouped(benchProxyCount > 1 ? benchProxyTable[i % benchProxyCount] : proxy, 1);
+            });
+    }
+    const auto scansBegin = ownerScans.load(std::memory_order_relaxed);
+    const auto begin = std::chrono::steady_clock::now();
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads)
+        thread.join();
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    const auto calls = callsPerThread * threadCount;
+    const auto scans = ownerScans.load(std::memory_order_relaxed) - scansBegin;
+    const double perCall = calls ? elapsed * 1.0e9 / double(calls) : 0.0;
+    std::printf("HOOKBENCH_RESULT %s threads=%u calls=%llu ns_per_call=%.1f "
+                "ms_per_second_at_%llu=%.3f ms_per_engine_frame_at_%llu=%.4f scans=%llu scans_per_call=%.3f\n",
+                name, threadCount, calls, perCall, LiveGroupedCallsPerSecond,
+                perCall * double(LiveGroupedCallsPerSecond) / 1.0e6, LiveGroupedCallsPerEngineFrame,
+                perCall * double(LiveGroupedCallsPerEngineFrame) / 1.0e6, scans,
+                calls ? double(scans) / double(calls) : 0.0);
+    std::fflush(stdout);
+    return { perCall, calls, scans };
+}
+} // namespace
+
+int main()
+{
+    int failures = 0;
+    // Synthetic proxy: +0x108 element array, +0x110 count, +0x114 output start,
+    // +0xEA flags. Same layout the probe reads in game.
+    alignas(16) unsigned char elementStorage[64 * 0x30] {};
+    alignas(16) unsigned char proxy[0x200] {};
+    *reinterpret_cast<std::uintptr_t*>(proxy + 0x108) = reinterpret_cast<std::uintptr_t>(elementStorage);
+    *reinterpret_cast<std::uint32_t*>(proxy + 0x110) = 8;
+    *reinterpret_cast<std::uint32_t*>(proxy + 0x114) = 0x100;
+    *reinterpret_cast<std::uint16_t*>(proxy + 0xea) = 0;
+    const auto proxyAddress = reinterpret_cast<std::uintptr_t>(proxy);
+    benchElementBase = reinterpret_cast<std::uintptr_t>(elementStorage);
+
+    hostStorage.version = 1;
+    hostStorage.log = nullptr;
+    hostStorage.moduleDirectory = nullptr;
+    hostStorage.engineUpdate = nullptr;
+    hostStorage.publishArrayMapping = &benchPublish;
+    hostStorage.trace = nullptr;
+    host.store(&hostStorage, std::memory_order_release);
+    originalGrouped = &benchTrampolineBody;
+    draining.store(false, std::memory_order_relaxed);
+
+    // Same buffered logger the live build uses, so the beat probe measures the
+    // real flush cost instead of a guessed one.
+    wchar_t logPath[MAX_PATH] {};
+    if (GetTempPathW(MAX_PATH, logPath) != 0)
+    {
+        std::wstring path { logPath };
+        path += L"glass-plugin-hookbench.log";
+        logFile = _wfopen(path.c_str(), L"a");
+        if (logFile)
+            std::setvbuf(logFile, nullptr, _IOFBF, 64 * 1024);
+    }
+
+    // Warm up the thread_local state and the logger so the first call does not
+    // pay for the owner scan inside the measured window.
+    benchElementsPerCall = 0;
+    for (unsigned i = 0; i < 1000; ++i)
+        hookedGrouped(proxyAddress, 1);
+
+    const auto groupedOnly = runHookPattern("grouped-only", 1, 2000000, proxyAddress);
+
+    benchElementsPerCall = 8;
+    const auto groupedAppendPublish = runHookPattern("grouped+8-append+publish", 1, 1000000, proxyAddress);
+    const auto groupedAppendPublishMt = runHookPattern("grouped+8-append+publish", 4, 250000, proxyAddress);
+    benchElementsPerCall = 0;
+    const auto groupedOnlyMt = runHookPattern("grouped-only", 4, 500000, proxyAddress);
+
+    // Owner-scan fallback under a live-sized proxy population. The 01:58 window
+    // recorded 585 distinct proxies in 65 s against a 64-entry per-thread memo,
+    // so the fallback re-armed on nearly every call while append=0 kept
+    // firstCount at zero. Reproduce that shape: 1024 rotating proxies, each
+    // carrying readable but mismatching owner candidates so every scan performs
+    // real VirtualQuery work. The first phase keeps the old unbounded budget,
+    // the second uses the shipped default (off) and must stop the scans.
+    {
+        constexpr unsigned kThrashProxies = 1024;
+        std::vector<unsigned char> pool(static_cast<std::size_t>(kThrashProxies) * 0x200 + 0x100);
+        alignas(8) unsigned char thrashOwner[0x60] {};
+        *reinterpret_cast<std::uintptr_t*>(thrashOwner + 0x18) =
+            reinterpret_cast<std::uintptr_t>(thrashOwner);
+        *reinterpret_cast<std::uint32_t*>(thrashOwner + 0x3c) = 4; // != arrayCount 8
+        *reinterpret_cast<std::uint32_t*>(thrashOwner + 0x50) = 0x200;
+        for (unsigned i = 0; i < kThrashProxies; ++i)
+        {
+            auto* p = pool.data() + static_cast<std::size_t>(i) * 0x200;
+            *reinterpret_cast<std::uintptr_t*>(p + 0x108) = reinterpret_cast<std::uintptr_t>(elementStorage);
+            *reinterpret_cast<std::uint32_t*>(p + 0x110) = 8;
+            *reinterpret_cast<std::uint32_t*>(p + 0x114) = 0x100;
+            *reinterpret_cast<std::uintptr_t*>(p + 0xd8) = reinterpret_cast<std::uintptr_t>(thrashOwner);
+            *reinterpret_cast<std::uintptr_t*>(p + 0x118) = reinterpret_cast<std::uintptr_t>(thrashOwner);
+            *reinterpret_cast<std::uintptr_t*>(p + 0x1c8) = reinterpret_cast<std::uintptr_t>(thrashOwner);
+            *reinterpret_cast<std::uintptr_t*>(p + 0x1d0) = reinterpret_cast<std::uintptr_t>(thrashOwner);
+            benchProxyTable[i] = reinterpret_cast<std::uintptr_t>(p);
+        }
+        benchProxyCount = kThrashProxies;
+
+        ownerScanEnabled.store(true, std::memory_order_relaxed);
+        ownerScanBudget.store(~0u, std::memory_order_relaxed); // 01:58 behaviour
+        const auto unbounded = runHookPattern("owner-scan-thrash-1024-unbounded", 1, 100000, proxyAddress);
+        ownerScanBudget.store(0, std::memory_order_relaxed); // shipped default
+        const auto budgeted = runHookPattern("owner-scan-thrash-1024-budget-off", 1, 100000, proxyAddress);
+
+        // Dense variant: a real engine object holds pointers in most of its 64
+        // qwords, so findOwnerCandidates pays one readableRange (VirtualQuery)
+        // per slot before the count check rejects the candidate. The pointers
+        // go to distinct pages whose +0x3c count is zero, so the search walks
+        // every slot instead of stopping at the eighth accepted candidate.
+        std::vector<unsigned char> rejectPool(static_cast<std::size_t>(64) * 0x1000);
+        for (unsigned i = 0; i < kThrashProxies; ++i)
+        {
+            auto* p = pool.data() + static_cast<std::size_t>(i) * 0x200;
+            unsigned slot = 0;
+            for (unsigned offset = 0; offset < 0x200; offset += 8)
+            {
+                if (offset == 0xe8 || offset == 0x108 || offset == 0x110)
+                    continue;
+                *reinterpret_cast<std::uintptr_t*>(p + offset) =
+                    reinterpret_cast<std::uintptr_t>(rejectPool.data() +
+                                                     static_cast<std::size_t>(slot % 64) * 0x1000);
+                ++slot;
+            }
+        }
+        ownerScanBudget.store(~0u, std::memory_order_relaxed);
+        const auto dense = runHookPattern("owner-scan-thrash-1024-dense-unbounded", 1, 20000, proxyAddress);
+        benchProxyCount = 1;
+        ownerScanEnabled.store(false, std::memory_order_relaxed);
+
+        if (unbounded.scans < unbounded.calls / 2)
+            ++failures; // the live thrash shape must reproduce here
+        if (budgeted.scans != 0)
+            ++failures; // the render-path budget must stop the fallback
+        if (dense.scans != dense.calls)
+            ++failures; // dense pointer slots must scan on every call
+    }
+
+    // Beat probe: one monitor tick is a flush plus one formatted line. The
+    // live loop sleeps 250 ms between ticks, so four ticks per second.
+    double beatNs = 0.0;
+    constexpr unsigned beats = 2000;
+    {
+        const auto begin = std::chrono::steady_clock::now();
+        for (unsigned i = 0; i < beats; ++i)
+        {
+            flushLog();
+            directLog("beat=%u grouped=%u append=%u", i, 1u, 1u);
+        }
+        flushLog();
+        beatNs = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count() * 1.0e9 / double(beats);
+    }
+    std::printf("HOOKBENCH_RESULT beat-thread ns_per_beat=%.1f ms_per_second_at_4Hz=%.4f\n", beatNs, beatNs * 4.0 / 1.0e6);
+
+    if (benchPublished.load(std::memory_order_relaxed) == 0)
+        ++failures; // the publish path must actually run in the append phases
+    if (benchTrampoline.load() < groupedOnly.calls)
+        ++failures;
+    std::printf("PLUGIN_HOOKBENCH_FAILURES=%d\n", failures);
+    std::fflush(stdout);
+    if (logFile)
+    {
+        std::fclose(logFile);
+        logFile = nullptr;
+    }
+    std::printf("PLUGIN_HOOKBENCH_OK\n");
     return failures ? 1 : 0;
 }
 #endif

@@ -18,7 +18,7 @@ This directory owns the correction. `OptiScaler.vcxproj` imports `GlassFg.props`
 
 ## Cache-wide and runtime transparency inventory
 
-`work/glass-native-material-v1/audit_workflow.py materials` rebuilds the shader-cache inventory and runs the bounded 16-worker rewrite checks. All 592 candidate VS binaries pass the history rewrite and DXIL validator. All 2,455 ordinary screen-transparency techniques have a validated color-capture or geometric-coverage route: 2,429 retain color/transmission and 26 use coverage fallback. The 448 rejected VS/PS pairs all contain existing pixel-UAV side effects; 432 are distortion passes. Every one of the 33 distortion material families also has an ordinary screen-transparency route, so the runtime acquisition path uses that visible-material draw rather than duplicating a side-effectful distortion pass. None of these counts proves previous-frame identity or FG input admission.
+`glass-native-material-v1/audit_workflow.py materials` rebuilds the shader-cache inventory and runs the bounded 16-worker rewrite checks. All 592 candidate VS binaries pass the history rewrite and DXIL validator. All 2,455 ordinary screen-transparency techniques have a validated color-capture or geometric-coverage route: 2,429 retain color/transmission and 26 use coverage fallback. The 448 rejected VS/PS pairs all contain existing pixel-UAV side effects; 432 are distortion passes. Every one of the 33 distortion material families also has an ordinary screen-transparency route, so the runtime acquisition path uses that visible-material draw rather than duplicating a side-effectful distortion pass. None of these counts proves previous-frame identity or FG input admission.
 
 `GeometryPipelineStream.h` reconstructs successful public `ID3D12Device2::CreatePipelineState` graphics streams through Microsoft's `D3DX12ParsePipelineStream`. Compute streams are counted separately. Duplicate, unknown/newer and non-default view-instancing subobjects are rejected instead of guessed. The original creation call, stream and returned PSO stay unchanged. Independent D3D12 tests cover a real graphics stream, compute classification, duplicate rejection and view-instancing rejection.
 
@@ -140,7 +140,7 @@ For the new recording, two fresh-feature runs of the delivered inputs produced 7
 
 The material's dual-source shader emits a separate RGB destination multiplier. An independent synthetic D3D12 test first verified extracting this multiplier through a second draw with zero source contribution and `SRC1_COLOR` destination blending, without changing the pixel shader. All 2,048 synthetic pixels matched. Later live extraction is described below. Repeating the real glass shader has additional cost and requires draw-state and side-effect validation. The existing deployed algorithm remains b59aa86.
 
-Local evidence: `outputs/glass-local-correspondence/`, `outputs/glass-joint-capture-v2/`, `work/glass-joint-replay/`, and the workspace document `docs/glass-refraction-joint-capture.md`. Raw game captures are not distributed in this repository.
+Local evidence: `outputs/glass-local-correspondence/`, `outputs/glass-joint-capture-v2/`, `glass-joint-replay/`, and the workspace document `docs/glass-refraction-joint-capture.md`. Raw game captures are not distributed in this repository.
 
 ## Material evidence and offline test direction
 
@@ -200,7 +200,7 @@ A read-only bytecode audit matched all 12 previously captured transparent PSOs t
 
 A further controlled ablation used the complete captured F/T/U, including the previously missed liquid, over synthetic backgrounds. With 1280x720 color and 640x360 MV/depth, 12 runs produced 432 successful 4x outputs. Evaluated candidates selected all material pixels, attenuation-dominant pixels, surface-gradient-dominant pixels, or a combined mask; the combined mask also had an MV-only ablation. Every tested selector increased cup-region mean error against analytic intermediate truth. In the stationary-surface/moving-figure crossing region, baseline error was 8.768 and all-surface error 9.303; in relative translation, they were 3.298 and 3.844, in 8-bit RGB levels. Combined-mask MV-only error reached 8.882 in relative translation. Whole-scene generated comparisons were inspected and retained cup-edge errors. These candidates are not adopted. Frozen captured material plus synthetic motion/depth/tone mapping is not game-motion replay, and this does not rule out every single-MV method.
 
-Local evidence is recorded in the workspace document `docs/glass-object-motion-source.md`, `work/glass-object-motion-audit-v1/audit.json`, and `work/glass-material-motion-selection-v1/analysis.json`. Game bytecode and raw captures remain local. No new runtime algorithm or object-motion extraction has been installed.
+Local evidence is recorded in the workspace document `docs/glass-object-motion-source.md`, `glass-object-motion-audit-v1/audit.json`, and `glass-material-motion-selection-v1/analysis.json`. Game bytecode and raw captures remain local. No new runtime algorithm or object-motion extraction has been installed.
 
 ### Geometry motion and separate object boundaries
 

@@ -43,11 +43,23 @@ struct PackedMotionCaptureStatus
     std::uint32_t width = 0, height = 0;
     std::uint64_t admittedDraws = 0, capturedFrames = 0, fgFrames = 0;
     std::uint64_t missingPipeline = 0, unknownIdentity = 0, topologyRejected = 0;
+    // Draws whose packed variant the cache withheld because the audited camera
+    // constant pair was absent (F-01). missingPipeline counts them as well; this
+    // counter isolates the cause so the size of the pair-less population is
+    // readable. Those draws keep the engine's own motion and run no packed
+    // raster, so they have no compose pixel counter either.
+    std::uint64_t deltaMissingDraws = 0;
     std::uint64_t mappingOverflow = 0, historyOverflow = 0, slotBusy = 0, orderingRejected = 0;
     // Slots whose recorded/consumed command list disappeared without a reset and
     // that the capture reclaimed after both fences completed. Diagnostics only;
     // a growing value means the engine keeps replacing command lists.
     std::uint64_t slotReclaimed = 0;
+    // Slots that were old enough to be unreachable by any reader but still
+    // pinned the history retirement watermark because their discard/destroyed
+    // notification never arrived. Each recovery unblocks history reclamation;
+    // a large value next to a frozen historyRetiredFrame means the engine keeps
+    // leaving one slot behind per frame.
+    std::uint64_t slotRecovered = 0;
     // FG-boundary rejection split. noFgFrame counts acquisitions where the native
     // Streamline frame value was absent; noFgQueue counts unknown FG command queue.
     std::uint64_t noFgFrame = 0, noFgQueue = 0;
@@ -61,7 +73,7 @@ struct PackedMotionCaptureStatus
     std::uint64_t rasterRejected = 0, shapeRejected = 0, viewportRejected = 0;
     // Heaviest rejection chunks (engine draw chunk ids) for attribution.
     struct ChunkCount { std::uint32_t chunk = 0; std::uint64_t count = 0; };
-    std::array<ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
+    std::array<ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {}, deltaMissingChunks {};
     // Vertex history reuse: hits keep a key across frames, inserted means the
     // key changed (no usable previous transform for that element yet).
     std::uint64_t historyHits = 0, historyInserted = 0, historyReclaimed = 0;
@@ -107,8 +119,13 @@ struct PackedMotionProvider
 {
     PackedMotionFrame (*acquire)(ID3D12GraphicsCommandList*, std::uint32_t, std::uint32_t,
                                  std::uint64_t, bool) noexcept = nullptr;
+    // Second consumer (the DLSS-NR seam): exactly the requested engine frame
+    // whose producer submission already exists. No nearest-frame fallback.
+    // No frame generation command or token is involved, so the frame generation
+    // submit-batch rule does not apply here.
+    PackedMotionFrame (*acquireSecondConsumer)(std::uint32_t, std::uint32_t, std::uint64_t) noexcept = nullptr;
     void (*discard)(const void*, bool destroyed) noexcept = nullptr;
-    explicit operator bool() const { return acquire && discard; }
+    explicit operator bool() const { return acquire && acquireSecondConsumer && discard; }
 };
 
 // One process-resident owner. Initialization is a one-time feature setup, not a
@@ -125,6 +142,10 @@ bool ReleasePackedMotionCapture() noexcept;
 PackedMotionFrame AcquirePackedMotionFrame(ID3D12GraphicsCommandList* fgCommand,
                                            std::uint32_t width, std::uint32_t height,
                                            std::uint64_t fgFrame, bool reset) noexcept;
+// Second consumer selection: exactly engineFrame, already submitted and not
+// consumed by FG. Missing, invalid or ambiguous frame identity returns empty.
+PackedMotionFrame AcquirePackedMotionFrameForSecondConsumer(std::uint32_t width, std::uint32_t height,
+                                                            std::uint64_t engineFrame) noexcept;
 PackedMotionCaptureStatus ReadPackedMotionCaptureStatus() noexcept;
 // Zeroes the diagnostic counters without touching resources or frames.
 void ResetPackedMotionCounters() noexcept;

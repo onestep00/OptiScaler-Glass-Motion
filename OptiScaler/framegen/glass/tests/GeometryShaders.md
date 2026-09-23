@@ -38,7 +38,7 @@ supplied to this transparent draw. It does not prove bone-buffer contents,
 previous deformation, camera/world transforms, general route coverage or MV.
 Next validation must evaluate that previous state and compare its positions
 against original N-1 outputs; buffer address equality alone is insufficient.
-Evidence: local `work/glass-input-words-v1/capture-analysis.json` and
+Evidence: local `glass-input-words-v1/capture-analysis.json` and
 `capture-xz-analysis.json`. Both generations retired and unloaded; totals are
 384 recorded/retired, zero pending/loaded modules, `fg_connected=0`.
 
@@ -61,7 +61,7 @@ independent `--capture-module` test. Job/epoch/queue/order checks passed; all
 passed, and the DLL unloaded after GPU completion and recording discard.
 An unsupported host rejected the new module before activation. The older
 coverage capability also passed its two-generation capture/unload test without
-opting into submission events. Evidence is local `work/glass-submit-bridge-v1/`.
+opting into submission events. Evidence is local `glass-submit-bridge-v1/`.
 The new bridge is not deployed; live history ownership and dense MV/FG remain
 incomplete. Earlier sections below retain the history of missing host seams.
 Release x64 compilation/linking also passed; the scoped local host artifact has
@@ -84,7 +84,7 @@ current vertices; 36 valid previous vertices remain exact and 6,017 motion
 samples pass (maximum error 0.001586 pixels). The independently rebuilt
 `--capture-command` instance test also passes: 143,360 original pixels, 3,563
 motion samples and 896 overlap samples. Local evidence is in
-`work/glass-history-adjacency-v1/`. This change is source-tested, not deployed;
+`glass-history-adjacency-v1/`. This change is source-tested, not deployed;
 continuous game GPU history, view/topology admission and FG remain incomplete.
 
 Native pixel capture now ran through replaceable generations 5--7 in PID 68908.
@@ -98,7 +98,7 @@ distinguishes PS invocation from later object/MV rejection. It is off by default
 and requires reserving the first 32-byte record. Later samples can still be empty;
 this does not establish the cause of the earlier all-zero frames.
 
-Local artifacts are `work/glass-native-pixels-live-v3/analysis.json`,
+Local artifacts are `glass-native-pixels-live-v3/analysis.json`,
 `native-mv-full.png`, `native-coverage-full.png`, and `native-mv-screen.png`.
 The visualization was inspected: it shows only two small disconnected fragments,
 not a complete cup/railing silhouette. Its 65 boundary pixels come from the actual
@@ -153,7 +153,7 @@ the preceding captured native current NDC; maximum displacement disagreement was
 0.0001528 render pixels. This supports N-1 correspondence for this observed draw,
 not all transparent objects or FG-frame equivalence.
 
-Evidence is local `work/glass-native-pair-live-v1/analysis.json` and `capture/`.
+Evidence is local `glass-native-pair-live-v1/analysis.json` and `capture/`.
 Its 149 vertices occupy a small moving screen region. No triangle topology,
 material boundary raster or new FG input was captured by this recorder. It is
 not the requested dense boundary MV image. All 64 jobs retired and generation 4
@@ -528,7 +528,7 @@ oracle and read once after the final submission completes. All 576 current
 vertices match the original shader exactly; all 558 accepted previous vertices
 match the immediately preceding original outputs. Warmup rejects history.
 The existing material-MV/color/depth regression also passes. Local evidence is
-`work/glass-history-adjacency-v1/gpu-batch-result.txt`.
+`glass-history-adjacency-v1/gpu-batch-result.txt`.
 
 This is a single ordered command-list test, not proof of game multi-list or
 cross-queue ordering. Test stream-output/readback storage is not the proposed

@@ -14,6 +14,12 @@ struct GeometryPipelineEntry
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
     std::uint64_t identity = 0;
     bool vertexOnlyCapture = false;
+    // The packed variant was compiled without the audited camera constant pair,
+    // so its record cannot carry the frame-to-frame jitter delta. The cache
+    // withholds `packed` for such an entry and the draw keeps the engine's own
+    // motion; this flag separates the cause from any other missing pipeline
+    // (F-01).
+    bool deltaMissing = false;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputs;
@@ -27,8 +33,24 @@ struct GeometryCacheStats
 {
     std::uint64_t roots = 0, pipelines = 0, ready = 0, rejected = 0, pending = 0, retainedBytes = 0;
     std::uint64_t packedReady = 0, packedRejected = 0;
+    // Pipelines whose packed variant was withheld because the audited camera
+    // constant pair was absent (subset of packedRejected, F-01).
+    std::uint64_t packedDeltaMissing = 0;
+    // Diagnostic opaque probe (GlassFG/OpaqueProbe, default off). ready counts
+    // the pipelines this flag alone admitted into the cache; rejected counts the
+    // probe-eligible pipelines that were left out afterwards (registration cap).
+    std::uint64_t packedOpaqueProbeReady = 0, packedOpaqueProbeRejected = 0;
     std::string lastError, lastPackedError;
 };
+
+// Process-wide publish of the diagnostic opaque probe counters. The control
+// status file is written outside the cache lock and there is one live cache per
+// process, so the cache publishes these relaxed atomics whenever either value
+// changes; the status writer only reads them. Diagnostics only - no render path
+// reads them.
+void PublishOpaqueProbeCounters(std::uint64_t ready, std::uint64_t rejected) noexcept;
+std::uint64_t ReadOpaqueProbeReadyCount() noexcept;
+std::uint64_t ReadOpaqueProbeRejectedCount() noexcept;
 
 
 // Captures successful public creation calls, then builds the paired shaders on

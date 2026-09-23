@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GeometryPipeline.h"
 #include "DxilVertexHistory.h"
+#include "GlassControls.h"
 #include "MaterialCaptureBlend.h"
 #include <dxcapi.h>
 #include <atomic>
@@ -68,6 +69,14 @@ std::atomic<std::uint64_t> packedCoverageFallbacks { 0 };
 std::uint64_t ReadPackedCoverageFallbackCount() noexcept
 {
     return packedCoverageFallbacks.load(std::memory_order_relaxed);
+}
+// Packed pipelines that compiled without the capture constant pair because the
+// audited b1/space0 block was absent, ambiguous or oversized. Those pipelines
+// keep the pre-pair tag payload and no capture delta.
+std::atomic<std::uint64_t> packedCaptureFallbacks { 0 };
+std::uint64_t ReadPackedCaptureFallbackCount() noexcept
+{
+    return packedCaptureFallbacks.load(std::memory_order_relaxed);
 }
 namespace
 {
@@ -263,7 +272,8 @@ struct GeometryCompiler::Impl
                     ComPtr<IDxcBlob>& output, std::string& error, unsigned& historyRegister, GeometryLayout layout,
                     MaterialMotionTarget target, const VertexConstantPair* capture = nullptr,
                     const VertexClipPair* clipPair = nullptr, const NativeClipInputs* nativeInputs = nullptr,
-                    const VertexInputPair* inputPair = nullptr)
+                    const VertexInputPair* inputPair = nullptr, bool captureDelta = false,
+                    bool markMissingDelta = false)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -275,9 +285,9 @@ struct GeometryCompiler::Impl
         const std::string_view text(static_cast<const char*>(disassembly->GetBufferPointer()),
                                     disassembly->GetBufferSize());
         auto rewritten =
-            vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair)
+            vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair, captureDelta, markMissingDelta)
                    : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs,
-                                           target == MaterialMotionTarget::OriginalColorAndPackedMotion);
+                                           target == MaterialMotionTarget::OriginalColorAndPackedMotion, captureDelta);
         if (!rewritten)
         {
             error = rewritten.error;
@@ -317,10 +327,31 @@ HRESULT GeometryCompiler::createCoverage(ID3D12Device* device, const GeometryRoo
 }
 HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
-                                             ComPtr<ID3D12PipelineState>& output, std::string& error)
+                                             ComPtr<ID3D12PipelineState>& output, std::string& error,
+                                             const VertexConstantPair* capture, bool* pairMissing)
 {
+    if (pairMissing)
+        *pairMissing = false;
     if (root.layout != GeometryLayout::PerInstance)
         return reject(error, "Packed motion requires per-instance identity mapping");
+    if (capture)
+    {
+        const auto status = createTarget(device, root, original, output, error,
+                                         MaterialMotionTarget::OriginalColorAndPackedMotion, false, capture);
+        if (SUCCEEDED(status))
+            return status;
+        // R6: the audited constant block is not present in every transparent
+        // vertex shader. Recompile without the pair so the pipeline keeps its
+        // original tag payload and the pixel shader drops the delta term. This
+        // is the pre-pair behaviour, counted for the live log and reported to
+        // the caller: a pair-less record carries the raw jittered difference,
+        // which the delivery path must not substitute (F-01).
+        ++packedCaptureFallbacks;
+        if (pairMissing)
+            *pairMissing = true;
+        output.Reset();
+        error.clear();
+    }
     return createTarget(device, root, original, output, error,
                         MaterialMotionTarget::OriginalColorAndPackedMotion);
 }
@@ -373,6 +404,27 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     const bool depthCoverage = coverageAudit && nativeBlend;
     const bool nativeOpaque = nativeInputs && !nativeInputs->material;
     const bool material = !vertexOnly && !nativeOpaque && !depthCoverage;
+    // Diagnostic opaque probe (GlassFG/OpaqueProbe, default off). The cache half
+    // of the flag admits the depth-writing and unblended pipelines the product
+    // gate refuses; the compiler half here relaxes exactly the two guards those
+    // pipelines would otherwise hit and cannot drop:
+    //   * read-only depth/stencil - the packed variant is an in-place rewrite of
+    //     the same draw with the same depth/stencil state, and the rewritten
+    //     pixel shader keeps every original store and adds no discard (the
+    //     rewrite helper removes the temporary discard and colour stores it
+    //     generates), so the depth write reaches the buffer exactly as the
+    //     engine's own pipeline would. The packed disassembly fixture pins that.
+    //   * the blend equation - an unblended target writes the source colour
+    //     directly, so the surface is fully opaque: transmission 0, weight 255.
+    //     Without this the record would be classified uncovered or skipped
+    //     entirely depending on the ignored blend factors the game left in the
+    //     description.
+    // A pixel shader that exports SV_Depth is still rejected by the material
+    // output analysis and recovers, as today, as a coverage-only variant that
+    // keeps the original colour and depth exports. Probe-off sessions take the
+    // original paths unchanged.
+    const bool opaqueProbe = packedMotion && OpaqueProbeEnabled();
+    const bool probeOpaque = opaqueProbe && nativeBlend;
     if (depthCoverage) target = MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
     if (!device || !root.extended || !root.original || root.original.Get() != original.pRootSignature)
         return reject(error, "Missing device or mismatched extended root");
@@ -383,7 +435,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     if (original.GS.BytecodeLength || original.HS.BytecodeLength || original.DS.BytecodeLength ||
         original.StreamOutput.NumEntries || original.StreamOutput.NumStrides)
         return reject(error, "Additional graphics stages or stream output unsupported");
-    if (material && !readOnly(original.DepthStencilState))
+    if (material && !readOnly(original.DepthStencilState) && !opaqueProbe)
         return reject(error, "Material capture requires read-only depth/stencil");
     if (original.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
         return reject(error, "Non-triangle pipeline unsupported");
@@ -399,7 +451,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     const auto& primaryBlend = original.BlendState.RenderTarget[0];
     const bool packedCoverageOnly = packedMotion && !knownMaterialBlend && primaryBlend.BlendEnable &&
                                     !primaryBlend.LogicOpEnable && primaryBlend.RenderTargetWriteMask;
-    if (material && !knownMaterialBlend && !packedCoverageOnly)
+    if (material && !knownMaterialBlend && !packedCoverageOnly && !probeOpaque)
         return reject(error, "Unsupported material blend equation");
     // Vertex capture replaces the original draw once. Its unmodified PS and
     // depth/stencil/blend state retain native writes. Unblended coverage audit
@@ -425,36 +477,52 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
             return reject(error, "Rasterizer-ordered views unavailable", FAILED(hr) ? hr : E_NOTIMPL);
     }
     const auto& blend = original.BlendState.RenderTarget[0];
-    const auto source = packedCoverageOnly ? MaterialSource::Zero : depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
+    // An unblended target under the probe is a fully opaque surface: the source
+    // colour is written directly, so the record carries transmission 0 and both
+    // the colour contribution and the coverage class are definite. The blend
+    // factors of an unblended description are ignored by the device, so they
+    // must not be read here.
+    const auto source = probeOpaque ? MaterialSource::One : packedCoverageOnly ? MaterialSource::Zero : depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
                         : blend.SrcBlend == D3D12_BLEND_ONE ? MaterialSource::One
                                                             : MaterialSource::Alpha;
-    const auto destination = packedCoverageOnly ? MaterialDestination::CoverageOnly : (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
+    const auto destination = probeOpaque ? MaterialDestination::Zero : packedCoverageOnly ? MaterialDestination::CoverageOnly : (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
                              : blend.DestBlend == D3D12_BLEND_ONE           ? MaterialDestination::One
                              : blend.DestBlend == D3D12_BLEND_SRC_ALPHA     ? MaterialDestination::Alpha
                              : blend.DestBlend == D3D12_BLEND_INV_SRC_ALPHA ? MaterialDestination::OneMinusAlpha
-                                                                            : MaterialDestination::SecondSourceRgb;
+                                                                             : MaterialDestination::SecondSourceRgb;
     ComPtr<IDxcBlob> vs, ps;
     unsigned historyRegister = UINT32_MAX;
+    // The capture delta is a packed-path contract: the vertex stage writes the
+    // frame-to-frame difference of the captured constant words and the linked
+    // pixel stage adds it. Coverage-audit captures keep their old payload.
+    const bool captureDelta = packedMotion && capture != nullptr;
+    // Packed variants compiled without the audited pair (R6) still write the
+    // record tag, and the next paired frame would read their untouched bytes
+    // 24/28 as its predecessor jitter. Mark those words as absent instead.
+    const bool markMissingDelta = packedMotion && capture == nullptr;
     if (FAILED(hr = implementation->rewrite(original.VS, true, source, destination, vs, error, historyRegister,
-                                            root.layout, target, capture, clipPair, nullptr, inputPair)))
+                                            root.layout, target, capture, clipPair, nullptr, inputPair,
+                                            captureDelta, markMissingDelta)))
         return hr;
     if (!vertexOnly)
     {
         hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                     root.layout, target, nullptr, nullptr, nativeInputs);
+                                     root.layout, target, nullptr, nullptr, nativeInputs, nullptr, captureDelta);
         if (FAILED(hr) && packedMotion && destination != MaterialDestination::CoverageOnly)
         {
             // The material equation needs colour exports this pixel shader does
-            // not expose (MRT index above one, branch-local stores, depth
-            // exports or no colour output at all). Recover as a coverage-only
-            // packed variant: the boundary still receives the object's motion
-            // and depth while the interior keeps the engine's own motion. The
-            // original exports, discard and blend state stay untouched.
+            // not expose (depth/stencil exports, branch-local stores or no
+            // colour output at all). Recover as a coverage-only packed variant:
+            // the boundary still receives the object's motion and depth while
+            // the interior keeps the engine's own motion. The original exports,
+            // discard and blend state stay untouched. Extra MRT slots above
+            // zero are not a rejection reason; they are skipped and the
+            // material pass keeps them.
             ps.Reset();
             error.clear();
             hr = implementation->rewrite(original.PS, false, MaterialSource::Zero,
                                          MaterialDestination::CoverageOnly, ps, error, historyRegister, root.layout,
-                                         target, nullptr, nullptr, nativeInputs);
+                                         target, nullptr, nullptr, nativeInputs, nullptr, captureDelta);
             if (SUCCEEDED(hr))
                 ++packedCoverageFallbacks;
         }

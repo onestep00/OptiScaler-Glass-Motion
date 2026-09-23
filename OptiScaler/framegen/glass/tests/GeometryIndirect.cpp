@@ -1,5 +1,6 @@
 #include "GeometryTestDevice.h"
 #include "../GeometryCommands.h"
+#include "../GlassHookProbe.h"
 #include "../IndirectBindings.h"
 #include <d3dcompiler.h>
 
@@ -20,6 +21,9 @@ int main()
         ComPtr<ID3D12CommandSignature> unknown, pure, changed, compute;
         check(g.d->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&unknown)));
         require(GlassFg::StartGeometryCommands(g.d.Get()), "Public command observer");
+        // The production hooks return immediately until the settings layer
+        // enables the correction; the observer fixture has to enable them.
+        GlassFg::SetHooksIdle(false);
         desc.ByteStride = 16;
         check(g.d->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&pure)));
 

@@ -7,6 +7,7 @@
 #include <hooks/Hook_Utils.h>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 namespace GlassFg
 {
@@ -36,11 +37,23 @@ struct Control
 {
     std::mutex lifecycle;
     std::atomic<std::shared_ptr<Capture>> active;
+    // Hot lookup target. Loading the owning atomic<shared_ptr> takes the
+    // implementation's spin lock, and find() runs once per indexed draw that
+    // carries an object list. The cache address is published separately, and a
+    // stopped capture is retired instead of destroyed so a reader that already
+    // loaded the raw pointer can still finish its lookup.
+    std::atomic<GeometryPipelineCache*> activeCache = nullptr;
+    std::vector<std::shared_ptr<Capture>> retired;
     void* graphicsTarget = nullptr;
     void* streamTarget = nullptr;
     bool installed = false;
 };
 std::atomic<Control*> publishedControl = nullptr;
+GeometryPipelineCache* activeGeometryCache() noexcept
+{
+    auto* state = publishedControl.load(std::memory_order_acquire);
+    return state ? state->activeCache.load(std::memory_order_acquire) : nullptr;
+}
 Control& control()
 {
     // Forwarding callbacks outlive the active cache. No destructor joins a
@@ -165,6 +178,7 @@ bool StartGeometryCreation(ID3D12Device* device, const std::filesystem::path& co
         auto capture = std::make_shared<Capture>(device, compiler, limits);
         if (!install(r, *capture))
             return false;
+        r.activeCache.store(&capture->cache, std::memory_order_release);
         r.active.store(std::move(capture), std::memory_order_release);
         experimentVertexCaptureRequest.store(RequestGeometryVertexCapture, std::memory_order_release);
         return true;
@@ -178,8 +192,12 @@ void StopGeometryCreation()
 {
     auto& r = control();
     std::lock_guard lock(r.lifecycle);
+    r.activeCache.store(nullptr, std::memory_order_release);
     if (auto capture = r.active.exchange(nullptr, std::memory_order_acq_rel))
+    {
         capture->cache.stop();
+        r.retired.push_back(std::move(capture));
+    }
 }
 void ObserveGeometryRoot(ID3D12Device* device, UINT node, const void* bytes, SIZE_T size, IUnknown* created) noexcept
 {
@@ -203,11 +221,8 @@ std::shared_ptr<const GeometryPipelineEntry> FindGeometryPipeline(ID3D12Pipeline
 {
     try
     {
-        auto* state = publishedControl.load(std::memory_order_acquire);
-        if (!state)
-            return {};
-        auto capture = state->active.load(std::memory_order_acquire);
-        return capture ? capture->cache.find(original) : nullptr;
+        auto* cache = activeGeometryCache();
+        return cache ? cache->find(original) : nullptr;
     }
     catch (...)
     {
@@ -218,12 +233,13 @@ std::shared_ptr<const GeometryPipelineEntry> FindObservedGeometryPipeline(ID3D12
 {
     try
     {
+        auto* cache = activeGeometryCache();
+        if (!cache) return {};
+        auto prepared = cache->find(original);
+        if (prepared) return prepared;
         auto* state = publishedControl.load(std::memory_order_acquire);
-        if (!state) return {};
-        auto capture = state->active.load(std::memory_order_acquire);
-        if (!capture) return {};
-        auto prepared = capture->cache.find(original);
-        return prepared ? prepared : capture->observations.find(original);
+        auto capture = state ? state->active.load(std::memory_order_acquire) : nullptr;
+        return capture ? capture->observations.find(original) : nullptr;
     }
     catch (...) { return {}; }
 }

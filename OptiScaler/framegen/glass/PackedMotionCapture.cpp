@@ -5,8 +5,11 @@
 #include "GeometryCommands.h"
 #include "GeometryDrawCapture.h"
 #include "GeometryHealth.h"
+#include "GlassControls.h"
 #include "MotionFramePair.h"
 #include "PackedMotionMappings.h"
+#include "PackedMotionSelection.h"
+#include "GeometryGateTrace.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <array>
@@ -22,6 +25,11 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr unsigned FrameCount = 3, RecordingCount = 64, FgCommandCount = 4;
+// Distance at which a capture slot that still holds a stale recording or FG
+// consumer command is treated as unreachable and its bookkeeping dropped, so it
+// can no longer pin the history retirement watermark. Well beyond FrameCount
+// and the four-frame FG hold-open window below.
+constexpr std::uint32_t StaleSlotFrames = 8;
 constexpr unsigned MappingCapacity = 16384, ConstantCapacity = 4096;
 // Vertex-history arena. 4096 pages x 128 vertices was regularly exhausted in
 // live scenes (a single large mesh asks for a contiguous power-of-two block),
@@ -42,13 +50,10 @@ static_assert(HistoryCapacity == (1u << 21), "history capacity must stay a power
 // correction uses, and finally to a private monotone counter.
 std::uint32_t resolvedDrawFrame(const GeometryDrawView& draw)
 {
-    if (draw.frame != 0)
-        return draw.frame;
-    static std::atomic<std::uint32_t> fallback { 0 };
-    const auto commands = GetGeometryCommandStats().lastFrame;
-    if (commands != 0)
-        return commands;
-    return fallback.fetch_add(1, std::memory_order_relaxed) + 1;
+    // Only this draw's verified packet frame identifies its history slot.
+    // A process-wide last draw can belong to another recording; an incrementing
+    // fallback invents temporal identity and makes unrelated draws consecutive.
+    return draw.frame == UINT32_MAX ? 0 : draw.frame;
 }
 
 void checked(HRESULT value, const char* message)
@@ -148,10 +153,21 @@ class Capture final : public GeometryDrawCaptureOwner
     // trace line, so the line appears once per captured frame.
     FILE* log = nullptr;
     std::uint32_t lastReplayFrame = 0;
+    // Bounded attribution for the admission gates. A scene that never captures
+    // a surface has to leave enough detail to name the gate without turning the
+    // per-draw path into a logger.
+    static constexpr unsigned GateDetailLimit = 240;
+    unsigned gateDetailLines = 0, gateAdmitLines = 0;
+    // Bounded log for the stale-slot recovery in beginMappings (diagnostics).
+    unsigned staleSlotReports = 0;
     mutable std::mutex mutex;
     PackedMotionCaptureStatus counters;
     std::array<PackedMotionCaptureStatus::ChunkCount, 16> unknownChunks {}, topologyChunks {}, missingChunks {};
     std::array<PackedMotionCaptureStatus::ChunkCount, 16> overflowChunks {};
+    // Pair-less packed variants the cache withheld: the draw keeps the engine's
+    // own motion, and this table names the engine chunks that lost coverage
+    // because of it (F-01).
+    std::array<PackedMotionCaptureStatus::ChunkCount, 16> deltaMissingChunks {};
     // Bounded family table for the packed capture. A four-probe hash window
     // keeps the per-span cost at a few comparisons; a family that cannot be
     // placed is counted, never silently merged into another mesh.
@@ -242,6 +258,13 @@ class Capture final : public GeometryDrawCaptureOwner
         return !frame.consumerCommand && completed(producerFence.Get(), frame.producerValue) &&
                completed(consumerFence.Get(), frame.consumerValue);
     }
+    // Both fences past this slot's last submitted work: nothing can still be
+    // reading or writing its capture, so its stale bookkeeping is droppable.
+    bool fencesComplete(const Frame& frame)
+    {
+        return completed(producerFence.Get(), frame.producerValue) &&
+               completed(consumerFence.Get(), frame.consumerValue);
+    }
     std::uint32_t newestFrameNumber() const
     {
         std::uint32_t newest = 0;
@@ -258,8 +281,62 @@ class Capture final : public GeometryDrawCaptureOwner
         // Every owned recording remains in these slots until both recording
         // discard and GPU completion. Gaps with no owned work need no retirement.
         for (auto& value : frames)
-            if (value.number && value.number <= completedThrough && !reusable(value))
-                completedThrough = value.number - 1;
+        {
+            if (!value.number || value.number > completedThrough || reusable(value))
+                continue;
+            // A slot whose discard/destroyed notification never arrives keeps a
+            // non-null recording (or a stale FG consumer command) forever, and
+            // the line below would then pin the history retirement watermark at
+            // that frame: every history entry at or above it stays
+            // unreclaimable, the vertex arena fills to capacity, each later
+            // reservation fails and the transparent-object correction silently
+            // stops covering the scene. Measured live 2026-09-16: retired frozen
+            // at 71612 while frame reached 79161, arena 16384/16384 pages used
+            // with largestFreePages 0, covered pixels down from 6 % to 0.09 %,
+            // and the correction stopped for the rest of the session.
+            // The pool is FrameCount slots deep and the FG hold-open window is
+            // four frames, so a slot this far behind with both fences complete
+            // cannot be read by any in-flight work. Dropping its stale
+            // bookkeeping is the same recovery frame() already performs.
+            if (number - value.number >= StaleSlotFrames && fencesComplete(value))
+            {
+                value.recordings = {};
+                value.consumerCommand = nullptr;
+                ++counters.slotRecovered;
+                if (log != nullptr && staleSlotReports < 8)
+                {
+                    ++staleSlotReports;
+                    std::fprintf(log, "PACKED_SLOT_RECOVER frame=%u stale=%u gap=%u\n", number, value.number,
+                                 number - value.number);
+                    std::fflush(log);
+                }
+                continue;
+            }
+            completedThrough = value.number - 1;
+        }
+        // Diagnostic (jitterLog only): record-tag validity for the frame that
+        // just finished. A key that kept its history entry reuses its arena
+        // slot, so the tag the next capture reads there is (frame-1, generation)
+        // and the previous transform is admitted; a key inserted this frame
+        // finds a stale or foreign tag and falls back to the current values.
+        // The counts are cumulative, so the per-frame value is the difference
+        // between consecutive lines, and `spans` is this frame's admitted
+        // element count. The line joins with the compose line of the same frame
+        // number, which carries the delivered jitter pair.
+        if (log != nullptr && ReadControls().jitterLog)
+        {
+            static std::atomic<unsigned> markerLines { 0 };
+            const auto& stats = objectMappings.historyStats();
+            std::fprintf(log,
+                         "PACKED_CAPTURE_FRAME frame=%u next=%u hits=%llu inserted=%llu spans=%llu evictions=%llu "
+                         "live=%u\n",
+                         objectMappings.historyFrame(), number, static_cast<unsigned long long>(stats.hits),
+                         static_cast<unsigned long long>(stats.inserted),
+                         static_cast<unsigned long long>(frameSpanCount),
+                         static_cast<unsigned long long>(spanFamilyEvictions), objectMappings.liveHistories());
+            if ((markerLines.fetch_add(1, std::memory_order_relaxed) & 31u) == 31u)
+                std::fflush(log);
+        }
         if (failed || !objectMappings.beginFrame(number, completedThrough)) return false;
         // The family table describes the frame that is being captured now; a
         // cumulative table would be dominated by earlier scenes and would hide
@@ -471,15 +548,36 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                  const GraphicsRootBindings&, GeometryPreparedDraw& prepared) noexcept override
     {
         std::unique_lock lock(mutex, std::try_to_lock);
-        if (!lock) return false; // Counters share this lock too.
+        const bool gate = GateArmed();
+        if (!lock)
+        {
+            if (gate) GateNote(GatePrepareLock);
+            return false; // Counters share this lock too.
+        }
         const auto frameNumber = resolvedDrawFrame(draw);
         if (failed || !command || frameNumber == 0 || !args.instances || args.instances > MappingCapacity ||
             !pipeline || !pipeline->packed || !pipeline->root || !pipeline->root->extended)
         {
+            if (gate)
+            {
+                GateNote(failed                            ? GatePrepareFailed
+                         : !command                        ? GatePrepareCommand
+                         : frameNumber == 0                ? GatePrepareFrameId
+                         : !args.instances                 ? GatePrepareInstances
+                         : args.instances > MappingCapacity ? GatePrepareMapping
+                         : !pipeline                       ? GatePreparePipeline
+                         : !pipeline->packed               ? GatePrepareNotPacked
+                                                           : GatePrepareRoot);
+            }
             if (pipeline && !pipeline->packed)
             {
                 ++counters.missingPipeline;
                 noteChunk(missingChunks, draw.chunk);
+                if (pipeline->deltaMissing)
+                {
+                    ++counters.deltaMissingDraws;
+                    noteChunk(deltaMissingChunks, draw.chunk);
+                }
             }
             return false;
         }
@@ -487,11 +585,13 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         const auto shape = ReadCyberpunkMeshShape(draw);
         if (!raster || !raster->usable())
         {
+            if (gate) GateNote(GatePrepareRaster);
             ++counters.topologyRejected; ++counters.rasterRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
         if (!shape || !shape.vertices || shape.vertices > HistoryCapacity)
         {
+            if (gate) GateNote(GatePrepareShape);
             ++counters.topologyRejected; ++counters.shapeRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
@@ -504,20 +604,23 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             raster->viewport.TopLeftY < 0 || raster->viewport.TopLeftX + raster->viewport.Width > configuredWidth ||
             raster->viewport.TopLeftY + raster->viewport.Height > configuredHeight)
         {
+            if (gate) GateNote(GatePrepareViewport);
             ++counters.topologyRejected; ++counters.viewportRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
         auto* frameSlot = frame(frameNumber);
-        if (!frameSlot) return false;
-        if (!beginMappings(frameNumber)) { ++counters.orderingRejected; return false; }
+        if (!frameSlot) { if (gate) GateNote(GatePrepareFrameSlot); return false; }
+        if (!beginMappings(frameNumber)) { if (gate) GateNote(GatePrepareOrdering); ++counters.orderingRejected; return false; }
         if (frameSlot->mappingUsed > MappingCapacity - args.instances || frameSlot->constantsUsed == ConstantCapacity)
         {
+            if (gate) GateNote(GatePrepareMapping);
             ++counters.mappingOverflow;
             return false;
         }
         const auto epoch = ReadGeometryRecordingEpoch(command);
         if (!epoch || !record(*frameSlot, command, epoch))
         {
+            if (gate) GateNote(GatePrepareOrdering);
             ++counters.orderingRejected;
             return false;
         }
@@ -533,6 +636,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             {
                 if (span.count)
                 {
+                    if (gate) GateNote(GatePrepareSpan);
                     ++counters.unknownIdentity; ++counters.unknownOwnerSpan;
                     noteChunk(unknownChunks, draw.chunk);
                 }
@@ -544,28 +648,47 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 if (!identitySource.resolve(identitySource.context, command, draw, shape, *pipeline,
                     spanIndex, ordinal, key) || !key || !key.object.generation)
                 {
+                    if (gate) GateNote(GatePrepareSpan);
                     ++counters.unknownIdentity; ++counters.unknownResolve;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
                 if (!sameOwner(key.object, owner))
                 {
+                    if (gate) GateNote(GatePrepareSpan);
                     ++counters.unknownIdentity; ++counters.unknownOwnerMismatch;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
                 if (key.chunk != draw.chunk || key.vertexFactory != shape.vertexFactory ||
                     key.pipeline != pipeline->identity)
                 {
+                    if (gate) GateNote(GatePrepareSpan);
                     ++counters.unknownIdentity; ++counters.unknownFieldMismatch;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
                 if ((!span.identity || span.count != 1) && !key.arrayGeneration)
                 {
+                    if (gate) GateNote(GatePrepareSpan);
                     ++counters.unknownIdentity; ++counters.unknownNoArrayGeneration;
                     noteChunk(unknownChunks, draw.chunk); continue;
                 }
                 const auto allocation = objectMappings.acquire(key, vertices, frameNumber);
                 if (!allocation)
                 {
+                    if (gate)
+                    {
+                        GateNote(GatePrepareHistory);
+                        if (log && gateDetailLines < GateDetailLimit)
+                        {
+                            ++gateDetailLines;
+                            std::fprintf(log,
+                                         "GATE_DETAIL reason=history chunk=%u mesh=%u verts=%u vp=%.0f,%.0f,%.0f,%.0f "
+                                         "frame=%u\n",
+                                         draw.chunk, std::uint32_t(key.object.mesh), vertices,
+                                         raster->viewport.TopLeftX, raster->viewport.TopLeftY,
+                                         raster->viewport.Width, raster->viewport.Height, frameNumber);
+                            std::fflush(log);
+                        }
+                    }
                     ++counters.historyOverflow;
                     noteChunk(overflowChunks, draw.chunk);
                     continue;
@@ -587,20 +710,47 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 item.statusIndex = 0;
                 item.reserved[0] = allocation.boundaryId;
                 any = true;
+                if (gate && log && gateAdmitLines < 64)
+                {
+                    ++gateAdmitLines;
+                    std::fprintf(log,
+                                 "GATE_DETAIL reason=admit chunk=%u mesh=%u verts=%u vp=%.0f,%.0f,%.0f,%.0f "
+                                 "frame=%u\n",
+                                 draw.chunk, std::uint32_t(key.object.mesh), vertices,
+                                 raster->viewport.TopLeftX, raster->viewport.TopLeftY,
+                                 raster->viewport.Width, raster->viewport.Height, frameNumber);
+                    std::fflush(log);
+                }
             }
         }
-        if (!any) return false;
+        if (!any)
+        {
+            if (gate) GateNote(GatePrepareNoElement);
+            return false;
+        }
         const auto constantIndex = frameSlot->constantsUsed++;
         frameSlot->pipelines[constantIndex] = pipeline;
         const auto depthFunction = pipeline->description.DepthStencilState.DepthFunc;
         const bool reverse = depthFunction == D3D12_COMPARISON_FUNC_GREATER ||
                              depthFunction == D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        // Far-surface skip. The capture shader drops a record whose surface is
+        // farther than this view distance, so distant level-of-detail glass
+        // costs nothing and keeps the engine's own motion. 0 = keep all.
+        std::uint32_t farCutoffBits = 0;
+        const auto controls = ReadControls();
+        const auto farCutoffMeters = controls.farCutoffMeters();
+        if (farCutoffMeters > 0.f)
+            std::memcpy(&farCutoffBits, &farCutoffMeters, sizeof(farCutoffBits));
         const MaterialCaptureConstants constants {
             raster->viewport.TopLeftX, raster->viewport.TopLeftY,
             1.f / raster->viewport.Width, 1.f / raster->viewport.Height,
             0, 0, frameNumber, reverse ? 1u : 0u,
             0, 0, configuredWidth, configuredHeight,
-            0, configuredWidth, configuredWidth * configuredHeight, 0
+            0, configuredWidth, configuredWidth * configuredHeight, farCutoffBits,
+            // Coverage class boundary. The capture marks a record covered when
+            // its material opacity reaches this value, and the packed store
+            // keeps the nearest covered record ahead of any uncovered one.
+            controls.opacityThreshold(), 0.f, 0.f, 0.f
         };
         std::memcpy(frameSlot->constants + constantIndex * 256, &constants, sizeof(constants));
         frameSlot->mappingUsed += args.instances;
@@ -866,6 +1016,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         value.unknownChunks = unknownChunks;
         value.topologyChunks = topologyChunks;
         value.missingChunks = missingChunks;
+        value.deltaMissingChunks = deltaMissingChunks;
         value.healthy = counters.initialized && !failed;
         const auto& history = objectMappings.historyStats();
         value.historyHits = history.hits;
@@ -904,6 +1055,45 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         return value;
     }
 
+    // Second consumer selection for the DLSS-NR seam. The frame generation rule
+    // ("the producer submitted before the frame generation command") cannot be
+    // evaluated here, because the neural rendering pass is recorded on the
+    // game's own list before that list is submitted. What can be established is
+    // that the frame's draw work has already been submitted, which is what the
+    // inline compose needs. A frame the substitution already took is skipped.
+    PackedMotionFrame acquireSecondConsumer(std::uint32_t width, std::uint32_t height, std::uint64_t engineFrame)
+    {
+        std::lock_guard lock(mutex);
+        if (failed || width != configuredWidth || height != configuredHeight)
+            return {};
+        auto* selected = SelectSecondConsumerFrame(frames, engineFrame);
+        if (!selected)
+        {
+            ++counters.acquireNoCandidate;
+            static std::atomic<unsigned> logged { 0 };
+            if (log != nullptr && logged.fetch_add(1, std::memory_order_relaxed) < 6)
+            {
+                std::fprintf(log, "PACKED_SECOND reject engineFrame=%llu pair=%llu\n",
+                             static_cast<unsigned long long>(engineFrame),
+                             static_cast<unsigned long long>(framePair.engineFrame()));
+                for (const auto& value : frames)
+                    std::fprintf(log, "PACKED_SECOND frame number=%u producer=%llu clear=%u consumed=%u\n",
+                                 value.number, static_cast<unsigned long long>(value.producerValue),
+                                 value.clearSubmitted ? 1u : 0u, value.consumerCommand ? 1u : 0u);
+                std::fflush(log);
+            }
+            return {};
+        }
+        return { selected->capture.Get(),
+                 configuredWidth,
+                 configuredHeight,
+                 selected->number,
+                 selected->number,
+                 producerFence.Get(),
+                 selected->producerValue,
+                 static_cast<void*>(selected->producerQueue.Get()) };
+    }
+
     void resetCounters()
     {
         std::lock_guard lock(mutex);
@@ -917,6 +1107,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         unknownChunks = {};
         topologyChunks = {};
         missingChunks = {};
+        deltaMissingChunks = {};
         overflowChunks = {};
         spanFamilies = {};
         spanFamilyEvictions = 0;
@@ -969,6 +1160,20 @@ PackedMotionFrame AcquirePackedMotionFrame(ID3D12GraphicsCommandList* command,
         return capture ? capture->acquire(command, width, height, fgFrame, reset) : PackedMotionFrame {};
     }
     catch (...) { return {}; }
+}
+
+PackedMotionFrame AcquirePackedMotionFrameForSecondConsumer(std::uint32_t width, std::uint32_t height,
+                                                            std::uint64_t engineFrame) noexcept
+{
+    try
+    {
+        auto* capture = active.load(std::memory_order_acquire);
+        return capture ? capture->acquireSecondConsumer(width, height, engineFrame) : PackedMotionFrame {};
+    }
+    catch (...)
+    {
+        return {};
+    }
 }
 
 bool ReleasePackedMotionCapture() noexcept

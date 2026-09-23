@@ -8,6 +8,8 @@
 #include "CommandLifetime.h"
 #include "IndirectBindings.h"
 #include "DetourThreads.h"
+#include "GeometryGateTrace.h"
+#include "GlassHookProbe.h"
 #include <hooks/Hook_Utils.h>
 #include <array>
 #include <atomic>
@@ -29,18 +31,24 @@ struct Scope
 };
 struct Record
 {
-    std::atomic<Command*> key = nullptr;
     CommandLifetime lifetime;
-    GraphicsRootBindings bindings;
+    // The replayed root bindings live in a parallel array. A Record plus its
+    // bindings is ~18 KiB (64 root slots holding up to 64 constants each), and
+    // keeping them in one array made the hash table 9 MiB wide: every probe
+    // step pulled a fresh cache line and TLB entry straight out of DRAM.
+    // Splitting them keeps the probed array at a few hundred bytes per entry
+    // and touches the bindings only after a key matched.
+    GraphicsRootBindings* bindings = nullptr;
     GeometryRasterState raster;
     std::array<ID3D12DescriptorHeap*, 2> heaps {};
     std::array<ID3D12DescriptorHeap*, 2> heapArguments {};
     UINT heapCount = 0;
+    std::atomic<Command*> key = nullptr;
     bool open = false;
     uint64_t epoch = 0;
     void reset(ID3D12PipelineState* initial)
     {
-        bindings.reset(initial);
+        bindings->reset(initial);
         raster = {};
         heaps = {};
         heapArguments = {};
@@ -50,21 +58,75 @@ struct Record
 };
 struct Observation
 {
+    Observation()
+    {
+        for (std::size_t index = 0; index < records.size(); ++index)
+            records[index].bindings = &bindings[index];
+    }
     ComPtr<ID3D12Device> device;
     UINT rtvIncrement = 0;
     std::mutex registrations;
+    std::array<GraphicsRootBindings, 512> bindings;
     std::array<Record, 512> records;
     IndirectBindingCache indirect;
     std::array<void*, 85> targets {};
     bool has4 = false, has10 = false;
     std::atomic<bool> active = false;
-    std::atomic<std::uint64_t> recordings = 0, capacityRejected = 0, indexed = 0, packets = 0;
-    std::atomic<std::uint64_t> instances = 0, identities = 0, pipelinesReady = 0, bindingsReady = 0;
+    std::atomic<std::uint64_t> recordings = 0, capacityRejected = 0;
     std::atomic<std::uint64_t> signatures = 0, indirectKnown = 0, indirectUnknown = 0;
-    std::atomic<std::uint64_t> captureRecorded = 0, captureRejected = 0;
-    std::atomic<std::uint32_t> lastFrame = 0;
+    // Per-thread counter rows. Every indexed draw used to bump shared cache
+    // lines from every render thread; those locked read-modify-writes were a
+    // measured part of the hook cost. The owner thread writes its own row with
+    // a relaxed load/store pair and the report thread sums the rows; a row has
+    // exactly one writer (claimed by thread id at row()).
+    struct Row
+    {
+        alignas(64) std::atomic<std::uint32_t> owner { 0 };
+        std::atomic<std::uint64_t> indexed = 0, packets = 0, instances = 0, identities = 0;
+        std::atomic<std::uint64_t> pipelinesReady = 0, bindingsReady = 0;
+        std::atomic<std::uint64_t> captureRecorded = 0, captureRejected = 0;
+        std::atomic<std::uint32_t> lastFrame = 0;
+    };
+    static constexpr unsigned RowCount = 64;
+    std::array<Row, RowCount> rows {};
+    Row& row() noexcept;
 };
 std::atomic<Observation*> published = nullptr;
+thread_local Observation* rowState = nullptr;
+thread_local unsigned rowIndex = 0;
+
+// One row per thread, claimed by thread id. A thread that finds every row
+// taken shares row 0; that costs counter accuracy only, never safety, and
+// needs more than RowCount threads touching one state to happen.
+Observation::Row& Observation::row() noexcept
+{
+    if (rowState != this)
+    {
+        const auto id = static_cast<std::uint32_t>(GetCurrentThreadId());
+        unsigned index = 0;
+        for (unsigned i = 0; i < RowCount; ++i)
+        {
+            std::uint32_t expected = 0;
+            if (rows[i].owner.compare_exchange_strong(expected, id, std::memory_order_relaxed))
+            {
+                index = i;
+                break;
+            }
+        }
+        rowState = this;
+        rowIndex = index;
+    }
+    return rows[rowIndex];
+}
+
+inline void bump(std::atomic<std::uint64_t>& value) noexcept
+{
+    value.store(value.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+inline void add(std::atomic<std::uint64_t>& value, std::uint64_t count) noexcept
+{
+    value.store(value.load(std::memory_order_relaxed) + count, std::memory_order_relaxed);
+}
 std::atomic<GeometryDrawCaptureOwner*> captureOwner = nullptr;
 std::mutex startup;
 constexpr unsigned Probes = 32;
@@ -75,11 +137,32 @@ std::size_t first(Command* command)
     value *= 0x9e3779b97f4a7c15ull;
     return (value >> 32) & 511;
 }
+// One published table per process. D3D12 records one list at a time per
+// thread, so the same (table, command) pair repeats for thousands of calls in
+// a row: 26,000 root/binding setters per engine frame against a 512-entry
+// table. The memo turns those probes into one compare. It is a pure cache:
+// the key and the record's open/destroyed flags are re-checked on every use,
+// and a mismatch falls back to the probe below.
+struct FindMemo
+{
+    Observation* state = nullptr;
+    Command* command = nullptr;
+    Record* record = nullptr;
+};
+thread_local FindMemo findMemo;
 Record* find(Command* command) noexcept
 {
     auto* state = published.load(std::memory_order_acquire);
     if (!state || !state->active.load(std::memory_order_relaxed) || !command)
         return nullptr;
+    if (findMemo.state == state && findMemo.command == command && findMemo.record)
+    {
+        auto* memo = findMemo.record;
+        if (memo->key.load(std::memory_order_acquire) == command && !memo->lifetime.wasDestroyed())
+            return memo->open ? memo : nullptr;
+        // Recycled, replaced or destroyed since the memo was taken. The probe
+        // below decides; the memo is only refreshed on a match.
+    }
     const auto start = first(command);
     for (unsigned i = 0; i < Probes; ++i)
     {
@@ -88,7 +171,14 @@ Record* find(Command* command) noexcept
         if (!key)
             return nullptr;
         if (key == command)
-            return r.open && !r.lifetime.wasDestroyed() ? &r : nullptr;
+        {
+            if (!r.open || r.lifetime.wasDestroyed())
+                return nullptr;
+            findMemo.state = state;
+            findMemo.command = command;
+            findMemo.record = &r;
+            return &r;
+        }
     }
     return nullptr;
 }
@@ -225,7 +315,7 @@ HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12
             begin(command, initial);
         }
         else if (auto* r = find(command))
-            r->bindings.invalidate();
+            r->bindings->invalidate();
     }
     return result;
 }
@@ -245,7 +335,7 @@ void censusDraw(const ExperimentCensusObserver& observer, Command* command, Reco
 {
     const auto frame = draw.frame ? draw.frame : ReadCyberpunkDrawFrame();
     if (record)
-        input.draw = MakeExperimentDrawInput(command, record->epoch, draw, args, record->raster, record->bindings, pipeline);
+        input.draw = MakeExperimentDrawInput(command, record->epoch, draw, args, record->raster, *record->bindings, pipeline);
     else
     {
         // Keep known packet metadata even if command recording was not tracked.
@@ -262,15 +352,23 @@ MethodType<&Command::DrawInstanced> originalInstanced = nullptr;
 void WINAPI instanced(Command* command, UINT vertices, UINT instances, UINT startVertex, UINT startInstance)
 {
     const auto source = _ReturnAddress(); Scope scope;
+    const bool idle = scope.outer && HooksIdle();
+    const HookCostScope cost(CommandHookCost(), scope.outer && !idle);
+    if (idle)
+    {
+        originalInstanced(command, vertices, instances, startVertex, startInstance);
+        return;
+    }
     if (scope.outer)
         if (const auto* observer = ActiveExperimentCensus())
         {
-            auto* r = find(command);
+            auto* r = SkipStateTrackingFor(HookSkipMode()) ? nullptr : find(command);
             GlassExperimentCensusInput input {}; input.operation = GlassCensusInstanced;
             input.callsite = reinterpret_cast<uint64_t>(source);
             censusDraw(*observer, command, r, input, {}, { vertices, instances, startVertex, 0, startInstance },
-                       r ? FindObservedGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+                       r ? FindObservedGeometryPipeline(r->bindings->pipeline) : ExperimentPipelineLease {});
         }
+    cost.Stop();
     originalInstanced(command, vertices, instances, startVertex, startInstance);
 }
 MethodType<&Command::ExecuteIndirect> originalExecuteIndirect = nullptr;
@@ -278,9 +376,16 @@ void WINAPI hookExecuteIndirect(Command* command, ID3D12CommandSignature* signat
                                 ID3D12Resource* args, UINT64 offset, ID3D12Resource* counter, UINT64 counterOffset)
 {
     const auto source = _ReturnAddress(); Scope scope;
+    const bool idle = scope.outer && HooksIdle();
+    const HookCostScope cost(CommandHookCost(), scope.outer && !idle);
+    if (idle)
+    {
+        originalExecuteIndirect(command, signature, count, args, offset, counter, counterOffset);
+        return;
+    }
     if (scope.outer)
     {
-        auto* r = find(command);
+        auto* r = SkipStateTrackingFor(HookSkipMode()) ? nullptr : find(command);
         if (const auto* observer = ActiveExperimentCensus())
         {
             GlassExperimentCensusInput input {}; input.operation = GlassCensusIndirect;
@@ -289,15 +394,16 @@ void WINAPI hookExecuteIndirect(Command* command, ID3D12CommandSignature* signat
             input.arguments = reinterpret_cast<uint64_t>(args); input.argumentOffset = offset;
             input.counter = reinterpret_cast<uint64_t>(counter); input.counterOffset = counterOffset;
             censusDraw(*observer, command, r, input, {}, {},
-                       r ? FindObservedGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+                       r ? FindObservedGeometryPipeline(r->bindings->pipeline) : ExperimentPipelineLease {});
         }
         if (r)
         {
             auto* state = published.load(std::memory_order_acquire);
-            if (state->indirect.apply(signature, r->bindings)) ++state->indirectKnown;
+            if (state->indirect.apply(signature, *r->bindings)) ++state->indirectKnown;
             else ++state->indirectUnknown;
         }
     }
+    cost.Stop();
     originalExecuteIndirect(command, signature, count, args, offset, counter, counterOffset);
 }
 #define GLASS_GRAPHICS(Name, Class, Declaration, Arguments, Update)                                                    \
@@ -305,39 +411,49 @@ void WINAPI hookExecuteIndirect(Command* command, ID3D12CommandSignature* signat
     void WINAPI hook##Name Declaration                                                                                 \
     {                                                                                                                  \
         Scope scope;                                                                                                   \
+        const bool idle = scope.outer && HooksIdle();                                                                  \
+        const HookCostScope cost(CommandHookCost(), scope.outer && !idle);                            \
+        const auto skip = HookSkipMode();                                                                              \
+        if (idle)                                                                                                      \
+        {                                                                                                              \
+            cost.Stop();                                                                                               \
+            original##Name Arguments;                                                                                  \
+            return;                                                                                                    \
+        }                                                                                                              \
         if (scope.outer)                                                                                               \
-            if (auto* r = find(command))                                                                               \
+            if (auto* r = SkipStateTrackingFor(skip) ? nullptr : find(command); r && !BindingsOnlyFor(skip))            \
             {                                                                                                          \
                 Update;                                                                                                \
             }                                                                                                          \
+        cost.Stop();                                                                                                   \
         original##Name Arguments;                                                                                      \
     }                                                                                                                  \
     static_assert(std::is_same_v<decltype(&hook##Name), MethodType<&Class::Name>>);
 GLASS_GRAPHICS(ClearState, Command, (Command * command, ID3D12PipelineState* initial), (command, initial),
                r->reset(initial))
 GLASS_GRAPHICS(SetPipelineState, Command, (Command * command, ID3D12PipelineState* pipeline), (command, pipeline),
-               r->bindings.setPipeline(pipeline))
+               r->bindings->setPipeline(pipeline))
 GLASS_GRAPHICS(SetGraphicsRootSignature, Command, (Command * command, ID3D12RootSignature* root), (command, root),
-               r->bindings.setRoot(root))
+               r->bindings->setRoot(root))
 GLASS_GRAPHICS(SetGraphicsRootDescriptorTable, Command,
                (Command * command, UINT index, D3D12_GPU_DESCRIPTOR_HANDLE handle), (command, index, handle),
-               r->bindings.table(index, handle))
+               r->bindings->table(index, handle))
 GLASS_GRAPHICS(SetGraphicsRoot32BitConstant, Command, (Command * command, UINT index, UINT value, UINT offset),
-               (command, index, value, offset), r->bindings.constants(index, 1, &value, offset))
+               (command, index, value, offset), r->bindings->constants(index, 1, &value, offset))
 GLASS_GRAPHICS(SetGraphicsRoot32BitConstants, Command,
                (Command * command, UINT index, UINT count, const void* data, UINT offset),
-               (command, index, count, data, offset), r->bindings.constants(index, count, data, offset))
+               (command, index, count, data, offset), r->bindings->constants(index, count, data, offset))
 GLASS_GRAPHICS(SetGraphicsRootConstantBufferView, Command,
                (Command * command, UINT index, D3D12_GPU_VIRTUAL_ADDRESS address), (command, index, address),
-               r->bindings.address(index, D3D12_ROOT_PARAMETER_TYPE_CBV, address))
+               r->bindings->address(index, D3D12_ROOT_PARAMETER_TYPE_CBV, address))
 GLASS_GRAPHICS(SetGraphicsRootShaderResourceView, Command,
                (Command * command, UINT index, D3D12_GPU_VIRTUAL_ADDRESS address), (command, index, address),
-               r->bindings.address(index, D3D12_ROOT_PARAMETER_TYPE_SRV, address))
+               r->bindings->address(index, D3D12_ROOT_PARAMETER_TYPE_SRV, address))
 GLASS_GRAPHICS(SetGraphicsRootUnorderedAccessView, Command,
                (Command * command, UINT index, D3D12_GPU_VIRTUAL_ADDRESS address), (command, index, address),
-               r->bindings.address(index, D3D12_ROOT_PARAMETER_TYPE_UAV, address))
+               r->bindings->address(index, D3D12_ROOT_PARAMETER_TYPE_UAV, address))
 GLASS_GRAPHICS(ExecuteBundle, Command, (Command * command, Command* bundle), (command, bundle),
-               r->bindings.invalidate(); r->raster.unknown = true)
+               r->bindings->invalidate(); r->raster.unknown = true)
 GLASS_GRAPHICS(RSSetViewports, Command, (Command * command, UINT count, const D3D12_VIEWPORT* values),
                (command, count, values), r->raster.viewports(count, values))
 GLASS_GRAPHICS(RSSetScissorRects, Command, (Command * command, UINT count, const D3D12_RECT* values),
@@ -357,17 +473,25 @@ GLASS_GRAPHICS(EndRenderPass, ID3D12GraphicsCommandList4, (ID3D12GraphicsCommand
                r->raster.renderPass = false; r->raster.targetsKnown = false)
 GLASS_GRAPHICS(SetPipelineState1, ID3D12GraphicsCommandList4,
                (ID3D12GraphicsCommandList4 * command, ID3D12StateObject* object), (command, object),
-               r->bindings.invalidate())
+               r->bindings->invalidate())
 GLASS_GRAPHICS(SetProgram, ID3D12GraphicsCommandList10,
                (ID3D12GraphicsCommandList10 * command, const D3D12_SET_PROGRAM_DESC* desc), (command, desc),
-               r->bindings.invalidate())
+               r->bindings->invalidate())
 #undef GLASS_GRAPHICS
 MethodType<&Command::SetDescriptorHeaps> originalHeaps = nullptr;
 void WINAPI heaps(Command* command, UINT count, ID3D12DescriptorHeap* const* values)
 {
     Scope scope;
+    const bool idle = scope.outer && HooksIdle();
+    const HookCostScope cost(CommandHookCost(), scope.outer && !idle);
+    const auto skip = HookSkipMode();
+    if (idle)
+    {
+        originalHeaps(command, count, values);
+        return;
+    }
     if (scope.outer)
-        if (auto* r = find(command))
+        if (auto* r = SkipStateTrackingFor(skip) ? nullptr : find(command))
         {
             // Redundant heap binding is common. Avoid descriptor queries for
             // the exact same list; heap type is immutable for its lifetime.
@@ -376,6 +500,13 @@ void WINAPI heaps(Command* command, UINT count, ID3D12DescriptorHeap* const* val
                 same = values[i] == r->heapArguments[i];
             if (same)
             {
+                cost.Stop();
+                originalHeaps(command, count, values);
+                return;
+            }
+            if (BindingsOnlyFor(skip))
+            {
+                cost.Stop();
                 originalHeaps(command, count, values);
                 return;
             }
@@ -397,9 +528,9 @@ void WINAPI heaps(Command* command, UINT count, ID3D12DescriptorHeap* const* val
                     next[slot] = values[i];
             }
             if (!valid)
-                r->bindings.invalidate();
+                r->bindings->invalidate();
             if (next != r->heaps)
-                r->bindings.heapsChanged();
+                r->bindings->heapsChanged();
             r->heaps = next;
             r->heapCount = valid ? count : UINT_MAX;
             r->heapArguments = {};
@@ -407,6 +538,7 @@ void WINAPI heaps(Command* command, UINT count, ID3D12DescriptorHeap* const* val
                 for (UINT i = 0; i < count; ++i)
                     r->heapArguments[i] = values[i];
         }
+    cost.Stop();
     originalHeaps(command, count, values);
 }
 MethodType<&Command::DrawIndexedInstanced> originalIndexed = nullptr;
@@ -414,73 +546,116 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
 {
     const auto source = _ReturnAddress();
     Scope scope;
+    const bool idle = scope.outer && IndexedHooksIdle();
+    const HookCostScope cost(IndexedHookCost(), scope.outer && !idle);
+    HookStageTimer stages(cost.Sampled() && HookStageTiming());
+    if (idle)
+    {
+        originalIndexed(command, indices, instances, startIndex, baseVertex, startInstance);
+        return;
+    }
     if (scope.outer)
         if (auto* state = published.load(std::memory_order_acquire); state && state->active.load())
         {
-            ++state->indexed;
+            auto& row = state->row();
+            bump(row.indexed);
             const auto draw =
                 ReadCyberpunkGeometryDraw(source, indices, instances, startIndex, baseVertex, startInstance);
+            stages.Split(HookStageIndexedRead);
             auto* r = find(command);
+            stages.Split(HookStageIndexedFind);
             const auto* census = ActiveExperimentCensus();
             const auto pipeline = r && (census || !draw.objects.empty()) ?
-                FindGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {};
+                FindGeometryPipeline(r->bindings->pipeline) : ExperimentPipelineLease {};
+            stages.Split(HookStageIndexedPipeline);
             const GeometryIndexedArguments arguments { indices, instances, startIndex, baseVertex, startInstance };
             if (census)
             {
                 GlassExperimentCensusInput input {}; input.operation = GlassCensusIndexed;
                 input.callsite = reinterpret_cast<uint64_t>(source);
                 const auto observed = pipeline ? pipeline :
-                    (r ? FindObservedGeometryPipeline(r->bindings.pipeline) : ExperimentPipelineLease {});
+                    (r ? FindObservedGeometryPipeline(r->bindings->pipeline) : ExperimentPipelineLease {});
                 censusDraw(*census, command, r, input, draw, arguments, observed);
             }
             if (!draw.objects.empty())
             {
-                ++state->packets;
-                state->instances += draw.instances;
-                state->lastFrame.store(draw.frame);
+                bump(row.packets);
+                add(row.instances, draw.instances);
+                row.lastFrame.store(draw.frame, std::memory_order_relaxed);
                 for (const auto& object : draw.objects)
                     if (object.identity)
-                        state->identities += object.count;
+                        add(row.identities, object.count);
+                const bool gate = GateArmed();
+                if (gate)
+                    GateNote(GateObjectDraws);
                 if (r)
                 {
-                    ObserveExperimentDraw(command, r->epoch, draw, arguments, r->raster, r->bindings, pipeline);
+                    ObserveExperimentDraw(command, r->epoch, draw, arguments, r->raster, *r->bindings, pipeline);
                     if (pipeline)
                     {
-                        ++state->pipelinesReady;
-                        if (r->bindings.canReplay(*pipeline->root, pipeline->original.Get()))
+                        bump(row.pipelinesReady);
+                        if (r->bindings->canReplay(*pipeline->root, pipeline->original.Get()))
                         {
-                            ++state->bindingsReady;
+                            bump(row.bindingsReady);
                             if (auto* owner = captureOwner.load(std::memory_order_acquire))
                             {
                                 GeometryPreparedDraw prepared;
                                 const GeometryIndexedArguments args { indices, instances, startIndex, baseVertex,
                                                                       startInstance };
-                                if (owner->prepare(command, draw, args, pipeline, r->bindings, prepared))
+                                if (owner->prepare(command, draw, args, pipeline, *r->bindings, prepared))
                                 {
                                     const bool accepted = prepared.bindable() && r->raster.usable() &&
                                         pipeline->root->layout == GeometryLayout::PerInstance &&
                                         prepared.history.instances == instances;
                                     if (accepted)
                                     {
-                                        prepared.bind(command, *pipeline->root, r->bindings);
+                                        prepared.bind(command, *pipeline->root, *r->bindings);
+                                        cost.Stop();
                                         originalIndexed(command, indices, instances, startIndex, baseVertex,
                                                         startInstance);
-                                        r->bindings.replay(command, pipeline->root->original.Get());
+                                        r->bindings->replay(command, pipeline->root->original.Get());
                                         command->SetPipelineState(pipeline->original.Get());
-                                        ++state->captureRecorded;
+                                        bump(row.captureRecorded);
+                                        if (gate)
+                                            GateNote(GateCaptured);
                                     }
                                     else
-                                        ++state->captureRejected;
+                                    {
+                                        bump(row.captureRejected);
+                                        if (gate)
+                                            GateNote(GateBindRejected);
+                                    }
                                     owner->finish(command, accepted);
                                     if (accepted)
                                         return;
                                 }
                             }
+                            else if (gate)
+                                GateNote(GateNoOwner);
                         }
+                        else if (gate)
+                            GateNote(GateNoBindings);
+                    }
+                    else if (gate)
+                    {
+                        GateNote(GateNoPipeline);
+                        GateNoteUnseenPipeline(r->bindings->pipeline);
+                        // A draw can miss the rewrite cache because creation
+                        // refused the pipeline or because it never saw it at
+                        // all. The two have different fixes, so separate them
+                        // before the next round of coverage work.
+                        bool transparentLooking = false;
+                        const auto classification =
+                            GateClassifyCreatedPipeline(r->bindings->pipeline, &transparentLooking);
+                        GateNoteUnseenClass(classification, transparentLooking);
                     }
                 }
+                else if (gate)
+                    GateNote(GateNoRecord);
             }
+            stages.Split(HookStageIndexedTail);
         }
+    cost.Stop();
     originalIndexed(command, indices, instances, startIndex, baseVertex, startInstance);
 }
 template <class Function> bool attach(Function& original, void* address, Function replacement)
@@ -643,7 +818,7 @@ bool StartGeometryCommands(ID3D12Device* device) noexcept
 const GraphicsRootBindings* ReadGeometryBindings(Command* command) noexcept
 {
     const auto* r = find(command);
-    return r ? &r->bindings : nullptr;
+    return r ? r->bindings : nullptr;
 }
 GeometryCommandStats GetGeometryCommandStats() noexcept
 {
@@ -654,19 +829,26 @@ GeometryCommandStats GetGeometryCommandStats() noexcept
 #define GLASS_STAT(Name) r.Name = s->Name.load()
         GLASS_STAT(recordings);
         GLASS_STAT(capacityRejected);
-        GLASS_STAT(indexed);
-        GLASS_STAT(packets);
-        GLASS_STAT(instances);
-        GLASS_STAT(identities);
-        GLASS_STAT(pipelinesReady);
-        GLASS_STAT(bindingsReady);
-        GLASS_STAT(captureRecorded);
-        GLASS_STAT(captureRejected);
         GLASS_STAT(signatures);
         GLASS_STAT(indirectKnown);
         GLASS_STAT(indirectUnknown);
-        GLASS_STAT(lastFrame);
 #undef GLASS_STAT
+        // Sum the per-thread rows. Every row has a single writer, so a relaxed
+        // load yields a complete value for that thread; totals are monotonic.
+        for (const auto& row : s->rows)
+        {
+            r.indexed += row.indexed.load(std::memory_order_relaxed);
+            r.packets += row.packets.load(std::memory_order_relaxed);
+            r.instances += row.instances.load(std::memory_order_relaxed);
+            r.identities += row.identities.load(std::memory_order_relaxed);
+            r.pipelinesReady += row.pipelinesReady.load(std::memory_order_relaxed);
+            r.bindingsReady += row.bindingsReady.load(std::memory_order_relaxed);
+            r.captureRecorded += row.captureRecorded.load(std::memory_order_relaxed);
+            r.captureRejected += row.captureRejected.load(std::memory_order_relaxed);
+            const auto frame = row.lastFrame.load(std::memory_order_relaxed);
+            if (frame > r.lastFrame)
+                r.lastFrame = frame;
+        }
     }
     return r;
 }
