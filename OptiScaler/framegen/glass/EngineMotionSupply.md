@@ -999,15 +999,20 @@ seconds print `MOTION_PROBE` and `MOTION_PROBE_M`; every window starts with a
 [README.md](README.md#live-channel-counters-and-dumps).
 
 Rule (`stalemotion=camera`, default; `stalemotion=off` for A/B). A
-single-instance root-graft draw whose owner has no supplied previous pose (no
-record, state > 1 or weight 0) and no motion flag takes the camera-only variant,
-the engine's convention for that proxy (`PackedMotionCapture.cpp` prepare,
-`CyberpunkMotionHistory::cameraOnly`). The motion flag keeps the root graft
-because the engine can still give such a proxy object velocity through
-skinning or a special input. An unreadable owner keeps the root graft. There is
-no blend or clamp; a draw takes one variant. Counters: `GRAFT stale_camera`,
-dump variant `stale`. The rule removes (B) and (C) for proxies at rest; it does
-not change (A).
+single-instance root-graft draw takes the camera-only variant when the
+collector (item 4) gives its owner no object velocity: the history record is
+not in state 1 and the motion flag is clear (`PackedMotionCapture.cpp` prepare,
+`CyberpunkMotionHistory::cameraOnly`). The collector never reads the weight: a
+zero weight only makes the supplier write the current transform into the rows,
+and a skinned proxy in state 1 still has the motion of its previous bones, so
+such a draw keeps the root graft. With the motion flag the engine adds velocity
+when a skinning or special-input component is active; the module does not read
+those components, so the flag alone keeps the root graft. The camera-only set
+is therefore a subset of the proxies the engine gives no velocity. An
+unreadable owner keeps the root graft. There is no blend or clamp; a draw
+takes one variant. Counters: `GRAFT stale_camera`, dump variant `stale`. The
+rule removes (B) and (C) for proxies the engine gives no velocity; it does not
+change (A).
 
 Expected probe readings. A proxy at rest: `rows=cur inst=cur`, `record=0` (or
 `record=1 state=2` in the two frames after its last move), `supplied=0`,

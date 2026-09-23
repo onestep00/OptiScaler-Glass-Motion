@@ -341,15 +341,15 @@ inline bool MotionProbeMatches(std::uint64_t vertexHash) noexcept
 }
 // Stale MotionMatrix rule, live stalemotion=camera|off, default camera. A root
 // graft takes its previous clip from the engine's MotionMatrix rows 24..26. The
-// engine writes a previous pose there only for a proxy whose transform history
-// record is in state <= 1 with a nonzero motion weight (supplier 0x56c194), and
-// it draws a rigid proxy in its velocity pass only in state 1 (gate 0x1e9228).
-// Every other proxy keeps the camera-only velocity of the velocity
-// initialization (EngineMotionSupply.md "Proxy history convention").
-// Camera: a single-instance root-graft draw whose owner proxy has no supplied
-// previous pose and no motion flag takes the camera-only variant, the engine's
-// own convention for that proxy. Off: the draw keeps the root graft whatever
-// the rows hold, for A/B. Session value only.
+// engine's velocity collector (0x1e9228) draws a single non-array proxy with
+// its velocity technique only when the proxy's transform history record is in
+// state 1, or when its motion flag is set and a skinning or special-input
+// component is active. Every other proxy keeps the camera-only velocity of the
+// velocity initialization (EngineMotionSupply.md "Proxy history convention").
+// Camera: a single-instance root-graft draw whose owner proxy is not in state 1
+// and has no motion flag takes the camera-only variant, the engine's own
+// convention for that proxy. Off: the draw keeps the root graft whatever the
+// rows hold, for A/B. Session value only.
 inline std::atomic<bool>& StaleMotionCameraFlag() noexcept
 {
     static std::atomic<bool> value { true };

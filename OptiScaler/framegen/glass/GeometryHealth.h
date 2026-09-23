@@ -217,9 +217,9 @@ enum GeometryGraftCounter : unsigned
     // applied to each element's current world position.
     GraftArrayDraws,
     // Single-instance draws of a root-graft pipeline drawn with the camera-only
-    // variant because the owner proxy had no engine-supplied previous pose this
-    // frame (stalemotion=camera, GlassControls.h): the engine's own convention
-    // for such a proxy. Not included in GraftArrayDraws or GraftDraws.
+    // variant because the engine's velocity collector gives the owner proxy no
+    // object velocity (stalemotion=camera, GlassControls.h): the engine's own
+    // convention for such a proxy. Not included in GraftArrayDraws or GraftDraws.
     GraftStaleCameraDraws,
     GraftDraws,
     NativePreviousEvaluations,

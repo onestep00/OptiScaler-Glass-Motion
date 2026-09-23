@@ -91,9 +91,11 @@ std::size_t ReadCyberpunkShapeSamples(CyberpunkShapeSample* out, std::size_t cap
 // 0); the UpdateState epilogue ages every record (0x88e638: state < 2 gains 1,
 // state 2 releases it). The MotionMatrix supplier writes the record's pose only
 // for state <= 1 and a nonzero weight, and the proxy's current transform
-// otherwise (0x56c211..0x56c255); the velocity-pass gate adds the velocity
-// feature for a non-array proxy only in state 1, or with the motion flag and
-// active skinning or special input (0x1e92b1..0x1e934d). Guarded reads only.
+// otherwise (0x56c211..0x56c255). The velocity collector adds the velocity
+// technique when the view has velocity (bit 26) and the proxy is in state 1 or
+// has the motion flag, and then for a special input, or for a non-array proxy
+// in state 1 or with active skinning (0x1e92b1..0x1e934d). It never reads the
+// weight. Guarded reads only.
 struct CyberpunkMotionHistory
 {
     std::uint64_t record = 0;    // proxy+0x130: 52-byte history record, 0 = none
@@ -104,10 +106,14 @@ struct CyberpunkMotionHistory
     // The supplier writes the record's previous pose into the MotionMatrix
     // rows; otherwise the rows hold the current transform.
     bool supplied() const noexcept { return record && state <= 1 && weight; }
-    // No supplied previous pose and no motion-flag route that could still give
-    // the proxy object velocity: the engine's velocity for this proxy is the
-    // camera-only velocity initialization.
-    bool cameraOnly() const noexcept { return !supplied() && !(flags & 1); }
+    // The collector adds no velocity for this single non-array proxy: it is not
+    // in state 1 and has no motion flag. With the motion flag the engine adds
+    // velocity when a skinning or special-input component is active; the module
+    // does not read those components, so the flag alone keeps the proxy out of
+    // this set. The weight does not enter: a zero weight only puts the current
+    // transform into the rows, and a skinned proxy in state 1 keeps the motion
+    // of its previous bones.
+    bool cameraOnly() const noexcept { return !(record && state == 1) && !(flags & 1); }
 };
 // Any thread. False when the proxy header or its record is unreadable.
 bool ReadCyberpunkMotionHistory(std::uint64_t proxy, CyberpunkMotionHistory& out) noexcept;

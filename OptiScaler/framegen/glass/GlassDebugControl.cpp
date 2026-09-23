@@ -470,8 +470,8 @@ void PollGlassDebugControl() noexcept
             if (line.rfind("stalemotion=", 0) == 0)
             {
                 // Stale MotionMatrix rule (GlassControls.h), A/B switch: camera
-                // (default) draws a root-graft draw whose owner proxy has no
-                // engine-supplied previous pose with the camera-only variant;
+                // (default) draws a root-graft draw whose owner proxy gets no
+                // object velocity from the engine with the camera-only variant;
                 // off keeps the root graft. Live channel only, never persisted.
                 const auto mode = line.substr(12);
                 SetStaleMotionCamera(mode == "camera" || mode == "on" || mode == "1");

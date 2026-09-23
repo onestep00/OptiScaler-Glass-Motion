@@ -54,7 +54,7 @@ struct FixtureHistory
     std::uint64_t proxy = 0;
     CyberpunkMotionHistory history;
 };
-std::array<FixtureHistory, 8> fixtureHistories {};
+std::array<FixtureHistory, 16> fixtureHistories {};
 } // namespace
 const GeometryRasterState* ReadGeometryRasterState(ID3D12GraphicsCommandList*) noexcept { return &fixtureRaster; }
 std::uint64_t ReadGeometryRecordingEpoch(ID3D12GraphicsCommandList*) noexcept { return 1; }
@@ -361,11 +361,11 @@ void packedCaptureContract()
     require(status.frameSpanCount == 101, "Large draw did not admit every element");
 
     // Stale MotionMatrix rule (stalemotion=camera). A single-instance root draw
-    // keeps the root graft only while the engine writes a previous pose into
-    // its MotionMatrix rows (owner record state <= 1, nonzero weight) or its
-    // motion flag can still route object velocity; otherwise it takes the
-    // camera-only variant. An unreadable owner and stalemotion=off keep the
-    // root. The two variants are distinct pipelines here.
+    // keeps the root graft while the engine's velocity collector can give its
+    // owner object velocity: history record state 1, or the motion flag (which
+    // routes skinning or a special input). Otherwise it takes the camera-only
+    // variant. The weight does not enter the decision. An unreadable owner and
+    // stalemotion=off keep the root. The two variants are distinct pipelines.
     ComPtr<ID3D12PipelineState> cameraPso;
     hr(device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&cameraPso)), "fixture camera pipeline");
     const auto stale = entry(0x44, true);
@@ -381,19 +381,29 @@ void packedCaptureContract()
     const StaleCase staleCases[] {
         { 0xa0000, 0, 0xff, 255, 0, true, true, true, "no history record kept the root graft" },
         { 0xa1000, 0x5000, 1, 255, 0, true, true, false, "state 1 record left the root graft" },
-        { 0xa2000, 0x5000, 0, 255, 0, true, true, false, "state 0 record left the root graft" },
+        { 0xa2000, 0x5000, 0, 255, 0, true, true, true, "state 0 record kept the root graft" },
         { 0xa3000, 0x5000, 2, 255, 0, true, true, true, "aged record kept the root graft" },
-        { 0xa4000, 0x5000, 1, 0, 0, true, true, true, "zero-weight record kept the root graft" },
-        { 0xa5000, 0, 0xff, 255, 1, true, true, false, "motion flag without a record left the root graft" },
-        { 0xa6000, 0, 0xff, 255, 0, false, true, false, "unreadable owner left the root graft" },
-        { 0xa7000, 0, 0xff, 255, 0, true, false, false, "stalemotion=off left the root graft" },
+        { 0xa4000, 0x5000, 1, 0, 0, true, true, false, "zero-weight state 1 record left the root graft" },
+        { 0xa5000, 0x5000, 1, 0, 1, true, true, false, "skinned zero-weight state 1 proxy left the root graft" },
+        { 0xa6000, 0, 0xff, 255, 1, true, true, false, "motion flag without a record left the root graft" },
+        { 0xa7000, 0x5000, 2, 255, 1, true, true, false, "motion flag on an aged record left the root graft" },
+        { 0xa8000, 0, 0xff, 255, 0, false, true, false, "unreadable owner left the root graft" },
+        { 0xa9000, 0, 0xff, 255, 0, true, false, false, "stalemotion=off left the root graft" },
     };
+    static_assert(std::size(staleCases) <= std::tuple_size_v<decltype(fixtureHistories)>);
     for (unsigned i = 0; i < std::size(staleCases); ++i)
     {
         const auto& value = staleCases[i];
         fixtureHistories[i] = {};
         if (value.readable)
-            fixtureHistories[i] = { value.proxy, { value.record, 0, value.state, value.weight, value.flags } };
+        {
+            CyberpunkMotionHistory history;
+            history.record = value.record;
+            history.state = value.state;
+            history.weight = value.weight;
+            history.flags = value.flags;
+            fixtureHistories[i] = { value.proxy, history };
+        }
     }
     const auto staleBefore = ReadGeometryGraft(GraftStaleCameraDraws);
     unsigned cameraDraws = 0;

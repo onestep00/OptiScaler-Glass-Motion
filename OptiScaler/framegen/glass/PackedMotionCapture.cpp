@@ -1134,15 +1134,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         }
         // Stale MotionMatrix rule (stalemotion=camera, GlassControls.h). The
         // root graft reads the previous transform from the engine's MotionMatrix
-        // rows, which hold a previous pose only while the owner proxy's history
-        // record is in state <= 1 with a nonzero weight; otherwise the supplier
-        // writes the proxy's current transform (EngineMotionSupply.md "Proxy
-        // history convention"). The engine gives such a proxy no object
-        // velocity: its velocity pass skips a non-array proxy outside state 1
-        // unless the motion flag routes skinning or a special input, and the
-        // velocity initialization applies the previous camera to the current
-        // surface. The draw then takes the camera-only variant, which is that
-        // convention. An unreadable owner keeps the root graft.
+        // rows. The engine's velocity collector gives a single non-array proxy
+        // object velocity only in history state 1, or with the motion flag and
+        // an active skinning or special-input component (EngineMotionSupply.md
+        // "Proxy history convention"). Any other proxy keeps the velocity
+        // initialization, the previous camera applied to the current surface.
+        // The draw of such a proxy takes the camera-only variant, which is that
+        // convention (CyberpunkMotionHistory::cameraOnly; the motion flag alone
+        // keeps the root graft). An unreadable owner keeps the root graft.
         const GeometryBatchSpan* ownerSpan = nullptr;
         for (const auto& span : draw.objects)
             if (span.count)
