@@ -11,7 +11,7 @@ import hashlib, json, re,struct,zlib
 import argparse
 _parser=argparse.ArgumentParser(description=__doc__)
 _parser.add_argument('--workspace', type=Path, required=True)
-p=_parser.parse_args().workspace.resolve(strict=True)
+p=_parser.parse_known_args()[0].workspace.resolve(strict=True)
 var=re.compile(r'%(?:\d+|graft[\w.]*)\b')
 
 def modifier_key(contracts,row):

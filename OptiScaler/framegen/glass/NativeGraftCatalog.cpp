@@ -19,11 +19,13 @@ namespace
 // { u8 sha256[32]; u32 currentOutput; u32 previousOutput; u32 supplyClass;
 //   u32 cameraCurrentOutput; u32 cameraPreviousOutput; } (little endian).
 // supplyClass: bit 0 root-only, bit 1 skinning, bit 2 preskinned. Camera outputs
-// are NoCameraOutput when the camera-only variant <sha>.camera.dxil is absent.
+// are NoOutput when the camera-only variant <sha>.camera.dxil is absent. Root
+// outputs are NoOutput for a camera-only record (no <sha>.dxil), which then
+// requires the camera outputs.
 constexpr char IndexMagic[8] = { 'G', 'G', 'R', 'A', 'F', 'T', '0', '2' };
 constexpr std::size_t IndexHeaderBytes = 16, IndexRecordBytes = 52;
-constexpr std::uint32_t NoCameraOutput = 0xFFFFFFFFu;
-// The exported catalog holds 240 grafts; the bound keeps a corrupt count from
+constexpr std::uint32_t NoOutput = 0xFFFFFFFFu;
+// The exported catalog holds several hundred records; the bound keeps a corrupt count from
 // sizing an allocation. Shader bytes follow the compiler's own 2 MiB limit.
 constexpr std::uint32_t MaxGrafts = 4096;
 constexpr std::uintmax_t MaxGraftBytes = 2 * 1024 * 1024;
@@ -32,7 +34,7 @@ struct Graft
 {
     std::array<std::uint8_t, 32> sha {};
     unsigned currentOutput = 0, previousOutput = 0, supplyClass = 0;
-    unsigned cameraCurrentOutput = NoCameraOutput, cameraPreviousOutput = NoCameraOutput;
+    unsigned cameraCurrentOutput = NoOutput, cameraPreviousOutput = NoOutput;
     // Written once under loadMutex; never resized afterwards, so a returned
     // pointer stays valid for the process lifetime.
     std::vector<std::byte> bytes, cameraBytes;
@@ -84,9 +86,12 @@ void loadIndex() noexcept
             std::memcpy(&supplyClass, record + 40, 4);
             std::memcpy(&cameraCurrent, record + 44, 4);
             std::memcpy(&cameraPrevious, record + 48, 4);
-            if (current == previous || current >= 32 || previous >= 32 || supplyClass > 7)
+            const bool noRoot = current == NoOutput && previous == NoOutput;
+            const bool noCamera = cameraCurrent == NoOutput && cameraPrevious == NoOutput;
+            if ((noRoot && noCamera) || supplyClass > 7)
                 return;
-            const bool noCamera = cameraCurrent == NoCameraOutput && cameraPrevious == NoCameraOutput;
+            if (!noRoot && (current == previous || current >= 32 || previous >= 32))
+                return;
             if (!noCamera && (cameraCurrent == cameraPrevious || cameraCurrent >= 32 || cameraPrevious >= 32))
                 return;
             graft.currentOutput = current;
@@ -149,22 +154,24 @@ bool readContainer(const std::filesystem::path& path, std::vector<std::byte>& ou
 }
 
 // First hit only; a failed read is remembered so the files are not retried. The
-// camera-only variant is optional: its absence leaves cameraBytes empty.
+// camera-only variant is optional beside a root graft: its absence leaves
+// cameraBytes empty. A camera-only record needs its camera variant.
 bool loadBytes(Graft& graft) noexcept
 {
+    const bool root = graft.currentOutput != NoOutput;
     std::lock_guard lock(catalog.loadMutex);
     if (graft.attempted)
-        return !graft.bytes.empty();
+        return root ? !graft.bytes.empty() : !graft.cameraBytes.empty();
     graft.attempted = true;
     try
     {
         const auto name = hex(graft.sha);
-        if (!readContainer(catalog.directory / (name + L".dxil"), graft.bytes))
+        if (root && !readContainer(catalog.directory / (name + L".dxil"), graft.bytes))
             return false;
-        if (graft.cameraCurrentOutput != NoCameraOutput &&
+        if (graft.cameraCurrentOutput != NoOutput &&
             !readContainer(catalog.directory / (name + L".camera.dxil"), graft.cameraBytes))
             graft.cameraBytes.clear();
-        return true;
+        return root || !graft.cameraBytes.empty();
     }
     catch (...)
     {
@@ -194,11 +201,11 @@ std::optional<NativeGraft> FindNativeGraft(const void* vertexShader, std::size_t
                                         [](const Graft& graft, const auto& key) { return graft.sha < key; });
     if (found == catalog.grafts.end() || found->sha != digest || !loadBytes(*found))
         return std::nullopt;
-    const bool camera = !found->cameraBytes.empty();
-    return NativeGraft { found->bytes.data(),
+    const bool root = !found->bytes.empty(), camera = !found->cameraBytes.empty();
+    return NativeGraft { root ? found->bytes.data() : nullptr,
                          found->bytes.size(),
-                         found->currentOutput,
-                         found->previousOutput,
+                         root ? found->currentOutput : 0,
+                         root ? found->previousOutput : 0,
                          found->supplyClass,
                          camera ? found->cameraBytes.data() : nullptr,
                          camera ? found->cameraBytes.size() : 0,

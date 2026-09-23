@@ -15,7 +15,11 @@ namespace GlassFg
 // for instanced array draws: its cameraPreviousOutput applies the native previous
 // view-projection (b1 rows 16..19 or 12..15) to the VS's own current world
 // position and reads no b7 row. cameraCurrentOutput is the same de-jittered
-// current clip. bytes and cameraBytes stay valid for the process lifetime.
+// current clip. A camera-only record (a VS with no native current-position twin)
+// has no root graft: bytes is null, size and the root outputs are 0, and the
+// camera variant serves every draw of the VS. supplyClass then is the class of
+// the VS's own current position cone. bytes and cameraBytes stay valid for the
+// process lifetime.
 struct NativeGraft
 {
     const void* bytes;

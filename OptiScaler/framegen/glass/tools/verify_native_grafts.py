@@ -21,7 +21,15 @@ for r in index['shaders']:
     native=(p/'opaque-velocity-audit'/(r['native_sha256']+'.ll')).read_text()
     route=next(n for n in matches[r['sha256']]['native_candidates'] if n['sha256']==r['native_sha256'] and n.get('specializations',{})==r.get('specializations',{}))
     results.append(verify_graft(original, grafted, native, r, route, contracts))
+generic_results=[]
+for r in index.get('generic_camera',[]):
+    if r.get('camera_status')!='validated':continue
+    original=(p/r['source']).read_text()
+    camera=(p/'native-grafted'/(r['sha256']+'.camera.ll')).read_text()
+    generic_results.append(dict(sha256=r['sha256'],**verify_camera_graft(original,camera,r)))
 result=dict(checked=len(results),passed=len(results),camera_checked=len(camera_results),camera_passed=len(camera_results),
-    scope='Exact expression and original-output checks; not live material supply',results=results,camera_results=camera_results)
+    generic_checked=len(generic_results),generic_passed=len(generic_results),
+    scope='Exact expression and original-output checks; not live material supply',results=results,camera_results=camera_results,
+    generic_results=generic_results)
 (p/'native-grafted/verification.json').write_text(json.dumps(result,indent=2))
-print(json.dumps({k:result[k] for k in ('checked','passed','camera_checked','camera_passed','scope')}))
+print(json.dumps({k:result[k] for k in ('checked','passed','camera_checked','camera_passed','generic_checked','generic_passed','scope')}))

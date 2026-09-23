@@ -1,18 +1,24 @@
 """Export validated native grafts for the module's Glass/grafts catalog.
 
 Reads <workspace>/native-grafted/index.json and verification.json and writes
-<out>/grafts/index.bin plus one <sha256>.dxil per exported graft and, when its
-camera-only variant is verified, <sha256>.camera.dxil. index.bin is
+<out>/grafts/index.bin plus one <sha256>.dxil per exported root graft and, when
+its camera-only variant is verified, <sha256>.camera.dxil. index.bin is
 "GGRAFT02", u32 count, u32 reserved (0), then count 52-byte records sorted by sha:
 { u8 sha256[32]; u32 current_output; u32 previous_output; u32 supply_class;
   u32 camera_current_output; u32 camera_previous_output }.
 sha256 is the original VS DXBC container hash the module compares against.
-The camera outputs are 0xFFFFFFFF when the camera variant is not exported.
+The camera outputs are 0xFFFFFFFF when the camera variant is not exported; the
+root outputs are 0xFFFFFFFF for a camera-only record (no <sha256>.dxil).
 
-The camera-only variant (instanced array draws) applies the native previous
-camera rows to the target's own current world position; it reads no b7 row.
-It is exported only with its root graft, when camera_status is "validated" and
-its camera verification row has all checks true.
+The camera-only variant applies the native previous camera rows to the target's
+own current world position; it reads no b7 row. It is exported when
+camera_status is "validated" and its camera verification row has all checks
+true, beside its root graft or alone:
+  - a matched shader whose root graft is not exported;
+  - a generic_camera shader (no native current-position twin: the canonical
+    native previous view-projection multiply on its own world position).
+A camera-only record's supply_class is the target's own current position class
+(camera_supply_class), since no previous graph is copied from a native VS.
 
 A graft is exported only when its status is "validated", its verification row
 has all four checks true and it requires engine motion rows [24, 25, 26].
@@ -29,13 +35,13 @@ previous-clip graph only:
   bit 0 root-only  - neither: the previous graph reads the MotionMatrix and
                      camera rows plus the draw's own constants and vertex
                      attributes only
-A graft without a union entry is refused.
+A root graft without a union entry is refused.
 
 The output contains extracted game shader code. Write it to an ignored local
 directory;
 never commit or publish it. GlassFg.props copies <repo>/artifacts/glass-grafts/
 Glass/grafts beside the built DLL, so the usual call is
-  --workspace ..\glass-native-material-v1 --out artifacts/glass-grafts/Glass
+  --workspace ..\\glass-native-material-v1 --out artifacts/glass-grafts/Glass
 """
 from pathlib import Path
 from collections import Counter
@@ -96,40 +102,60 @@ def main():
     checked = json.loads((grafted / 'verification.json').read_text(encoding='utf-8'))
     verification = {row['sha256']: row for row in checked['results']}
     camera_verification = {row['sha256']: row for row in checked.get('camera_results', [])}
+    generic_verification = {row['sha256']: row for row in checked.get('generic_results', [])}
     union = {row['sha256']: row for row in
              json.loads((workspace / 'native-previous-supply-union.json').read_text(encoding='utf-8'))['shaders']}
 
-    index_rows = {shader['sha256']: shader.get('camera_rows') for shader in index['shaders']}
-    refused = Counter()
-    camera_refused = Counter()
-    records = []
-    for shader in index['shaders']:
+    def root_outputs(shader):
+        """(current, previous, supply class, dxil path) of an exportable root graft, else None."""
         sha = shader['sha256']
         if shader['status'] != 'validated':
             refused['status'] += 1
-            continue
+            return None
         row = verification.get(sha)
         if not row or not all(row.get(check) is True for check in CHECKS):
             refused['verification'] += 1
-            continue
+            return None
         if shader['required_engine_motion_rows'] != ROWS:
             refused['rows'] += 1
-            continue
+            return None
         current, previous = int(shader['current_output']), int(shader['previous_output'])
         if current == previous or not (0 <= current < 32 and 0 <= previous < 32):
             refused['outputs'] += 1
-            continue
+            return None
         native = union.get(shader['native_sha256'])
         if native is None:
             refused['supply-union'] += 1
-            continue
+            return None
         source = grafted / f'{sha}.dxil'
-        data = source.read_bytes()
-        if data[:4] != b'DXBC':
+        if source.read_bytes()[:4] != b'DXBC':
             refused['container'] += 1
-            continue
+            return None
+        return current, previous, supply_class(native), source
+
+    index_rows = {}
+    refused = Counter()
+    camera_refused = Counter()
+    records = []
+    kinds = Counter()
+    for shader in index['shaders']:
+        sha = shader['sha256']
+        index_rows[sha] = shader.get('camera_rows')
+        root = root_outputs(shader)
         camera = camera_outputs(shader, camera_verification.get(sha), grafted / f'{sha}.camera.dxil', camera_refused)
-        records.append((bytes.fromhex(sha), current, previous, supply_class(native), source, camera))
+        if root:
+            records.append((bytes.fromhex(sha), *root, camera))
+            kinds['root+camera' if camera else 'root only'] += 1
+        elif camera:
+            records.append((bytes.fromhex(sha), NO_OUTPUT, NO_OUTPUT, int(shader['camera_supply_class']), None, camera))
+            kinds['camera only (native twin, root not exported)'] += 1
+    for shader in index.get('generic_camera', []):
+        sha = shader['sha256']
+        index_rows[sha] = shader.get('camera_rows')
+        camera = camera_outputs(shader, generic_verification.get(sha), grafted / f'{sha}.camera.dxil', camera_refused)
+        if camera:
+            records.append((bytes.fromhex(sha), NO_OUTPUT, NO_OUTPUT, int(shader['camera_supply_class']), None, camera))
+            kinds['camera only (generic template)'] += 1
 
     records.sort(key=lambda record: record[0])
     if len({record[0] for record in records}) != len(records):
@@ -142,18 +168,19 @@ def main():
     for digest, current, previous, supply, source, camera in records:
         camera_current, camera_previous, camera_source = camera or (NO_OUTPUT, NO_OUTPUT, None)
         blob += struct.pack('<32sIIIII', digest, current, previous, supply, camera_current, camera_previous)
-        shutil.copyfile(source, out / f'{digest.hex()}.dxil')
+        if source:
+            shutil.copyfile(source, out / f'{digest.hex()}.dxil')
         if camera_source:
             shutil.copyfile(camera_source, out / f'{digest.hex()}.camera.dxil')
     (out / 'index.bin').write_bytes(bytes(blob))
 
     histogram = Counter(record[3] for record in records)
     print(f'grafts={len(records)} index_bytes={len(blob)} out={out}')
-    print('refused=' + (', '.join(f'{k}:{v}' for k, v in sorted(refused.items())) or 'none'))
+    for kind, count in sorted(kinds.items()):
+        print(f'{kind}: {count}')
+    print('root refused=' + (', '.join(f'{k}:{v}' for k, v in sorted(refused.items())) or 'none'))
     for value in sorted(histogram):
         print(f'class {value} ({CLASS_NAMES.get(value, "?")}): {histogram[value]}')
-    cameras = Counter('present' if record[5] else 'missing' for record in records)
-    print(f'camera present={cameras["present"]} missing={cameras["missing"]}')
     print('camera refused=' + (', '.join(f'{k}:{v}' for k, v in sorted(camera_refused.items())) or 'none'))
     rows = Counter(str(index_rows[record[0].hex()]) for record in records if record[5])
     for value in sorted(rows):

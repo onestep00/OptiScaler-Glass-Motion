@@ -15,7 +15,8 @@ struct GeometryPipelineEntry
     // graft pipeline: the grafted VS's previous clip is the native previous
     // view-projection applied to each element's own current world position
     // (the engine's own convention for array elements, which have no per-element
-    // previous transform). Compiled with `packed` when the graft has one.
+    // previous transform). Compiled with `packed` when the graft has one; for a
+    // camera-only graft (no root variant) it is the same pipeline as `packed`.
     Microsoft::WRL::ComPtr<ID3D12PipelineState> packedArray;
     // Vertex-history packed variant for array/grouped or multi-instance draws of
     // a graft pipeline without packedArray. Compiled only when
@@ -32,9 +33,10 @@ struct GeometryPipelineEntry
     // (F-01).
     bool deltaMissing = false;
     // `packed` takes the previous clip from the engine's MotionMatrix supply
-    // through a grafted VS. The engine evaluates that supply once per draw
-    // proxy, so the packed capture admits this variant only for a single-instance
-    // draw with a non-array identity.
+    // through a grafted VS, or, for a camera-only graft, from the previous
+    // view-projection on the VS's own world position. The engine evaluates the
+    // MotionMatrix supply once per draw proxy, so the packed capture admits a
+    // root variant only for a single-instance draw with a non-array identity.
     bool nativeGraft = false;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;

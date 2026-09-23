@@ -178,8 +178,8 @@ inline void PublishGeometryMotionDegraded(bool value)
 
 // Native graft path outcomes (engine MotionMatrix supply through a grafted VS).
 // Compile outcomes are counted once per packed pipeline on the cache worker:
-// ready + missing + rejected + class disabled = pipelines that asked for a
-// packed variant; array ready + array missing = ready. Draw outcomes are
+// ready + camera only + missing + rejected + class disabled = pipelines that
+// asked for a packed variant; array ready + array missing = ready. Draw outcomes are
 // counted by the packed capture's prepare, and NativePreviousEvaluations by the
 // FG host for a substituted evaluation whose frame drew at least one graft
 // variant while the vertex-history fallback was off. Diagnostics only; no
@@ -190,6 +190,10 @@ enum GeometryGraftCounter : unsigned
     GraftMissing,
     GraftRejected,
     GraftClassDisabled,
+    // Pipelines whose VS has a camera-only catalog record (no native
+    // current-position twin) and whose camera variant compiled: it is both
+    // `packed` and `packedArray`. A failed compile counts GraftRejected.
+    GraftCameraOnly,
     // Graft pipelines that also compiled the camera-only array variant
     // (packedArray), and those whose graft has no camera variant or whose
     // camera variant failed to compile.

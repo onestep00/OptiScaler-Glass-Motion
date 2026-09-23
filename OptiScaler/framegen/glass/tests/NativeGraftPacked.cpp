@@ -3,6 +3,8 @@
 // Usage: NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous
 //        camera-current camera-previous
 // module-dir must contain Glass/grafts written by tools/export_native_grafts.py.
+// current and previous are "none" for a camera-only record (a VS without a
+// native current-position twin): no root graft, only the camera variant.
 #include "pch.h"
 #include <dxcapi.h>
 #include <wrl/client.h>
@@ -115,7 +117,9 @@ int wmain(int argc, wchar_t** argv)
         require(argc == 9, "NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous "
                            "camera-current camera-previous");
         moduleDirectory = argv[2];
-        const unsigned expectedCurrent = std::stoul(argv[5]), expectedPrevious = std::stoul(argv[6]);
+        const bool cameraOnly = std::wstring(argv[5]) == L"none" && std::wstring(argv[6]) == L"none";
+        const unsigned expectedCurrent = cameraOnly ? 0 : std::stoul(argv[5]);
+        const unsigned expectedPrevious = cameraOnly ? 0 : std::stoul(argv[6]);
         const unsigned expectedCameraCurrent = std::stoul(argv[7]), expectedCameraPrevious = std::stoul(argv[8]);
         const auto dll = LoadLibraryExW(argv[1], nullptr,
                                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -137,6 +141,8 @@ int wmain(int argc, wchar_t** argv)
         require(graft.has_value(), "Catalog miss for the original VS");
         require(graft->currentOutput == expectedCurrent && graft->previousOutput == expectedPrevious,
                 "Catalog output ids differ from index.json");
+        require(cameraOnly == !graft->bytes && cameraOnly == !graft->size,
+                cameraOnly ? "Camera-only record returned root graft bytes" : "Catalog hit has no root graft");
         const auto again = GlassFg::FindNativeGraft(originalVs.data(), originalVs.size());
         require(again && again->bytes == graft->bytes, "Second lookup did not reuse the loaded graft");
         require(!GlassFg::FindNativeGraft(pixel.data(), pixel.size()), "Pixel shader bytes matched a graft");
@@ -236,11 +242,15 @@ int wmain(int argc, wchar_t** argv)
         };
 
         // Root graft: previous clip reads the relocated MotionMatrix rows b7[24..26].
-        const auto rootText = dxc.disassemble(graft->bytes, graft->size);
-        require(loads(loadedRows(rootText, 7), 24, 3) == 3, "Root graft does not read MotionMatrix b7[24..26]");
-        rewritePacked("root", graft->bytes, graft->size, graft->currentOutput, graft->previousOutput);
+        if (!cameraOnly)
+        {
+            const auto rootText = dxc.disassemble(graft->bytes, graft->size);
+            require(loads(loadedRows(rootText, 7), 24, 3) == 3, "Root graft does not read MotionMatrix b7[24..26]");
+            rewritePacked("root", graft->bytes, graft->size, graft->currentOutput, graft->previousOutput);
+        }
 
-        // Camera-only array variant of the same original VS: previous clip is the
+        // Camera-only variant of the same original VS (array draws of a root
+        // graft, every draw of a camera-only record): previous clip is the
         // native previous view-projection (b1 rows 16..19, or 12..15 in the
         // forward layout) on the VS's own current world position, with no
         // MotionMatrix read.

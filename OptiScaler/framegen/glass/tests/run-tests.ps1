@@ -112,6 +112,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Native graft packed test build failed' }
     (Join-Path $graftWorkspace 'all-transparent-vs\4140f6d44e631b23d56730116a2fe84189c7740676be7b5c4661301636516ad6.dxbc') `
     (Join-Path $graftWorkspace 'all-transparent-ps\4d4bdc5d8fa67396475344d2efc98c0a071f3066244dc4c41a4f73b91c23aa3e.dxbc') 7 8 7 8
 if ($LASTEXITCODE -ne 0) { throw 'Native graft packed rewrite contract failed' }
+# Camera-only record (no native twin): glass MeshStatic VS with branched
+# projection arms and its paired glass PS.
+& $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
+    (Join-Path $graftWorkspace 'all-transparent-vs\39f8b55578cc38ccb2c3263571fe2a9c1eeb31d24c83de653675021874f442d0.dxbc') `
+    (Join-Path $graftWorkspace 'all-transparent-ps\6bc2b7e3e38cd012a38ecb7de0ab2bd49f6210286b3c067a98bbed91cb5b1a7c.dxbc') none none 10 11
+if ($LASTEXITCODE -ne 0) { throw 'Native graft camera-only packed rewrite contract failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'
 $sources = @((Join-Path $PSScriptRoot 'Settings.cpp'),

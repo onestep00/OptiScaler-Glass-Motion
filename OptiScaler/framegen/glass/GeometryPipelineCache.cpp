@@ -296,6 +296,33 @@ struct GeometryPipelineCache::Impl
                                 packedError = "Native graft supply class " + std::to_string(graft->supplyClass) +
                                               " disabled for vertex shader " + hashPrefix(vertexHash);
                             }
+                            else if (graft && !graft->bytes)
+                            {
+                                // Camera-only record: the VS has no native
+                                // current-position twin, so the engine's own
+                                // convention for a surface without object-motion
+                                // supply applies to every draw (previous
+                                // view-projection on the VS's own current world
+                                // position). One pipeline serves single and
+                                // array/multi-instance draws.
+                                const NativeGraft camera { graft->cameraBytes, graft->cameraSize,
+                                                           graft->cameraCurrentOutput,
+                                                           graft->cameraPreviousOutput, graft->supplyClass,
+                                                           nullptr, 0, 0, 0 };
+                                packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,
+                                                                           entry.description, entry.packed,
+                                                                           packedError, nullptr, nullptr, &camera);
+                                graftReady = SUCCEEDED(packedStatus);
+                                NoteGeometryGraft(graftReady ? GraftCameraOnly : GraftRejected);
+                                if (graftReady)
+                                    entry.packedArray = entry.packed;
+                                else
+                                {
+                                    entry.packed.Reset();
+                                    packedError = "Camera-only graft rejected for vertex shader " +
+                                                  hashPrefix(vertexHash) + ": " + packedError;
+                                }
+                            }
                             else if (graft)
                             {
                                 packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,

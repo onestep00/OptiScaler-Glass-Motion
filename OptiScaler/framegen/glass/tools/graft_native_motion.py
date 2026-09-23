@@ -8,35 +8,48 @@ Each match also gets a camera-only variant (<sha>.camera.ll/.dxil) for instanced
 array draws: the native previous camera multiply (b1 rows 16..19 or 12..15)
 copied node for node onto the target's own current world position. It reads no
 b7 row and needs no module state.
+
+Every other transparent VS (no native current-position twin) gets only the
+camera-only variant (index.json generic_camera): the canonical native template's
+previous camera multiply on the target's own world position, one template per
+camera layout. Targets whose clip is not a per-vertex view-projection multiply
+of a world position are recorded as unsupported with the reason.
 """
 from pathlib import Path
-from collections import Counter
+from collections import Counter,defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import hashlib,json,re,subprocess
-from match_shared_native_motion import Shader,var,modifier_key
+from match_shared_native_motion import Shader,var,modifier_key,native_previous
 
 import argparse
 _parser=argparse.ArgumentParser(description=__doc__)
 _parser.add_argument('--workspace', type=Path, required=True)
-p=_parser.parse_args().workspace.resolve(strict=True)
+_parser.add_argument('--generic-extra', type=Path, action='append', default=[],
+    help='JSON list of {sha256, vertex_factory} observed VS outside the transparent inventory; '
+         'their disassembly is read from <workspace>/extended-position-inputs')
+_args=_parser.parse_args()
+p=_args.workspace.resolve(strict=True);_extra=_args.generic_extra
 
-def emit_clip_outputs(a,text,native,node,lines,metadata,previous,input_cols,used_calls):
+def emit_clip_outputs(a,text,native,node,lines,metadata,previous,input_cols,used_calls,dejittered=False):
     """Append de-jittered current clip and the given previous clip as two new outputs.
 
     Original definitions, stores and branches stay intact; only outputs, their
     signature metadata, required input usage and intrinsic declarations are added.
+    dejittered: the target's SV_Position already is XY - b1[51].xy*W; it is
+    exported unchanged instead of subtracting the jitter a second time.
     """
     # Reuse the native camera jitter convention already verified by the paired
     # original input experiment; current clip remains the target's own position.
     current_id=next(i for i,f in a.outs.items() if f[1]=='!"SV_Position"')
     current=[a.roots[current_id][i] for i in range(4)]
-    cam=next(v for v,h in a.handles.items() if h[0]==2 and h[2]==1)
-    lines.append(f'  %graftJitter = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle {cam}, i32 51)')
-    for i in range(2):
-        lines.extend([f'  %graftJitter{i} = extractvalue %dx.types.CBufRet.f32 %graftJitter, {i}',
-          f'  %graftJitterW{i} = fmul fast float %graftJitter{i}, {current[3]}',
-          f'  %graftCurrent{i} = fsub fast float {current[i]}, %graftJitterW{i}'])
-        current[i]=f'%graftCurrent{i}'
+    if not dejittered:
+        cam=next(v for v,h in a.handles.items() if h[0]==2 and h[2]==1)
+        lines.append(f'  %graftJitter = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle {cam}, i32 51)')
+        for i in range(2):
+            lines.extend([f'  %graftJitter{i} = extractvalue %dx.types.CBufRet.f32 %graftJitter, {i}',
+              f'  %graftJitterW{i} = fmul fast float %graftJitter{i}, {current[3]}',
+              f'  %graftCurrent{i} = fsub fast float {current[i]}, %graftJitterW{i}'])
+            current[i]=f'%graftCurrent{i}'
     first=max(a.outs)+1;register=max(int(f[8][4:])+int(f[6][4:]) for f in a.outs.values())
     entry=re.search(r'!dx.entryPoints = !\{!(\d+)\}',text)[1]
     sig=re.search(r'!"[^"]+", !(\d+),',a.md[entry])[1]
@@ -356,7 +369,243 @@ def camera_graft(target,native,clip,target_contract=None,native_contract=None,sp
     return text,dict(camera_current_output=first,camera_previous_output=first+1,camera_added_instructions=added,
         camera_rows=clip['camera_rows'],camera_current_rows=list(range(current_start,current_start+4)),
         camera_world_operands=sorted(world.values(),key=lambda v:int(v[1:])),
-        camera_world_frame_rows=sorted(current_frame),camera_gpu_verified=False)
+        camera_world_frame_rows=sorted(current_frame),camera_supply_class=target_supply_class(a,roots),camera_gpu_verified=False)
+
+# Generic camera-only graft for transparent VS with no native current-position twin.
+# The engine's velocity-init convention for a surface without object-motion supply:
+# previous clip = previous view-projection x current world position.
+CAMERA_LAYOUTS={28:16,0:12}   # target current VP block -> native previous VP block
+ORIGIN_ROWS=(36,37,38)        # b1 camera-relative origin rows (camera position, fixed-point origin)
+FLAGGED=re.compile(r'^f(?:add|sub|mul|div) (?:fast )?float\b')
+INCOMING=re.compile(r'\[ ([^,\]]+), %([\w.]+) \]')
+SELECT=re.compile(r'select i1 ([^,]+), float ([^,]+), float (.+)')
+
+def flagless(label):
+    return re.sub(r'^(f(?:add|sub|mul|div)) fast float\b',r'\1 float',label)
+
+BINARY=re.compile(r'f(?:add|sub|mul|div) (?:fast )?float ([^,]+), ([^,]+)')
+CALL_OPERAND=re.compile(r', float ([^,)]+)')
+
+def region_node(s,v,start):
+    """camera_node with every float operand lifted, literals included.
+
+    Returns (label, operands, commutative, spans); spans locate the operands in
+    s.defs[v], so a clone substitutes by position. A literal operand (a
+    constant hide position) thus meets the other side's operand as a leaf.
+    """
+    rhs=s.defs[v]
+    if rhs.startswith('phi '):raise ValueError('camera projection contains control flow')
+    m=CAMERA_LOAD.search(rhs)
+    if m:return rhs[:m.start(1)]+'@, i32 ROW'+str(int(m[2])-start)+')'+rhs[m.end():],[m[1]],False,[m.span(1)]
+    m=BINARY.fullmatch(rhs)
+    if m:spans=[m.span(1),m.span(2)]
+    elif rhs.startswith('call float @dx.op.'):spans=[o.span(1) for o in CALL_OPERAND.finditer(rhs)]
+    else:spans=[o.span() for o in var.finditer(rhs)]
+    label=rhs
+    for s0,e0 in reversed(spans):label=label[:s0]+'@'+label[e0:]
+    return label,[rhs[s0:e0] for s0,e0 in spans],label.startswith(COMMUTATIVE),spans
+
+def match_region(b,b_region,b_start,x,a,a_region,a_start,y,mapping,context=()):
+    """match_projection that also accepts target branches inside its projection.
+
+    DXC sinks a common multiply into the arms of a branch: clip = phi(VP*wA,
+    VP*wB) + VP.w, or select(c, literal, VP*w). Each projected arm is matched
+    against the same native node in its own context (a path of phi
+    predecessors / select arms), so each arm has its own world vector. A
+    literal arm (a collapsed vertex) is kept as it is. A world operand may be a
+    literal (a constant hide position). Keys:
+    ('leaf',context,native) -> target leaf (one bijection per context);
+    ('pair',target) -> (native node, target operands in native operand order),
+    or (native node, None) for a target phi/select.
+    """
+    if (x in b_region)!=(y in a_region):return None
+    if x not in b_region:
+        if not x.startswith('%'):return mapping if x==y else None
+        if x in b.handles and not y.startswith('%'):return None
+        key=('leaf',context,x)
+        if key in mapping:return mapping if mapping[key]==y else None
+        if y.startswith('%') and any(k[0]=='leaf' and k[1]==context and v==y for k,v in mapping.items()):return None
+        return {**mapping,key:y}
+    rhs=a.defs[y]
+    arms=None
+    if rhs.startswith('phi '):
+        join=a.value_block[y]
+        arms=[(value,('phi',join,pred)) for value,pred in INCOMING.findall(rhs)]
+    elif rhs.startswith('select '):
+        m=SELECT.fullmatch(rhs)
+        if not m or m[1] in a_region:return None
+        arms=[(m[2],('select',y,1)),(m[3],('select',y,2))]
+    if arms is not None:
+        m=mapping
+        for value,step in arms:
+            if value not in a_region and not value.startswith('%'):continue
+            m=match_region(b,b_region,b_start,x,a,a_region,a_start,value,m,context+(step,))
+            if m is None:return None
+        return m if ('pair',y) in m else {**m,('pair',y):(x,None)}
+    bl,bops,commutative,_=region_node(b,x,b_start);al,aops,_,_=region_node(a,y,a_start)
+    if flagless(bl)!=flagless(al) or len(bops)!=len(aops):return None
+    commutative=commutative or flagless(bl).startswith(('fmul float ','fadd float '))
+    orders=[aops]+([[aops[1],aops[0]]+aops[2:]] if commutative else [])
+    for order in orders:
+        m=mapping
+        for u,w in zip(bops,order):
+            m=match_region(b,b_region,b_start,u,a,a_region,a_start,w,m,context)
+            if m is None:break
+        if m is not None:return m if ('pair',y) in m else {**m,('pair',y):(x,order)}
+    return None
+
+def insert_block_lines(text,before_terminator,after_phis):
+    """Insert lines at the end of blocks (before their terminator) and after the
+    leading phis of blocks. Existing lines are unchanged."""
+    out=[];block=None;pending=None
+    for line in text.split('\n'):
+        if line.startswith('define void @'):block='0'
+        label=re.match(r'; <label>:(\d+)',line)
+        if label:
+            block=label[1];pending=after_phis.get(block)
+            out.append(line);continue
+        if pending and line.startswith('  ') and not re.match(r'  %[\w.]+ = phi ',line):
+            out.extend(pending);pending=None
+        if block and re.match(r'  (?:br|ret|switch) ',line):
+            out.extend(before_terminator.get(block,[]))
+        out.append(line)
+    return '\n'.join(out)
+
+def target_supply_class(a,roots):
+    """Supply class of the target's own current position cone (GraftClass* bits)."""
+    skinning_inputs={'BLENDINDICES','BLENDWEIGHT','INSTANCE_SKINNING_DATA','BONEINDEX'}
+    deps=a.dependencies_values(roots)
+    skinning=any(name.upper() in skinning_inputs for name,_,_ in deps['inputs'])
+    preskinned=any(binding==3 for binding,_ in deps['cb_rows'])
+    seen=set();todo=list(roots)
+    while todo:
+        v=todo.pop()
+        if v in seen or v not in a.defs:continue
+        seen.add(v);rhs=a.defs[v];todo.extend(var.findall(rhs))
+        m=re.search(r'@dx\.op\.(?:rawBufferLoad|bufferLoad|textureLoad|sample\w*)\.\w+\(i32 \d+, %dx.types.Handle (%\d+)',rhs)
+        h=a.handles.get(m[1]) if m else None
+        if h and h[0]==0:
+            skinning|=h[2]==10;preskinned|=h[2]==9
+    return (2 if skinning else 0)|(4 if preskinned else 0) or 1
+
+def generic_camera_graft(target,templates):
+    """Previous clip = the canonical native previous view-projection multiply on the target's own world position.
+
+    For a VS without a native current-position twin. templates maps the
+    target's current VP block (28 or 0) to (sha, native text, previous clip) of
+    one validated native velocity VS; its previous camera region (b1 16..19 or
+    12..15) must match the target's current projection node for node, with
+    the target's world operands as the only leaves. The world operands are in
+    the frame the target's current VP block takes (its own clip uses them);
+    native_frames() checks that every native VS feeds the paired previous block
+    world positions in that same frame.
+    """
+    a=Shader(target)
+    oid=next((i for i,f in a.outs.items() if f[1]=='!"SV_Position"'),None)
+    if oid is None:raise ValueError('no SV_Position output (not a rasterized vertex stage)')
+    if set(a.roots[oid])!={0,1,2,3}:raise ValueError('incomplete position')
+    roots=[a.roots[oid][i] for i in range(4)];coverage_guard=None
+    try:roots,coverage_guard=a.uncollapsed_position()
+    except ValueError:pass
+    try:roots=a.before_jitter_subtraction(roots);dejittered=True
+    except ValueError:dejittered=False
+    blocks=[start for start in CAMERA_LAYOUTS if camera_projection(a,roots,start)]
+    rows={r for binding,r in a.dependencies_values(roots)['cb_rows'] if binding==1}
+    if not blocks:
+        raise ValueError('clip reads no current view-projection rows (b1 28..31 or 0..3): '+
+            ('screen-space position from the b1[48] viewport terms' if rows<={48} else f'b1 rows {sorted(rows)}'))
+    found=[]
+    for current_start in blocks:
+        template_sha,native,clip=templates[current_start]
+        b=Shader(native);previous_start=clip['camera_rows'][0]
+        previous_roots=[b.roots[o][col] for o,col in clip['components']]
+        b_region=camera_projection(b,previous_roots,previous_start)
+        a_region=camera_projection(a,roots,current_start)
+        mapping={}
+        for x,y in zip(previous_roots,roots):
+            mapping=match_region(b,b_region,previous_start,x,a,a_region,current_start,y,mapping)
+            if mapping is None:break
+        if mapping is not None:found.append((current_start,template_sha,native,clip,b,a_region,mapping))
+    if not found:
+        reason='current clip is not a per-vertex view-projection multiply of a world position'
+        if rows>={8,9,10,11}:
+            reason+=': a branch arm projects in two stages (b1 24..26 view rotation, then b1 8..11 projection)'
+        elif any(a.defs.get(v,'').startswith('select ') and SELECT.fullmatch(a.defs[v]) and SELECT.fullmatch(a.defs[v])[1] in region
+                 for start in blocks for region in [camera_projection(a,roots,start)] for v in region):
+            reason+=': a vertex collapse condition reads the current view-projection (projected-size cull)'
+        raise ValueError(reason)
+    if len(found)!=1:raise ValueError('ambiguous current camera rows')
+    current_start,template_sha,native,clip,b,a_region,mapping=found[0]
+    for k,y in mapping.items():
+        if k[0]!='leaf' or k[2] not in b.handles:continue
+        x=k[2]
+        if b.handles[x][0]!=2 or b.handles[x][2]!=1 or a.handles.get(y,())[:1]!=(2,) or a.handles[y][2]!=1:
+            raise ValueError('camera multiply reads a non-camera resource')
+        if a.resources[2,a.handles[y][1]]!=b.resources[2,b.handles[x][1]]:raise ValueError('camera binding contract differs')
+    # One world vector per projected arm: along each maximal context path the
+    # native multiply's three world operands map to exactly one target value each.
+    template_world={k[2] for k in mapping if k[0]=='leaf' and k[2] not in b.handles}
+    world_leaves=[(k[1],k[2],y) for k,y in mapping.items() if k[0]=='leaf' and k[2] not in b.handles]
+    contexts={c for c,_,_ in world_leaves}
+    paths=[c for c in contexts if not any(d!=c and d[:len(c)]==c for d in contexts)] or [()]
+    world_sets=[]
+    for path in sorted(paths,key=str):
+        world={}
+        for c,x,y in world_leaves:
+            if path[:len(c)]!=c:continue
+            if world.get(x,y)!=y:raise ValueError('world operand bound twice on one projection arm')
+            world[x]=y
+        if len(template_world)!=3 or set(world)!=template_world:
+            raise ValueError('world-space position is not three operands of the camera multiply')
+        world_sets.append(world)
+    branches=[p for p in paths if p]
+    frame_rows=[sorted({r for binding,r in a.dependencies_values(list(w.values()))['cb_rows'] if binding==1}) for w in world_sets]
+    dominators=a.exit_dominators()
+    if any(a.value_block.get(v) not in dominators for v in roots):
+        raise ValueError('current clip is not computed on every path to the exit')
+    text=target.rstrip('\0\r\n')+'\n'
+    if text.count('  ret void')!=1:raise ValueError('target needs a single exit')
+    node=max(map(int,re.findall(r'^!(\d+) = ',text,re.M)))+1
+    ends=defaultdict(list);heads=defaultdict(list);cloned={};used_calls=set();adopted=0
+    # Walk the target's matched projection. Each node becomes the matched native
+    # instruction (previous camera row, native operand order) on the clones of
+    # the target operands, placed at the end of the target node's own block, so
+    # the previous graph shares exactly the nodes the current graph shares.
+    def clone(y):
+        nonlocal adopted
+        if y not in a_region:return y
+        if y in cloned:return cloned[y]
+        x,order=mapping['pair',y]
+        name='%graftCamera'+y[1:]
+        if order is None and a.defs[y].startswith('select '):
+            m=SELECT.fullmatch(a.defs[y])
+            ends[a.value_block[y]].append(f'  {name} = select i1 {m[1]}, float {clone(m[2])}, float {clone(m[3])}')
+        elif order is None:
+            parts=[f'[ {clone(value)}, %{pred} ]' for value,pred in INCOMING.findall(a.defs[y])]
+            heads[a.value_block[y]].append(f'  {name} = '+a.defs[y].split(' [',1)[0]+' '+', '.join(parts))
+        else:
+            rhs=b.defs[x];_,ops,_,spans=region_node(b,x,clip['camera_rows'][0])
+            if len(ops)!=len(order):raise ValueError('native camera node operand count differs')
+            values=[clone(w) for w in order]
+            for (s0,e0),value in sorted(zip(spans,values),reverse=True):rhs=rhs[:s0]+value+rhs[e0:]
+            native_flags,target_flags=FLAGGED.match(b.defs[x]),FLAGGED.match(a.defs[y])
+            if native_flags and native_flags[0]!=target_flags[0]:
+                rhs=FLAGGED.sub(target_flags[0],rhs,count=1);adopted+=1
+            used_calls.update(re.findall(r'@(dx\.op\.[\w.]+)\(',rhs))
+            ends[a.value_block[y]].append(f'  {name} = {rhs}')
+        cloned[y]=name
+        return name
+    previous=[clone(v) for v in roots]
+    text=insert_block_lines(text,ends,heads)
+    inserted=sum(map(len,ends.values()))+sum(map(len,heads.values()))
+    text,first,added=emit_clip_outputs(a,text,native,node,[],[],previous,{},used_calls,dejittered)
+    return text,dict(camera_current_output=first,camera_previous_output=first+1,camera_added_instructions=added+inserted,
+        camera_rows=clip['camera_rows'],camera_current_rows=list(range(current_start,current_start+4)),
+        camera_template_sha256=template_sha,camera_branches=len(branches),
+        camera_world_operands=[sorted(w.values(),key=str) for w in world_sets],
+        camera_world_frame_rows=frame_rows,camera_current_dejittered=dejittered,coverage_guard=coverage_guard,
+        camera_fast_math_adopted=adopted,
+        camera_supply_class=target_supply_class(a,roots),camera_gpu_verified=False)
 
 def main():
     rows=json.loads((p/'shared-native-motion-matches.json').read_text())['matches']
@@ -395,7 +644,99 @@ def main():
         camera_statuses=dict(Counter(r['camera_status'] for r in results)),
         camera_rows=dict(Counter(str(r['camera_rows']) for r in results if r['camera_status']=='validated')),
         copied_from_original_native_mv=True,live_admitted=False)
-    (out/'index.json').write_text(json.dumps(dict(summary=summary,shaders=results),indent=2))
+    generic,generic_summary=generic_phase(rows,results,out,assemble)
+    summary['generic_camera']=generic_summary
+    (out/'index.json').write_text(json.dumps(dict(summary=summary,shaders=results,generic_camera=generic),indent=2))
     print(json.dumps(summary,indent=2))
+
+def camera_templates(results):
+    """One canonical native template per camera layout: the native VS most used by validated twin camera grafts."""
+    templates={}
+    for current_start,previous_start in CAMERA_LAYOUTS.items():
+        used=Counter(r['camera_native_sha256'] for r in results if r.get('camera_status')=='validated'
+                     and r['camera_rows'][0]==previous_start and r['camera_current_rows'][0]==current_start)
+        if not used:raise ValueError(f'no validated native template for b1 {current_start}->{previous_start}')
+        sha=min(used,key=lambda s:(-used[s],s))
+        native=(p/'opaque-velocity-audit'/(sha+'.ll')).read_text()
+        b=Shader(native);clip=native_previous(b)[0]
+        if clip['camera_rows'][0]!=previous_start:raise ValueError('template previous camera block differs')
+        # The template's previous multiply is the same fixed 4x4 transform as its
+        # own current multiply: node for node, rows renamed, three world leaves.
+        oid=next(i for i,f in b.outs.items() if f[1]=='!"SV_Position"')
+        current=[b.roots[oid][i] for i in range(4)]
+        previous=[b.roots[o][col] for o,col in clip['components']]
+        b_region=camera_projection(b,previous,previous_start);c_region=camera_projection(b,current,current_start)
+        mapping={}
+        for x,y in zip(previous,current):
+            mapping=match_region(b,b_region,previous_start,x,b,c_region,current_start,y,mapping)
+            if mapping is None:raise ValueError('template previous multiply differs from its current multiply')
+        leaves=[k for k in mapping if k[0]=='leaf']
+        if any(k[1] for k in leaves) or any(k[0]=='pair' and v[1] is None for k,v in mapping.items()) \
+                or sum(k[2] not in b.handles for k in leaves)!=3:
+            raise ValueError('template multiply is not one plain 4x4 transform of three world operands')
+        templates[current_start]=(sha,native,clip)
+    return templates
+
+def native_frames():
+    """Check that native VS feed each previous VP block world positions in the current block's frame.
+
+    For every native velocity VS: (current VP block, previous VP block) and the
+    b1 origin rows (36..38) its current and previous world positions read. The
+    previous world's origin rows must be a subset of the current world's, so a
+    previous block takes world positions in its paired current block's frame.
+    Returns counts per (pair, current origin, previous origin).
+    """
+    frames=Counter()
+    for r in json.loads((p/'opaque-velocity-audit/index.json').read_text())['shaders']:
+        try:
+            s=Shader(Path(r['disassembly']).read_text());clip=native_previous(s)[0]
+        except (ValueError,KeyError,StopIteration):continue
+        oid=next(i for i,f in s.outs.items() if f[1]=='!"SV_Position"')
+        current={row for binding,row in s.dependencies(oid)['cb_rows'] if binding==1}
+        previous={row for binding,row in s.dependencies_values([s.roots[o][col] for o,col in clip['components']])['cb_rows'] if binding==1}
+        start=28 if 28 in current else 0 if 0 in current else None
+        pair=(start,clip['camera_rows'][0])
+        if pair in CAMERA_LAYOUTS.items() and not previous&set(ORIGIN_ROWS)<=current&set(ORIGIN_ROWS):
+            raise ValueError(f'native {r["sha256"]} previous world origin differs from its current world origin')
+        frames[pair,tuple(sorted(current&set(ORIGIN_ROWS))),tuple(sorted(previous&set(ORIGIN_ROWS)))]+=1
+    return frames
+
+def generic_phase(rows,results,out,assemble):
+    """Camera-only grafts for transparent VS outside the native twin matches."""
+    templates=camera_templates(results);frames=native_frames()
+    matched={r['sha256'] for r in rows}
+    families={g['sha256']:g['families'] for g in json.loads((p/'native-motion-gaps.json').read_text())['shaders']}
+    for path in _extra:
+        for x in json.loads(Path(path).read_text()):families.setdefault(x['sha256'],[x['vertex_factory']])
+    # The rest of the transparent inventory (e.g. glass_scope highlights, absent
+    # from the gap audit): vertex factories from the technique catalogs.
+    techniques={}
+    for name in ('all-transparent-vs-catalog.json','scope-shader-catalog.json'):
+        for sha,names in json.loads((p/name).read_text()).items():techniques.setdefault(sha,[]).extend(names)
+    for f in (p/'all-transparent-vs').glob('*.ll'):
+        if f.stem not in families:
+            families[f.stem]=sorted({m[1] for t in techniques.get(f.stem,[]) for m in [re.search(r'VF: (\w+)',t)] if m}) or ['unknown']
+    def process(sha):
+        source=next((f for f in (p/'all-transparent-vs'/(sha+'.ll'),p/'extended-position-inputs'/(sha+'.ll')) if f.exists()),None)
+        row=dict(sha256=sha,families=families[sha],source=str(source.relative_to(p)) if source else None)
+        path=out/(sha+'.camera.ll')
+        try:
+            if not source:raise ValueError('disassembly absent from the transparent inventory')
+            text,info=generic_camera_graft(source.read_text(),templates)
+            assemble(path,text);row.update(camera_status='validated',**info)
+        except (ValueError,KeyError,StopIteration,AssertionError) as e:
+            for stale in (path,path.with_suffix('.dxil')):stale.unlink(missing_ok=True)
+            row.update(camera_status='unsupported',camera_errors=[str(e)[:400]])
+        return row
+    with ThreadPoolExecutor(max_workers=4) as pool:generic=list(pool.map(process,sorted(set(families)-matched)))
+    per_family=defaultdict(Counter)
+    for r in generic:
+        for f in r['families']:per_family[f][r['camera_status']]+=1
+    summary=dict(total=len(generic),statuses=dict(Counter(r['camera_status'] for r in generic)),
+        templates={f'b1 {c}->{t[2]["camera_rows"][0]}':t[0] for c,t in templates.items()},
+        native_frames={f'b1 {pair[0]}->{pair[1]} current origin {list(c)} previous origin {list(q)}':n for (pair,c,q),n in sorted(frames.items(),key=str)},
+        errors=dict(Counter(r['camera_errors'][0].split('\n')[0][:120] for r in generic if r['camera_status']!='validated')),
+        families={f:dict(c) for f,c in sorted(per_family.items())})
+    return generic,summary
 
 if __name__=='__main__':main()
