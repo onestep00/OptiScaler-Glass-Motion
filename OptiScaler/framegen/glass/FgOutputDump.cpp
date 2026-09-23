@@ -26,6 +26,14 @@ const char* const kOutputKeys[] { "DLSSG.OutputInterpolated", "Output", "DLSSG.O
 constexpr D3D12_RESOURCE_STATES kOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 // A batch that makes no progress for this long is truncated or abandoned.
 constexpr std::uint64_t kDeadlineMs = 15000;
+// A submitted copy whose queue fence has not passed it this long after the last
+// submission ends the batch with what completed.
+constexpr std::uint64_t kIncompleteMs = 20000;
+// Distinct queues one batch can signal on. The frame generation lists were
+// observed on two queues in one batch (2026-09-23), and one fence signalled
+// from two queues regresses: GetCompletedValue reports the last signal the GPU
+// executed, not the highest value.
+constexpr unsigned kFgDumpQueues = 4;
 
 enum class Phase : unsigned
 {
@@ -41,7 +49,7 @@ enum class SlotState : unsigned char
 {
     Empty,
     Recorded, // copy recorded into an open command list
-    Signaled, // that list was submitted; fenceValue covers it
+    Signaled, // that list was submitted; queues[queue] reaching fenceValue covers it
     Dropped,  // the list was reset without being submitted
 };
 
@@ -51,6 +59,7 @@ struct Slot
     SlotState state = SlotState::Empty;
     ID3D12GraphicsCommandList* command = nullptr;
     std::uint64_t fenceValue = 0;
+    unsigned queue = 0;
     FgDumpPhase phase {};
     ID3D12Resource* resource = nullptr; // identity only, for the manifest
     const char* key = nullptr;
@@ -65,10 +74,17 @@ struct State
     D3D12_RESOURCE_DESC description {};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
     Microsoft::WRL::ComPtr<ID3D12Device> device;
-    ID3D12Fence* fence = nullptr;
-    std::uint64_t fenceValue = 0;
-    std::uint64_t sinceMs = 0;
-    bool missingLogged = false, shapeLogged = false, keyLogged = false, stallLogged = false;
+    // One fence per queue, each with its own monotonic counter. Created with
+    // the readbacks on the health thread and bound to a queue at its first
+    // submission, so the submit path never creates an object.
+    struct QueueFence
+    {
+        ID3D12CommandQueue* queue = nullptr; // identity only
+        ID3D12Fence* fence = nullptr;
+        std::uint64_t value = 0;
+    } queues[kFgDumpQueues] {};
+    std::uint64_t sinceMs = 0, lastSubmitMs = 0;
+    bool missingLogged = false, shapeLogged = false, keyLogged = false, stallLogged = false, queueLimitLogged = false;
     Slot slots[kFgDumpMax] {};
 };
 
@@ -107,23 +123,42 @@ struct Lines
 
 bool active(Phase phase) noexcept { return phase == Phase::Armed || phase == Phase::Draining; }
 
-// Called with the mutex held and only when no recorded copy can still execute.
-void releaseLocked(State& s) noexcept
+bool slotComplete(const State& s, const Slot& slot) noexcept
 {
+    ID3D12Fence* fence = slot.queue < kFgDumpQueues ? s.queues[slot.queue].fence : nullptr;
+    return slot.state == SlotState::Signaled && fence != nullptr && fence->GetCompletedValue() >= slot.fenceValue;
+}
+
+// Called with the mutex held. A readback whose copy may still execute (recorded
+// and not reset, or submitted and not passed by its fence) and a fence with a
+// signal still pending are not released: the GPU can still write them. That is
+// only possible after an incomplete abort and is reported as leaked.
+unsigned releaseLocked(State& s) noexcept
+{
+    unsigned leaked = 0;
     for (auto& slot : s.slots)
     {
-        if (slot.readback)
+        const bool pending =
+            slot.state == SlotState::Recorded || (slot.state == SlotState::Signaled && !slotComplete(s, slot));
+        if (slot.readback && !pending)
             slot.readback->Release();
+        leaked += slot.readback && pending ? 1u : 0u;
         slot = Slot {};
     }
-    if (s.fence)
-        s.fence->Release();
-    s.fence = nullptr;
-    s.fenceValue = 0;
+    for (auto& entry : s.queues)
+    {
+        if (entry.fence && entry.fence->GetCompletedValue() >= entry.value)
+            entry.fence->Release();
+        else if (entry.fence)
+            ++leaked;
+        entry = State::QueueFence {};
+    }
+    s.lastSubmitMs = 0;
     s.device.Reset();
     s.allocated = 0;
     s.recorded = 0;
     s.phase.store(Phase::Idle, std::memory_order_release);
+    return leaked;
 }
 
 void transition(ID3D12GraphicsCommandList* command, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
@@ -176,8 +211,8 @@ bool FgOutputDumpWanted() noexcept
     return phase == Phase::Observing || phase == Phase::Armed;
 }
 
-void RecordFgOutputDump(ID3D12GraphicsCommandList* command, NVSDK_NGX_Parameter* parameters,
-                        const FgDumpPhase& phase, FgDumpLog log) noexcept
+void RecordFgOutputDump(ID3D12GraphicsCommandList* command, NVSDK_NGX_Parameter* parameters, const FgDumpPhase& phase,
+                        FgDumpLog log) noexcept
 {
     if (!command || !parameters || !FgOutputDumpWanted())
         return;
@@ -292,7 +327,7 @@ void NoteFgOutputDumpSubmit(ID3D12CommandQueue* queue, unsigned count, ID3D12Com
     Lines lines;
     {
         std::lock_guard lock(s.mutex);
-        if (!active(s.phase.load(std::memory_order_acquire)) || !s.fence)
+        if (!active(s.phase.load(std::memory_order_acquire)))
             return;
         bool carried = false;
         for (unsigned i = 0; i < s.recorded && !carried; ++i)
@@ -305,35 +340,62 @@ void NoteFgOutputDumpSubmit(ID3D12CommandQueue* queue, unsigned count, ID3D12Com
         }
         if (!carried)
             return;
-        HRESULT signaled = E_FAIL;
+        unsigned index = kFgDumpQueues;
+        for (unsigned i = 0; i < kFgDumpQueues && index == kFgDumpQueues; ++i)
+            if (s.queues[i].queue == queue)
+                index = i;
+        for (unsigned i = 0; i < kFgDumpQueues && index == kFgDumpQueues; ++i)
+            if (s.queues[i].queue == nullptr && s.queues[i].fence != nullptr)
+            {
+                s.queues[i].queue = queue;
+                index = i;
+            }
+        if (index == kFgDumpQueues)
         {
-            InternalD3D12Scope ownSignal;
-            signaled = queue->Signal(s.fence, s.fenceValue + 1);
-        }
-        if (FAILED(signaled))
-        {
-            lines.add("GLASS_FGDUMP signal_failed serial=%u hr=0x%08lx\n", s.serial, static_cast<unsigned long>(signaled));
+            // The slots stay Recorded; the incomplete abort ends the batch and
+            // keeps their readbacks, since this queue still executes the copy.
+            if (!s.queueLimitLogged)
+            {
+                s.queueLimitLogged = true;
+                lines.add("GLASS_FGDUMP signal_skipped reason=queue_limit serial=%u queue=%p\n", s.serial,
+                          static_cast<void*>(queue));
+            }
+            s.lastSubmitMs = GetTickCount64();
         }
         else
         {
-            ++s.fenceValue;
-            unsigned covered = 0;
-            for (unsigned i = 0; i < s.recorded; ++i)
+            auto& entry = s.queues[index];
+            HRESULT signaled = E_FAIL;
             {
-                auto& slot = s.slots[i];
-                if (slot.state != SlotState::Recorded)
-                    continue;
-                for (unsigned j = 0; j < count; ++j)
-                    if (lists[j] == slot.command)
-                    {
-                        slot.state = SlotState::Signaled;
-                        slot.fenceValue = s.fenceValue;
-                        ++covered;
-                        break;
-                    }
+                InternalD3D12Scope ownSignal;
+                signaled = queue->Signal(entry.fence, entry.value + 1);
             }
-            lines.add("GLASS_FGDUMP submitted serial=%u slots=%u value=%llu queue=%p\n", s.serial, covered,
-                      static_cast<unsigned long long>(s.fenceValue), static_cast<void*>(queue));
+            s.lastSubmitMs = GetTickCount64();
+            if (FAILED(signaled))
+                lines.add("GLASS_FGDUMP signal_failed serial=%u hr=0x%08lx\n", s.serial,
+                          static_cast<unsigned long>(signaled));
+            else
+            {
+                ++entry.value;
+                unsigned covered = 0;
+                for (unsigned i = 0; i < s.recorded; ++i)
+                {
+                    auto& slot = s.slots[i];
+                    if (slot.state != SlotState::Recorded)
+                        continue;
+                    for (unsigned j = 0; j < count; ++j)
+                        if (lists[j] == slot.command)
+                        {
+                            slot.state = SlotState::Signaled;
+                            slot.fenceValue = entry.value;
+                            slot.queue = index;
+                            ++covered;
+                            break;
+                        }
+                }
+                lines.add("GLASS_FGDUMP submitted serial=%u slots=%u queue_slot=%u value=%llu queue=%p\n", s.serial,
+                          covered, index, static_cast<unsigned long long>(entry.value), static_cast<void*>(queue));
+            }
         }
     }
     lines.flush(log);
@@ -434,10 +496,13 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
                 D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
                 UINT64 bytes = 0;
                 device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
-                ID3D12Fence* fence = nullptr;
+                ID3D12Fence* fences[kFgDumpQueues] {};
                 ID3D12Resource* created[kFgDumpMax] {};
-                unsigned count = 0;
-                if (bytes != 0 && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+                unsigned count = 0, fenceCount = 0;
+                while (bytes != 0 && fenceCount < kFgDumpQueues &&
+                       SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fences[fenceCount]))))
+                    ++fenceCount;
+                if (fenceCount == kFgDumpQueues)
                 {
                     D3D12_HEAP_PROPERTIES properties {};
                     properties.Type = D3D12_HEAP_TYPE_READBACK;
@@ -462,8 +527,8 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
                     // was recorded against these, so they go straight back.
                     for (unsigned i = 0; i < count; ++i)
                         created[i]->Release();
-                    if (fence)
-                        fence->Release();
+                    for (unsigned i = 0; i < fenceCount; ++i)
+                        fences[i]->Release();
                     if (s.phase.load(std::memory_order_acquire) == Phase::Allocating)
                     {
                         s.device.Reset();
@@ -476,8 +541,9 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
                 {
                     for (unsigned i = 0; i < count; ++i)
                         s.slots[i] = Slot { created[i] };
-                    s.fence = fence;
-                    s.fenceValue = 0;
+                    for (unsigned i = 0; i < kFgDumpQueues; ++i)
+                        s.queues[i] = State::QueueFence { nullptr, fences[i], 0 };
+                    s.lastSubmitMs = 0;
                     s.footprint = footprint;
                     s.allocated = count;
                     s.recorded = 0;
@@ -509,39 +575,53 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
         }
         else if (phase == Phase::Draining)
         {
-            const auto completed = s.fence ? s.fence->GetCompletedValue() : 0;
-            if (completed == UINT64_MAX)
+            bool removed = false;
+            for (const auto& entry : s.queues)
+                removed |= entry.fence != nullptr && entry.fence->GetCompletedValue() == UINT64_MAX;
+            if (removed)
             {
                 // Device removed: no copy can still run, and none can be read.
+                const auto serial = s.serial;
                 releaseLocked(s);
-                lines.add("GLASS_FGDUMP aborted reason=device_removed serial=%u\n", s.serial);
+                lines.add("GLASS_FGDUMP aborted reason=device_removed serial=%u\n", serial);
             }
             else
             {
-                unsigned waiting = 0, unsubmitted = 0;
+                unsigned incomplete = 0, unsubmitted = 0;
                 for (unsigned i = 0; i < s.recorded; ++i)
                 {
                     const auto& slot = s.slots[i];
                     if (slot.state == SlotState::Recorded)
                         ++unsubmitted;
-                    else if (slot.state == SlotState::Signaled && completed < slot.fenceValue)
-                        ++waiting;
+                    else if (slot.state == SlotState::Signaled && !slotComplete(s, slot))
+                        ++incomplete;
                 }
-                if (waiting != 0 || unsubmitted != 0)
+                const auto reference = (std::max)(s.lastSubmitMs, s.sinceMs);
+                const bool abandon = (incomplete != 0 || unsubmitted != 0) && now - reference > kIncompleteMs;
+                if ((incomplete != 0 || unsubmitted != 0) && !abandon)
                 {
                     // The readbacks stay allocated while any recorded copy can
                     // still execute; the stall is reported once.
                     if (now - s.sinceMs > kDeadlineMs && !s.stallLogged)
                     {
                         s.stallLogged = true;
-                        lines.add("GLASS_FGDUMP waiting serial=%u unsubmitted=%u incomplete=%u completed=%llu "
-                                  "need=%llu\n",
-                                  s.serial, unsubmitted, waiting, static_cast<unsigned long long>(completed),
-                                  static_cast<unsigned long long>(s.fenceValue));
+                        lines.add("GLASS_FGDUMP waiting serial=%u unsubmitted=%u incomplete=%u\n", s.serial,
+                                  unsubmitted, incomplete);
+                        for (unsigned i = 0; i < kFgDumpQueues; ++i)
+                            if (s.queues[i].queue)
+                                lines.add("GLASS_FGDUMP waiting_queue slot=%u queue=%p completed=%llu need=%llu\n", i,
+                                          static_cast<void*>(s.queues[i].queue),
+                                          static_cast<unsigned long long>(s.queues[i].fence->GetCompletedValue()),
+                                          static_cast<unsigned long long>(s.queues[i].value));
                     }
                 }
                 else
                 {
+                    // Completion is decided once, here, so the files and the
+                    // manifest describe the same set of slots.
+                    bool complete[kFgDumpMax] {};
+                    for (unsigned i = 0; i < s.recorded; ++i)
+                        complete[i] = slotComplete(s, s.slots[i]);
                     s.phase.store(Phase::Writing, std::memory_order_release);
                     lock.unlock();
                     // Writing: no other thread touches the batch until Idle.
@@ -568,8 +648,10 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
                                           std::to_wstring(slot.phase.index) + L"-c" +
                                           std::to_wstring(slot.phase.count) + L"-f" +
                                           std::to_wstring(slot.phase.frame) + L".ppm";
-                        const char* status = "dropped";
-                        if (slot.state == SlotState::Signaled)
+                        const char* status = slot.state == SlotState::Dropped    ? "dropped"
+                                             : slot.state == SlotState::Recorded ? "unsubmitted"
+                                                                                 : "incomplete";
+                        if (complete[i])
                         {
                             void* data = nullptr;
                             status = "map_failed";
@@ -577,8 +659,8 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
                             {
                                 const bool okay = WriteColorPpm(
                                     (folder / name).c_str(), static_cast<const std::byte*>(data) + s.footprint.Offset,
-                                    description.Format, static_cast<unsigned>(description.Width),
-                                    description.Height, s.footprint.Footprint.RowPitch);
+                                    description.Format, static_cast<unsigned>(description.Width), description.Height,
+                                    s.footprint.Footprint.RowPitch);
                                 D3D12_RANGE none { 0, 0 };
                                 slot.readback->Unmap(0, &none);
                                 status = okay ? "written" : "write_failed";
@@ -588,21 +670,29 @@ void ServiceFgOutputDump(FgDumpLog log) noexcept
                         if (manifest)
                             std::fprintf(manifest,
                                          "seq=%u index=%u count=%u frame=%llu frame_source=%s applied=%u format=%u "
-                                         "extent=%llux%u resource=%p key=%s status=%s file=%ls\n",
+                                         "extent=%llux%u resource=%p key=%s queue_slot=%u status=%s file=%ls\n",
                                          i, slot.phase.index, slot.phase.count,
                                          static_cast<unsigned long long>(slot.phase.frame),
                                          slot.phase.packedFrame ? "packed" : "host", slot.phase.applied ? 1u : 0u,
                                          static_cast<unsigned>(description.Format),
                                          static_cast<unsigned long long>(description.Width), description.Height,
-                                         static_cast<void*>(slot.resource), slot.key ? slot.key : "-", status,
-                                         name.c_str());
+                                         static_cast<void*>(slot.resource), slot.key ? slot.key : "-", slot.queue,
+                                         status, name.c_str());
                     }
                     if (manifest)
                         std::fclose(manifest);
-                    lines.add("FGDUMP written serial=%u count=%u recorded=%u requested=%u path=%ls\n", s.serial,
-                              written, s.recorded, s.requested, manifestPath.c_str());
+                    const auto batch = s.serial;
+                    const auto recorded = s.recorded, requested = s.requested;
                     lock.lock();
-                    releaseLocked(s);
+                    const auto leaked = releaseLocked(s);
+                    if (abandon)
+                        lines.add("GLASS_FGDUMP aborted reason=incomplete slots=%u serial=%u unsubmitted=%u written=%u "
+                                  "recorded=%u leaked=%u path=%ls\n",
+                                  incomplete + unsubmitted, batch, unsubmitted, written, recorded, leaked,
+                                  manifestPath.c_str());
+                    else
+                        lines.add("FGDUMP written serial=%u count=%u recorded=%u requested=%u path=%ls\n", batch,
+                                  written, recorded, requested, manifestPath.c_str());
                 }
             }
         }
