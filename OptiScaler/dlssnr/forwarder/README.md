@@ -8,6 +8,12 @@ anything whose path does not contain `nvngx.dll` -- the driver core being `_nvng
 This library exists to be named correctly. It does nothing else: it forwards create, evaluate and
 release, so the calls into the snippet originate from a module the snippet accepts.
 
+Evaluate has two exports. `dlssnr_call_evaluate_v2` takes the depth and motion-vector subrects
+separately, each with its own size and origin. `dlssnr_call_evaluate` is the original call with one
+guide extent at the origin; it is a thin wrapper over v2, kept so an OptiScaler build from before v2
+-- and the native Vulkan pass, through `dlssnr_vk_evaluate` -- still runs against this DLL.
+`dlssnr_call_error` returns the model's last error text on the calling thread.
+
 The prebuilt DLL is committed because it is 12 KB, changes almost never, and has to be in the package
 for a drop-in build to work at all. To rebuild it:
 

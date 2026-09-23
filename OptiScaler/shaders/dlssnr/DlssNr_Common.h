@@ -96,6 +96,17 @@ struct DlssNrFrameInfo
     // available and is what gets used.
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
+
+    // How much of the colour texture holds the picture, for the pass that runs before the upscaler.
+    //
+    // The same corner-of-a-larger-texture layout as above, on the colour side: DLSS reads Color as an
+    // origin-zero rectangle of the render size, and the allocation around it can be larger -- up to the
+    // largest size a dynamic resolution title will ever render. The pass then works on that rectangle
+    // alone, at its own size, and only the rectangle reaches the output.
+    //
+    // Zero means the whole texture, which is what every other caller wants.
+    unsigned int ActiveWidth = 0;
+    unsigned int ActiveHeight = 0;
 };
 
 struct alignas(256) DlssNrConstants

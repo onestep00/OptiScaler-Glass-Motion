@@ -353,6 +353,9 @@ class Config
     // colour buffer, which is also rendered samples rather than the upscaler's reconstruction.
     //
     // Experimental: colour at this point is jittered per frame and the model takes no jitter offset.
+    //
+    // One setting under two ini names: [DlssNr] PreUpscale, and RunBeforeSR, which is what wilsjo2's
+    // builds read and write. Either one set to true switches it on; SaveIni writes both with one value.
     CustomOptional<bool> DlssNrPreUpscale { false };
 
     // Split the upscaler in two and put the model between the halves.

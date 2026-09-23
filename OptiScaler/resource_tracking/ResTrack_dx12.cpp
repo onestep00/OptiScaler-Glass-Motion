@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <dlssnr/DlssNr.h>
 
 #include "ResTrack_dx12.h"
 
@@ -111,6 +112,23 @@ static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
 static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 static PFN_Close o_Close = nullptr;
+
+// DLSS-NR's GPU timer only. A list reset before it was submitted discards whatever the timer recorded
+// on it, so the timer is told and the sample it was holding is freed rather than waited on forever.
+using PFN_NrReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*,
+                                                ID3D12PipelineState*);
+static PFN_NrReset o_NrReset = nullptr;
+
+static HRESULT STDMETHODCALLTYPE hkNrReset(ID3D12GraphicsCommandList* This, ID3D12CommandAllocator* pAllocator,
+                                           ID3D12PipelineState* pInitialState)
+{
+    const auto result = o_NrReset(This, pAllocator, pInitialState);
+
+    if (SUCCEEDED(result) && !State::Instance().isShuttingDown)
+        DlssNr::CommandListReset(This);
+
+    return result;
+}
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
 static PFN_Release o_Release = nullptr;
@@ -697,6 +715,9 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
         {
             o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
 
+            if (!State::Instance().isShuttingDown)
+                DlssNr::CommandListsSubmitted(This, NumCommandLists, ppCommandLists);
+
             for (size_t i = 0; i < found.size(); i++)
             {
                 fg->SetCommandQueue(found[i], This);
@@ -709,6 +730,11 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
     LOG_TRACK("Done NumCommandLists: {}", NumCommandLists);
 
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+
+    // After the real submit, never before: the NR timer signals its own fence on this queue, and that
+    // signal must follow the work it measures.
+    if (!State::Instance().isShuttingDown)
+        DlssNr::CommandListsSubmitted(This, NumCommandLists, ppCommandLists);
 }
 
 #pragma region Heap hooks
@@ -1915,6 +1941,70 @@ void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
     }
 }
 
+// The two hooks DLSS-NR's GPU timer reads: the queue's submits, which HookToQueue also provides for
+// frame generation, and command-list resets. Called on every pass; once both are in it only checks.
+void ResTrack_Dx12::HookNrQueue(ID3D12Device* device)
+{
+    static std::mutex hookMutex;
+    std::lock_guard<std::mutex> lock(hookMutex);
+
+    // A detour that would not attach once will not on the next pass either, and every attempt builds a
+    // queue or a command list to find the vtable. So a failure is final for the session, and the timer
+    // simply never reports.
+    static bool failed = false;
+
+    if (failed || (o_ExecuteCommandLists != nullptr && o_NrReset != nullptr))
+        return;
+
+    HookToQueue(device);
+
+    if (o_ExecuteCommandLists == nullptr)
+    {
+        failed = true;
+        LOG_ERROR("DLSS-NR timing: could not hook ExecuteCommandLists, so the GPU cost is not measured");
+        return;
+    }
+
+    if (o_NrReset != nullptr)
+        return;
+
+    // The vtable is the runtime's, shared by every graphics command list, so one throwaway list is
+    // enough to find it.
+    ID3D12CommandAllocator* allocator = nullptr;
+
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
+        return;
+
+    ID3D12GraphicsCommandList* commandList = nullptr;
+
+    if (SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+                                            IID_PPV_ARGS(&commandList))))
+    {
+        ID3D12GraphicsCommandList* realCommandList = nullptr;
+        if (!CheckForRealObject(__FUNCTION__, commandList, (IUnknown**) &realCommandList))
+            realCommandList = commandList;
+
+        // ID3D12GraphicsCommandList::Reset.
+        o_NrReset = (PFN_NrReset) (*(PVOID**) realCommandList)[10];
+
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+        DetourAttach(&(PVOID&) o_NrReset, hkNrReset);
+
+        if (const auto detourResult = DetourTransactionCommit(); detourResult != NO_ERROR)
+        {
+            LOG_ERROR("DLSS-NR timing: could not hook CommandList Reset: {:X}", detourResult);
+            o_NrReset = nullptr;
+            failed = true;
+        }
+
+        commandList->Close();
+        commandList->Release();
+    }
+
+    allocator->Release();
+}
+
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 {
     if (o_CreateDescriptorHeap != nullptr || State::Instance().activeFgInput == FGInput::NvngxFG)
@@ -2052,6 +2142,9 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_Dispatch != nullptr)
         DetourDetach(&(PVOID&) o_Dispatch, hkDispatch);
 
+    if (o_NrReset != nullptr)
+        DetourDetach(&(PVOID&) o_NrReset, hkNrReset);
+
     if (o_Close != nullptr)
         DetourDetach(&(PVOID&) o_Close, hkClose);
 
@@ -2089,6 +2182,7 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
         o_Dispatch = nullptr;
         o_Close = nullptr;
         o_ExecuteBundle = nullptr;
+        o_NrReset = nullptr;
 
         // Resource
         o_Release = nullptr;
@@ -2158,6 +2252,9 @@ void ResTrack_Dx12::ReleaseHooks()
     if (o_Close != nullptr)
         DetourDetach(&(PVOID&) o_Close, hkClose);
 
+    if (o_NrReset != nullptr)
+        DetourDetach(&(PVOID&) o_NrReset, hkNrReset);
+
     if (o_ExecuteBundle != nullptr)
         DetourDetach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
 
@@ -2175,6 +2272,7 @@ void ResTrack_Dx12::ReleaseHooks()
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
         o_Close = nullptr;
+        o_NrReset = nullptr;
         o_ExecuteBundle = nullptr;
     }
 }

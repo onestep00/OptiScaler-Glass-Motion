@@ -71,7 +71,15 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 //
 // The edit lands on a surface of ours. The caller substitutes it for the upscale and puts the game's
 // own buffer back afterwards.
-void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+//
+// A game may render into the top-left corner of a larger colour texture. The pass then runs on that
+// rectangle alone, at its own size; the surface gets the edited rectangle and the game's own margin.
+//
+// Answers whether the pass belongs before the upscaler on this evaluate, and the caller runs the pass
+// after the upscaler only when it does not: no colour texture, or a layout this seam cannot take (a
+// colour offset, a size half given or larger than the texture, an array, MSAA). The answer is true on
+// a frame the pass skips as well -- the one its model is built on, for one -- so nothing runs twice.
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                            ID3D12CommandQueue* timingQueue = nullptr);
 
 // The surface EvaluateBeforeUpscale wrote, or null when this frame's pass did not run.
@@ -169,6 +177,13 @@ ExposureStatus GameExposureStatus();
 
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();
+
+// What the GPU timer behind LastGpuTime learns from the game's queue. A sample is read only after the
+// list it was recorded on has been submitted, and dropped if that list is reset without being
+// submitted. Called from the queue and command-list hooks (ResTrack_Dx12::HookNrQueue), on whichever
+// thread submits or resets, for every list in the game.
+void CommandListsSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
+void CommandListReset(ID3D12CommandList* cmd);
 
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
