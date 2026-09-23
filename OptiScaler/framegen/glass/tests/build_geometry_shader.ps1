@@ -46,7 +46,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Packed object composition (feed) GPU test fail
 if ($LASTEXITCODE -ne 0) { throw 'Packed object composition (row-limited) GPU test failed' }
 & cl.exe @common "/I$PSScriptRoot" "/I$include" (Join-Path $PSScriptRoot 'GeometryTargetViews.cpp') `
     "$build/GeometryViews.obj" "$build/GeometryCommands.obj" "$build/GeometryCommandFixture.obj" `
-    "$build/GeometryPipelineCache.obj" "$build/GeometryCreation.obj" "$build/GeometryPipeline.obj" "$build/DxilVertexHistory.obj" `
+    "$build/GeometryPipelineCache.obj" "$build/NativeGraftCatalog.obj" "$build/GeometryCreation.obj" "$build/GeometryPipeline.obj" "$build/DxilVertexHistory.obj" `
     "/Fe$build/GeometryTargetViews.exe" /link d3d12.lib dxgi.lib (Join-Path $repository 'OptiScaler/library/detours/detours.lib')
 if ($LASTEXITCODE -ne 0) { throw 'Target view observer test build failed' }
 & "$build/GeometryTargetViews.exe"

@@ -122,10 +122,12 @@ class PackedMotionPass
             // These evaluations read the table under the provider's own names
             // (the parameter trace records MotionVectors/Depth there), so the
             // swap has to replace those keys, not the DLSSG.* aliases.
-            return PreparedInputs::make(inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput(),
-                                        "MotionVectors", "Depth",
-                                        controls.packedLayer ? gpu.motionOutput() : nullptr,
-                                        controls.packedLayer ? gpu.selectionOutput() : nullptr);
+            auto prepared = PreparedInputs::make(inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput(),
+                                                 "MotionVectors", "Depth",
+                                                 controls.packedLayer ? gpu.motionOutput() : nullptr,
+                                                 controls.packedLayer ? gpu.selectionOutput() : nullptr);
+            prepared.graftDraws = packed.graftDraws;
+            return prepared;
         }
         if (inputs.index == 1)
         {
@@ -251,9 +253,13 @@ class PackedMotionPass
             invalidateHistory();
             return {};
         }
-        return PreparedInputs::make(inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput(), inputs.motionKey,
-                                    inputs.depthKey, controls.packedLayer ? gpu.motionOutput() : nullptr,
-                                    controls.packedLayer ? gpu.selectionOutput() : nullptr);
+        auto prepared = PreparedInputs::make(inputs.motion, inputs.depth, gpu.motionOutput(), gpu.depthOutput(),
+                                             inputs.motionKey, inputs.depthKey,
+                                             controls.packedLayer ? gpu.motionOutput() : nullptr,
+                                             controls.packedLayer ? gpu.selectionOutput() : nullptr);
+        // Every admitted evaluation substitutes the batch frame (packed).
+        prepared.graftDraws = packed.graftDraws;
+        return prepared;
     }
     std::uint64_t renderedDispatches() const { return dispatches; }
     // Second consumer entry: compose the frame on the caller's command list.

@@ -115,6 +115,8 @@ class Capture final : public GeometryDrawCaptureOwner
         // the same batch keep the same value, so a frame recorded on the same
         // command list as the FG call is still admitted.
         std::uint64_t submitBatch = 0;
+        // Draws recorded into this frame that used a native graft variant.
+        std::uint64_t graftDraws = 0;
         bool clearSubmitted = false, syncPending = false;
     };
     struct FgCommand
@@ -360,7 +362,7 @@ class Capture final : public GeometryDrawCaptureOwner
                 value.consumerCommand = nullptr;
                 value.producerQueue.Reset(); value.consumerQueue.Reset(); value.orderedQueue.Reset();
                 value.syncFence.Reset();
-                value.producerValue = value.consumerValue = value.syncValue = 0;
+                value.producerValue = value.consumerValue = value.syncValue = value.graftDraws = 0;
                 value.clearSubmitted = value.syncPending = false;
                 return &value;
             }
@@ -383,7 +385,7 @@ class Capture final : public GeometryDrawCaptureOwner
             value.consumerCommand = nullptr;
             value.producerQueue.Reset(); value.consumerQueue.Reset(); value.orderedQueue.Reset();
             value.syncFence.Reset();
-            value.producerValue = value.consumerValue = value.syncValue = 0;
+            value.producerValue = value.consumerValue = value.syncValue = value.graftDraws = 0;
             value.clearSubmitted = value.syncPending = false;
             return &value;
         }
@@ -805,7 +807,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::fflush(log);
         }
         if (graftDraw)
+        {
             NoteGeometryGraft(GraftDraws);
+            ++frameSlot->graftDraws;
+        }
         return true;
     }
 
@@ -1041,7 +1046,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                  fgFrame,
                  producerFence.Get(),
                  selected->producerValue,
-                 static_cast<void*>(selected->producerQueue.Get()) };
+                 static_cast<void*>(selected->producerQueue.Get()),
+                 selected->graftDraws };
     }
 
     PackedMotionCaptureStatus status()
@@ -1126,7 +1132,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                  selected->number,
                  producerFence.Get(),
                  selected->producerValue,
-                 static_cast<void*>(selected->producerQueue.Get()) };
+                 static_cast<void*>(selected->producerQueue.Get()),
+                 selected->graftDraws };
     }
 
     void resetCounters()

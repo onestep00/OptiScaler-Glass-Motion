@@ -34,6 +34,10 @@ struct PackedMotionFrame
     // frame generation queue for a value that the same queue will signal later
     // is a self wait, so the host has to be able to compare the two.
     void* producerQueue = nullptr;
+    // Draws of this frame that used a native graft variant (engine
+    // MotionMatrix previous clip). Counted by prepare for the frame it
+    // records into, so it describes exactly this capture.
+    std::uint64_t graftDraws = 0;
     explicit operator bool() const { return resource && width && height && frame; }
 };
 

@@ -71,16 +71,33 @@ struct Dxc
         require(SUCCEEDED(status), errors("validation"));
     }
 };
-// Row of the one signature element with this semantic (index 0), or -1.
-int semanticRow(const std::string& assembly, const std::string& semantic)
+// Row and first semantic index of the one signature element with this
+// semantic, or {-1, -1}.
+struct SignatureElement
+{
+    int row = -1, index = -1;
+};
+SignatureElement signatureElement(const std::string& assembly, const std::string& semantic)
 {
     const std::regex element("= !\\{i32 \\d+, !\"" + semantic +
-                             "\", i8 \\d+, i8 \\d+, ![0-9]+, i8 \\d+, i32 1, i8 \\d, i32 (\\d+), i8 0,");
-    int row = -1, matches = 0;
+                             "\", i8 \\d+, i8 \\d+, (![0-9]+), i8 \\d+, i32 1, i8 \\d, i32 (\\d+), i8 0,");
+    SignatureElement value;
+    std::string indexNode;
+    int matches = 0;
     for (std::sregex_iterator it(assembly.begin(), assembly.end(), element), end; it != end; ++it, ++matches)
-        row = std::stoi((*it)[1].str());
+    {
+        indexNode = (*it)[1].str();
+        value.row = std::stoi((*it)[2].str());
+    }
     require(matches <= 1, "Ambiguous signature element " + semantic);
-    return row;
+    if (matches == 0)
+        return value;
+    // The element references its semantic index list, e.g. !17 = !{i32 7}.
+    std::smatch list;
+    require(std::regex_search(assembly, list, std::regex("\n" + indexNode + " = !\\{i32 (\\d+)[,}]")),
+            "No semantic index list " + indexNode + " for " + semantic);
+    value.index = std::stoi(list[1].str());
+    return value;
 }
 } // namespace
 
@@ -170,13 +187,20 @@ int wmain(int argc, wchar_t** argv)
         for (const auto& semantic : { name(vertex.nativeVaryings[0].semantic), name(vertex.nativeVaryings[1].semantic),
                                       std::string("GLASS_HISTORY_MISSING"), std::string("GLASS_OBJECT_INDEX") })
         {
-            const int vsRow = semanticRow(vs, semantic), psRow = semanticRow(ps, semantic);
-            std::printf("link %s vs_row=%d ps_row=%d\n", semantic.c_str(), vsRow, psRow);
-            require(vsRow >= 0 && vsRow == psRow, "Varying " + semantic + " does not link");
+            const auto vsElement = signatureElement(vs, semantic), psElement = signatureElement(ps, semantic);
+            std::printf("link %s vs_row=%d ps_row=%d vs_index=%d ps_index=%d\n", semantic.c_str(), vsElement.row,
+                        psElement.row, vsElement.index, psElement.index);
+            require(vsElement.row >= 0 && vsElement.row == psElement.row, "Varying " + semantic + " does not link");
+            require(vsElement.index == psElement.index, "Varying " + semantic + " semantic index differs");
         }
-        require(semanticRow(ps, name(vertex.nativeVaryings[0].semantic)) == int(vertex.nativeVaryings[0].row) &&
-                    semanticRow(ps, name(vertex.nativeVaryings[1].semantic)) == int(vertex.nativeVaryings[1].row),
-                "Clip varying rows differ from the graft output rows");
+        for (const auto& varying : vertex.nativeVaryings)
+        {
+            const auto vsElement = signatureElement(vs, name(varying.semantic));
+            const auto psElement = signatureElement(ps, name(varying.semantic));
+            require(psElement.row == int(varying.row), "Clip varying row differs from the graft output row");
+            require(vsElement.index == int(varying.semanticIndex) && psElement.index == int(varying.semanticIndex),
+                    "Clip varying semantic index differs from the graft output");
+        }
         dxc.assembleAndValidate(ps, "pixel");
         std::printf("native graft packed rewrite passed (%s variant, missing_row=%u)\n", variant,
                     vertex.missingRegister);

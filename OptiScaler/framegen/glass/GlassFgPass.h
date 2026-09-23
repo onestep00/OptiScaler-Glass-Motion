@@ -188,6 +188,9 @@ struct PreparedInputs
     ID3D12Resource* layerOpacity = nullptr;
     const char* layerMvecsKey = "DLSS.TransparencyLayerMvecs";
     const char* layerOpacityKey = "DLSS.TransparencyLayerOpacity";
+    // Graft-variant draws of the packed capture frame these inputs substitute
+    // (PackedMotionFrame::graftDraws). Zero for every other producer.
+    std::uint64_t graftDraws = 0;
 
     // Positional aggregate initialization broke twice already (a new field in
     // the middle silently re-bound the resource pointers to the key strings).

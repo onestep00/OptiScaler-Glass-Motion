@@ -109,11 +109,6 @@ struct Runtime
     ID3D12Resource* correctedMotion[4] {};
     unsigned correctedMotionNext = 0;
     uint64_t unsubstitutedReusedMotion = 0, unsubstitutedFreshMotion = 0;
-    // NativePreviousEvaluations bookkeeping: GraftDraws observed at the first
-    // evaluation of each engine frame, and whether that frame drew any graft
-    // variant since the previous frame.
-    uint64_t graftFrame = 0, graftDrawsSeen = 0;
-    bool graftFrameDrew = false;
     // Evaluations that are provably not the frame generator: the upscaler and
     // Ray Reconstruction read the same MotionVectors/Depth names. They are
     // counted and passed through untouched, so "the correction never touched
@@ -1988,17 +1983,10 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             GeometryTelemetry::counts[GeometryFgReplacements].fetch_add(1, std::memory_order_relaxed);
             GeometryTelemetry::changedMs[GeometryFgReplacements].store(now, std::memory_order_relaxed);
             GeometryTelemetry::fgMs.store(now, std::memory_order_relaxed);
-            // Substituted evaluation of a frame whose packed capture drew at
-            // least one graft variant (engine MotionMatrix previous clip) with
-            // the vertex-history fallback off.
-            if (inputs.frame != r.graftFrame)
-            {
-                const auto graftDraws = ReadGeometryGraft(GraftDraws);
-                r.graftFrameDrew = graftDraws != r.graftDrawsSeen;
-                r.graftDrawsSeen = graftDraws;
-                r.graftFrame = inputs.frame;
-            }
-            if (r.graftFrameDrew && !VertexHistoryFallbackEnabled())
+            // Substituted evaluation whose packed capture frame drew at least
+            // one graft variant (engine MotionMatrix previous clip) with the
+            // vertex-history fallback off.
+            if (prepared.graftDraws > 0 && !VertexHistoryFallbackEnabled())
                 NoteGeometryGraft(NativePreviousEvaluations);
         }
         PublishRuntimeStatus(applied && result == NVSDK_NGX_Result_Success ? RuntimeStatus::Correcting
