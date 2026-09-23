@@ -1,6 +1,7 @@
 #pragma once
 
-// Every call, submission/reset notifications included, is serialized by the owner's g_nrTimeMutex.
+// Every call, submission/reset notifications included, is serialized by the owner's g_nrTimeMutex. The
+// fence signals a submission owes are the one thing issued outside it (see Signals).
 // Associate every query pair with its actual submitting queue and GPU completion.
 class DlssNrGpuTime
 {
@@ -103,8 +104,27 @@ class DlssNrGpuTime
         recording = -1;
     }
 
-    void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+    // The fence signals a submission owes its samples. Submitted marks the samples under the owner's
+    // lock; the owner issues these only once it has released that lock, because Signal is a queue call
+    // other code hooks and takes locks of its own in (see g_nrTimeMutex).
+    struct Signals
     {
+        std::array<std::pair<Microsoft::WRL::ComPtr<ID3D12Fence>, UINT64>, Count> owed;
+        unsigned size = 0;
+
+        // Executed after the real ExecuteCommandLists: protects query readback AND reuse. A failed
+        // signal leaves its slot waiting for a value its fence never reaches, which quarantines an
+        // executed slot rather than making it look discarded.
+        void Issue(ID3D12CommandQueue* queue) const
+        {
+            for (unsigned i = 0; i < size; ++i)
+                queue->Signal(owed[i].first.Get(), owed[i].second);
+        }
+    };
+
+    Signals Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+    {
+        Signals signals;
         for (auto& s : samples)
         {
             if (!s.occupied || !s.ended || s.submitted)
@@ -114,14 +134,12 @@ class DlssNrGpuTime
                 {
                     if (FAILED(queue->GetTimestampFrequency(&s.frequency)))
                         s.frequency = 0;
-                    // Executed after the real ExecuteCommandLists: protects query readback AND reuse.
-                    // A failed signal must quarantine an executed slot, not make it look discarded.
                     s.submitted = true;
-                    if (FAILED(queue->Signal(s.fence.Get(), s.value)))
-                        s.frequency = 0;
+                    signals.owed[signals.size++] = { s.fence, s.value };
                     break;
                 }
         }
+        return signals;
     }
 
     void ResetRecording(ID3D12CommandList* cmd)

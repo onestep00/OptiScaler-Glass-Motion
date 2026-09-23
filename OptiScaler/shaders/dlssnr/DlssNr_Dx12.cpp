@@ -411,10 +411,17 @@ std::optional<double> g_lastGpuTime;
 
 // Guards the two timers. Not g_nrMutex: the hooks report every submit and every command-list reset in
 // the game, on whichever thread makes it, and must neither wait out a whole pass nor re-enter that
-// lock when NGX submits or resets a list of its own inside one. Recursive because a submission is
-// answered with a Signal on the game's queue, and anything else hooked on that queue may submit again
-// from inside it, on this thread.
-std::recursive_mutex g_nrTimeMutex;
+// lock when NGX submits or resets a list of its own inside one.
+//
+// For the same reason it is a leaf: the hooks take it inside whatever locks their callers already hold,
+// so it covers only the timers' own bookkeeping, the queries they record into the pass's list, and
+// reads of their own fences, their readback and the queue's timestamp frequency -- never a call
+// someone else hooks. Glass's D3D12 observer holds its runtime lock across every submission it sees,
+// resets its compose list inside it (reaching CommandListReset) and takes that lock again in its Signal
+// hook. The timer's fence signal, once sent under this lock, closed that cycle and froze the game
+// (hang-20260924). The signals now go out after it is released, the timers are built and released
+// outside it, and nothing under it re-enters a hook, so it is not recursive either.
+std::mutex g_nrTimeMutex;
 
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
@@ -2601,14 +2608,25 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // and resets go in before the first one is recorded. Nothing happens here once they are in.
     ResTrack_Dx12::HookNrQueue(device);
 
+    // Built before g_nrTimeMutex is taken: creation reaches the device's hooks, which nothing under that
+    // lock may (see there). Only this function and Shutdown set the two, both under g_nrMutex, so the
+    // unlocked reads are safe.
+    std::unique_ptr<DlssNrGpuTime> totalTimer, modelTimer;
+
+    if (g_gpuTime == nullptr)
+        totalTimer = std::make_unique<DlssNrGpuTime>(device, "total");
+
+    if (g_ngxTime == nullptr)
+        modelTimer = std::make_unique<DlssNrGpuTime>(device, "model");
+
     {
-        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+        std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
 
-        if (g_gpuTime == nullptr)
-            g_gpuTime = std::make_unique<DlssNrGpuTime>(device, "total");
+        if (totalTimer != nullptr)
+            g_gpuTime = std::move(totalTimer);
 
-        if (g_ngxTime == nullptr)
-            g_ngxTime = std::make_unique<DlssNrGpuTime>(device, "model");
+        if (modelTimer != nullptr)
+            g_ngxTime = std::move(modelTimer);
 
         g_gpuTime->Start(cmdList);
     }
@@ -2845,7 +2863,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_ngxTime != nullptr)
     {
-        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+        std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
         g_ngxTime->Start(cmdList);
     }
 
@@ -2900,7 +2918,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_ngxTime != nullptr)
     {
-        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+        std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
         g_ngxTime->End(cmdList);
     }
 
@@ -3090,7 +3108,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_gpuTime != nullptr)
     {
-        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+        std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
         g_gpuTime->End(cmdList);
 
         // This path records into the game's own list, so there is no queue of ours to read from.
@@ -3926,11 +3944,17 @@ void Shutdown()
 
     g_capture.release();
 
+    // Released after g_nrTimeMutex, not under it: releasing reaches the resource hooks (see there).
+    std::unique_ptr<DlssNrGpuTime> totalTimer, modelTimer;
+
     {
-        std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
-        g_gpuTime.reset();
-        g_ngxTime.reset();
+        std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
+        totalTimer = std::move(g_gpuTime);
+        modelTimer = std::move(g_ngxTime);
     }
+
+    totalTimer.reset();
+    modelTimer.reset();
 
     g_lastNgxTime.reset();
     g_lastGpuTime.reset();
@@ -3940,18 +3964,26 @@ void Shutdown()
 
 void CommandListsSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
-    std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+    DlssNrGpuTime::Signals total, model;
 
-    if (g_gpuTime != nullptr)
-        g_gpuTime->Submitted(queue, count, lists);
+    {
+        std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
 
-    if (g_ngxTime != nullptr)
-        g_ngxTime->Submitted(queue, count, lists);
+        if (g_gpuTime != nullptr)
+            total = g_gpuTime->Submitted(queue, count, lists);
+
+        if (g_ngxTime != nullptr)
+            model = g_ngxTime->Submitted(queue, count, lists);
+    }
+
+    // Outside the lock: Signal is hooked by code that takes its own lock there. See g_nrTimeMutex.
+    total.Issue(queue);
+    model.Issue(queue);
 }
 
 void CommandListReset(ID3D12CommandList* cmd)
 {
-    std::lock_guard<std::recursive_mutex> timeLock(g_nrTimeMutex);
+    std::lock_guard<std::mutex> timeLock(g_nrTimeMutex);
 
     if (g_gpuTime != nullptr)
         g_gpuTime->ResetRecording(cmd);
