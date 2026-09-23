@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GeometryCommands.h"
 #include "GeometryCreation.h"
+#include "GeometryPipelineCache.h"
 #include "GeometryDrawCapture.h"
 #include "ExperimentDrawBridge.h"
 #include "ExperimentCensusBridge.h"
@@ -46,6 +47,12 @@ struct Record
     std::atomic<Command*> key = nullptr;
     bool open = false;
     uint64_t epoch = 0;
+    // Last FindGeometryPipeline result for leasePipeline, misses included. Valid
+    // while GeometryPipelineLookupGeneration() equals leaseGeneration (0 = none);
+    // holds the entry the way the cache's own lookup memo does.
+    ID3D12PipelineState* leasePipeline = nullptr;
+    std::uint64_t leaseGeneration = 0;
+    ExperimentPipelineLease lease;
     void reset(ID3D12PipelineState* initial)
     {
         bindings->reset(initial);
@@ -53,6 +60,8 @@ struct Record
         heaps = {};
         heapArguments = {};
         heapCount = 0;
+        leaseGeneration = 0;
+        lease.reset();
         open = true;
     }
 };
@@ -413,13 +422,13 @@ void WINAPI hookExecuteIndirect(Command* command, ID3D12CommandSignature* signat
         Scope scope;                                                                                                   \
         const bool idle = scope.outer && HooksIdle();                                                                  \
         const HookCostScope cost(CommandHookCost(), scope.outer && !idle);                            \
-        const auto skip = HookSkipMode();                                                                              \
         if (idle)                                                                                                      \
         {                                                                                                              \
             cost.Stop();                                                                                               \
             original##Name Arguments;                                                                                  \
             return;                                                                                                    \
         }                                                                                                              \
+        const auto skip = HookSkipMode();                                                                              \
         if (scope.outer)                                                                                               \
             if (auto* r = SkipStateTrackingFor(skip) ? nullptr : find(command); r && !BindingsOnlyFor(skip))            \
             {                                                                                                          \
@@ -484,12 +493,12 @@ void WINAPI heaps(Command* command, UINT count, ID3D12DescriptorHeap* const* val
     Scope scope;
     const bool idle = scope.outer && HooksIdle();
     const HookCostScope cost(CommandHookCost(), scope.outer && !idle);
-    const auto skip = HookSkipMode();
     if (idle)
     {
         originalHeaps(command, count, values);
         return;
     }
+    const auto skip = HookSkipMode();
     if (scope.outer)
         if (auto* r = SkipStateTrackingFor(skip) ? nullptr : find(command))
         {
@@ -541,6 +550,39 @@ void WINAPI heaps(Command* command, UINT count, ID3D12DescriptorHeap* const* val
     cost.Stop();
     originalHeaps(command, count, values);
 }
+// FindGeometryPipeline for the list's current pipeline. The cache answers a
+// pipeline it has no entry for under its shared lock, which every render
+// thread takes, and ~95% of engine draws carry such a pipeline (2026-09-23:
+// ~225 of ~4,070 object draws per frame had a ready entry). Each list keeps its
+// last result, misses included, and each thread keeps recent misses. Both are
+// keyed by GeometryPipelineLookupGeneration(), which changes whenever a find()
+// result can change, so a pipeline that becomes ready reaches the next draw.
+struct PipelineMiss
+{
+    ID3D12PipelineState* pipeline = nullptr;
+    std::uint64_t generation = 0;
+};
+constexpr unsigned PipelineMissSlots = 64;
+thread_local PipelineMiss pipelineMisses[PipelineMissSlots];
+const ExperimentPipelineLease& pipelineLease(Record& r) noexcept
+{
+    auto* const pipeline = r.bindings->pipeline;
+    // Loaded before the lookup: a result that changes after this load leaves the
+    // stored generation behind, so the next draw resolves again.
+    const auto generation = GeometryPipelineLookupGeneration();
+    if (r.leaseGeneration == generation && r.leasePipeline == pipeline)
+        return r.lease;
+    // Same multiplicative slot hash as the cache's own hit memo.
+    const auto mixed = (static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pipeline)) >> 4) * 2654435761ull;
+    auto& miss = pipelineMisses[(mixed >> 26) & (PipelineMissSlots - 1)];
+    if (miss.pipeline == pipeline && miss.generation == generation)
+        r.lease.reset();
+    else if (!(r.lease = FindGeometryPipeline(pipeline)))
+        miss = { pipeline, generation };
+    r.leasePipeline = pipeline;
+    r.leaseGeneration = generation;
+    return r.lease;
+}
 MethodType<&Command::DrawIndexedInstanced> originalIndexed = nullptr;
 void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIndex, INT baseVertex, UINT startInstance)
 {
@@ -559,15 +601,21 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
         {
             auto& row = state->row();
             bump(row.indexed);
-            const auto draw =
-                ReadCyberpunkGeometryDraw(source, indices, instances, startIndex, baseVertex, startInstance);
-            stages.Split(HookStageIndexedRead);
             auto* r = find(command);
             stages.Split(HookStageIndexedFind);
             const auto* census = ActiveExperimentCensus();
-            const auto pipeline = r && (census || !draw.objects.empty()) ?
-                FindGeometryPipeline(r->bindings->pipeline) : ExperimentPipelineLease {};
+            // Independent of the draw, so resolved first; used only for draws with
+            // objects or during a census. Copied so this call keeps the entry, as
+            // the uncached lookup did.
+            const auto pipeline = r ? pipelineLease(*r) : ExperimentPipelineLease {};
             stages.Split(HookStageIndexedPipeline);
+            // Owner identities (proxy header read, lifetime ticket) are only
+            // consumed by the capture, a census or an experiment observer; every
+            // other draw reads the packet without completing its owners.
+            const bool owners = pipeline || census || experimentDrawObserver.load(std::memory_order_acquire);
+            const auto draw = ReadCyberpunkGeometryDraw(source, indices, instances, startIndex, baseVertex,
+                                                        startInstance, owners);
+            stages.Split(HookStageIndexedRead);
             const GeometryIndexedArguments arguments { indices, instances, startIndex, baseVertex, startInstance };
             if (census)
             {
@@ -582,9 +630,14 @@ void WINAPI indexed(Command* command, UINT indices, UINT instances, UINT startIn
                 bump(row.packets);
                 add(row.instances, draw.instances);
                 row.lastFrame.store(draw.frame, std::memory_order_relaxed);
-                for (const auto& object : draw.objects)
-                    if (object.identity)
-                        add(row.identities, object.count);
+                if (owners)
+                {
+                    std::uint64_t identities = 0;
+                    for (const auto& object : draw.objects)
+                        if (object.identity)
+                            identities += object.count;
+                    add(row.identities, identities);
+                }
                 const bool gate = GateArmed();
                 if (gate)
                     GateNote(GateObjectDraws);

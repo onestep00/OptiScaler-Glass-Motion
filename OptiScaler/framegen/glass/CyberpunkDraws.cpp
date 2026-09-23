@@ -27,11 +27,32 @@ Rigid originalRigid = nullptr;
 Skinned originalSkinned = nullptr;
 Upload originalUpload = nullptr;
 
+// Owner of one recorded packet as far as its append can establish it: the proxy
+// behind the packet's registry entry, the geometry record's mesh and the
+// lifetime ticket taken before the engine consumed the packet. The proxy header
+// half of the owner check runs when a draw that reads owners consumes the span
+// (completeOwners); the other draws never pay for it.
+struct PacketOwner
+{
+    GeometryDrawIdentity parent; // no generation: the append found no owner
+    // One instance whose transform is the renderer's own slot for this packet:
+    // the part of the single-object rule that needs the append's arguments.
+    bool single = false;
+};
+// GeometryDrawBatch keeps its span capacity private; its size pins it.
+constexpr std::size_t kBatchSpans = 2048;
+static_assert(sizeof(GeometryDrawBatch) / sizeof(GeometryBatchSpan) == kBatchSpans);
 struct Batch
 {
     GeometryDrawBatch rigid, skinned;
+    // Owner of each recorded span, by span index. Written for every span the
+    // batch keeps, so a reused pool slot never lends an older owner.
+    std::array<PacketOwner, kBatchSpans> rigidOwners, skinnedOwners;
     std::uint64_t context = 0, renderer = 0;
     std::uint32_t frame = 0;
+    // Array order probe run: owners complete at append, because the probe
+    // compares the element order right after the engine's append.
+    bool eager = false;
 };
 struct EngineDrawState
 {
@@ -60,8 +81,8 @@ struct EngineDrawState
         std::atomic<std::uint64_t> parentNonGlobalCount1 = 0, parentNonGlobalCountMore = 0,
                                  parentNonGlobalCountMoreSkin = 0;
         std::atomic<std::uint64_t> parentSeeded = 0;
-        // Context parent memo (see ParentMemoEntry). Hits skip the 0x90-byte
-        // proxy field read and two of the three lifetime tickets per packet.
+        // Owner completion (see completeOwners): spans that reused the header
+        // read of the previous span's identical owner, and header reads.
         std::atomic<std::uint64_t> parentMemoHits = 0, parentMemoMisses = 0;
     };
     static constexpr unsigned RowCount = 64;
@@ -147,9 +168,8 @@ struct ProxyFields
     std::uint32_t instanceCount = 0, globalStart = UINT32_MAX;
 };
 // One guarded copy of 0x90..0x120 replaced the four separately guarded copies
-// the checks below used to make. A guarded copy is a non-inlined call, and this
-// runs for every engine packet, not only for the captured ones. The bytes are
-// the same bytes the individual reads covered.
+// the checks below used to make. A guarded copy is a non-inlined call. The
+// bytes are the same bytes the individual reads covered.
 bool readProxyFields(std::uint64_t proxy, ProxyFields& value) noexcept
 {
     std::array<std::byte, 0x90> header {};
@@ -163,58 +183,6 @@ bool readProxyFields(std::uint64_t proxy, ProxyFields& value) noexcept
     std::memcpy(&value.globalStart, header.data() + 0x84, sizeof(value.globalStart));
     return true;
 }
-// The memo drops the 0x90-byte proxy header read, but the array fields inside
-// that header are rewritten by the engine's own update path. The group update
-// (0x1e8778) republishes +0x108/+0x110/+0x114 and the grouped flag at +0xea
-// without touching the registry ticket, so a packet that resolves the same
-// index later in the same batch can see different array state. A memo hit
-// therefore re-reads the 0x2e bytes that hold every field the selection uses
-// and keeps the memo only while all of them are unchanged. The mesh and slot
-// fields stay validated through the geometry record and the lifetime ticket.
-bool confirmProxyFields(std::uint64_t proxy, const ProxyFields& value) noexcept
-{
-    static_assert(0x108 - 0xea == 0x1e);
-    static_assert(0x110 - 0xea == 0x26);
-    static_assert(0x114 - 0xea == 0x2a);
-    std::array<std::byte, 0x2e> tail {};
-    if (!copyAt(proxy + 0xea, tail))
-        return false;
-    std::uint16_t flags = 0;
-    std::uint64_t transforms = 0;
-    std::uint32_t instanceCount = 0, globalStart = 0;
-    std::memcpy(&flags, tail.data(), sizeof(flags));
-    std::memcpy(&transforms, tail.data() + 0x1e, sizeof(transforms));
-    std::memcpy(&instanceCount, tail.data() + 0x26, sizeof(instanceCount));
-    std::memcpy(&globalStart, tail.data() + 0x2a, sizeof(globalStart));
-    return flags == value.flags && transforms == value.transforms && instanceCount == value.instanceCount &&
-           globalStart == value.globalStart;
-}
-// Packet owner memo.
-//
-// A packet's parent (proxy, mesh, slot, lifetime generation) is a function of
-// the engine context it belongs to plus the packet's own transform index. The
-// engine appends thousands of packets per frame and a batch shares one context,
-// so the same checks were repeated for every packet: read the entry's proxy
-// pointer, read the 0x30-byte geometry record, read the 0x90 bytes of proxy
-// fields, and take two lifetime tickets.
-//
-// The memo keeps the resolved parent plus the fields the selection needs. A hit
-// still re-reads the entry, the geometry record and one lifetime ticket, so any
-// setter, re-registration or geometry swap invalidates it exactly like the full
-// path does. It also re-reads the array state in the proxy header, because the
-// engine's group update rewrites those fields without touching the ticket. It
-// only drops the slot/mesh bytes and the second ticket, which the geometry
-// record and the first ticket already cover.
-struct ParentMemoEntry
-{
-    std::uint64_t context = 0, entry = 0, geometry = 0;
-    const Batch* batch = nullptr;
-    std::uint32_t tick = 0, index = UINT32_MAX;
-    GeometryDrawIdentity parent;
-    ProxyFields fields;
-    bool valid = false;
-};
-thread_local ParentMemoEntry parentMemo[4];
 // Recover an object the registry never observed (created before the hooks were
 // installed or registered through an unaudited path). This is the same verified
 // two-read snapshot contract the registration hook uses; it never guesses.
@@ -446,6 +414,132 @@ bool renderer(EngineDrawState& state, std::uint64_t& result)
     return copyAt(reinterpret_cast<std::uint64_t>(state.rendererGlobal), root) && copyAt(root + 0x4628, result) &&
            result && result < 0x7fffffffffff - 0xb74380;
 }
+// Append-time half of the packet owner: the owner flag, the registry entry, the
+// geometry record and the lifetime ticket. The ticket is taken before the
+// engine consumes the packet, so a registration or array setter that runs
+// before the draw changes it and the draw refuses the owner (checkOwner).
+PacketOwner takeOwner(EngineDrawState& state, EngineDrawState::Row& row, const Batch& batch,
+                      const EngineContext& before, std::uint64_t word) noexcept
+{
+    PacketOwner owner;
+    if (!(word & (1ull << 51)))
+    {
+        bump(row.parentNoFlag);
+        return owner;
+    }
+    const auto index = static_cast<std::uint32_t>(word & 0x3ffff);
+    std::uint64_t encoded = 0;
+    EngineGeometry geometry;
+    if (index >= 131072 || before.entry != batch.renderer + 0x274248 + std::uint64_t(index) * 24 ||
+        !copyAt(before.entry, encoded) || !copyAt(before.geometry, geometry) || geometry.kind != 0)
+    {
+        bump(row.parentNoEntry);
+        return owner;
+    }
+    const auto proxy = encoded & 0x00ffffffffffffffull;
+    try
+    {
+        auto generation = state.registry->ticket(proxy, index);
+        if (!generation && seedObject(state, proxy))
+        {
+            generation = state.registry->ticket(proxy, index);
+            if (generation)
+                bump(row.parentSeeded);
+        }
+        if (!generation)
+            bump(row.parentNoTicket);
+        else
+            owner.parent = { proxy, geometry.mesh, index, generation };
+    }
+    catch (...)
+    {
+    }
+    return owner;
+}
+enum class OwnerCheck
+{
+    Owner,
+    NoSlot,
+    NoMesh,
+    Changed,
+};
+// Proxy header half of the owner check. The header is read between the
+// append's ticket and a second one, so when the two agree no registration or
+// array setter was active or completed at any point in between, however far
+// the draw is from the append. A changed ticket is reported first: the header
+// may then describe another owner state than the one the packet was taken in.
+// The array fields (+0xea flags, +0x108/+0x110/+0x114) have no ticket of their
+// own; the selection sees them as they are when the draw consumes the packet,
+// in the same engine frame and batch run as the append.
+OwnerCheck checkOwner(const EngineDrawState& state, const GeometryDrawIdentity& owner, ProxyFields& fields)
+{
+    const bool read = readProxyFields(owner.proxy, fields);
+    if (state.registry->ticket(owner.proxy, owner.slot) != owner.generation)
+        return OwnerCheck::Changed;
+    if (!read || fields.slot != owner.slot)
+        return OwnerCheck::NoSlot;
+    if (!fields.mesh || fields.mesh != owner.mesh)
+        return OwnerCheck::NoMesh;
+    return OwnerCheck::Owner;
+}
+// Single-object identity and element order of a span whose owner resolved: a
+// function of the packet, the owner's proxy header and the controls only.
+void selectOwner(GeometryBatchSpan& record, const ProxyFields& fields, bool single, bool skin,
+                 const Controls& controls, EngineDrawState::Row& row) noexcept
+{
+    if (single && !fields.transforms && !fields.instanceCount && fields.globalStart == UINT32_MAX)
+        record.identity = record.parent;
+    CyberpunkInstanceSelection selection;
+    if (selection.resolveGlobalPacket(record.global, record.transformIndex, record.count, fields.globalStart,
+                                      fields.instanceCount, fields.flags))
+    {
+        record.orderKind = 1;
+        record.originalFirst = static_cast<std::uint16_t>(selection.linearFirst);
+        return;
+    }
+    bump(row.parentNoSelection);
+    switch (CyberpunkInstanceSelection::rejectCode(record.global, record.transformIndex, record.count,
+                                                   fields.globalStart, fields.instanceCount, fields.flags))
+    {
+    case 1:
+        bump(row.parentNoSelectionGrouped);
+        // Grouped update array. The engine repacks the source
+        // elements into this same allocation in group order, so
+        // the packet ordinal is the element's position in the
+        // group. It is only used together with the array's
+        // observed lifetime generation, which invalidates the
+        // history whenever the array is mutated.
+        if (controls.groupedOrder && record.count > 1)
+        {
+            record.orderKind = 2;
+            record.originalFirst = 0;
+        }
+        break;
+    case 2:
+        bump(row.parentNoSelectionNonGlobal);
+        // Only count>1 non-skinned spans can become kind 3/4
+        // and reach the order probe, so split the population
+        // that stays at ordinal 0 instead of guessing: a
+        // count==1 span is a single element, and a count==0
+        // span selects nothing and lands in count_more.
+        if (controls.arrayProbe)
+            bump(record.count == 1 ? row.parentNonGlobalCount1
+                                   : (skin ? row.parentNonGlobalCountMoreSkin : row.parentNonGlobalCountMore));
+        // Packet-local instanced selection: particles and other
+        // instanced transparency. The engine keeps the element
+        // bytes in the packet itself and exposes no source
+        // index. Kind 3 marks the span as a probe target; kind 4
+        // authorizes the packet ordinal once the order probe has
+        // shown it is stable for this family.
+        if (record.count > 1)
+        {
+            record.orderKind = controls.packetLocalOrder ? 4 : 3;
+            record.originalFirst = 0;
+        }
+        break;
+    default: bump(row.parentNoSelectionRange); break;
+    }
+}
 struct RunScope
 {
     EngineDrawState* state;
@@ -468,6 +562,14 @@ struct RunScope
             batch.skinned.clear();
             batch.context = 0;
             batch.frame = *state->tick;
+            try
+            {
+                batch.eager = ReadControls().arrayProbe;
+            }
+            catch (...)
+            {
+                batch.eager = false;
+            }
             if (renderer(*state, batch.renderer))
                 currentBatch = &batch;
             break;
@@ -539,6 +641,7 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
     EngineContext before;
     std::array<std::uint64_t, 2> words {};
     GeometryBatchSpan record;
+    PacketOwner owner;
     bool tracked = batch->frame == *state->tick &&
                    copyAt(reinterpret_cast<std::uint64_t>(context), before) &&
                    copyAt(reinterpret_cast<std::uint64_t>(packet), words);
@@ -558,151 +661,34 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
             record.count = (words[1] >> 18) & 0x7fff;
             record.transformIndex = (words[1] >> 33) & 0x1ffff;
             record.global = (words[0] & (1ull << 59)) != 0;
-            const auto index = static_cast<std::uint32_t>(words[1] & 0x3ffff);
-            EngineGeometry geometry;
-            std::uint64_t encoded = 0;
-            const auto source = batch->renderer + 0x574280 + std::uint64_t(record.transformIndex) * 48;
-            const bool flagged = (words[1] & (1ull << 51)) != 0;
-            ProxyFields fields;
-            auto& memo = parentMemo[index & 3u];
-            bool resolved = false;
-            if (!flagged)
-                bump(row.parentNoFlag);
-            else if (memo.valid && memo.index == index && memo.context == batch->context && memo.batch == batch &&
-                     memo.tick == batch->frame && memo.entry == before.entry && memo.geometry == before.geometry &&
-                     copyAt(before.entry, encoded) &&
-                     (encoded & 0x00ffffffffffffffull) == memo.parent.proxy && copyAt(before.geometry, geometry) &&
-                     geometry.kind == 0 && geometry.mesh == memo.fields.mesh &&
-                     state->registry->ticket(memo.parent.proxy, memo.parent.slot) == memo.parent.generation &&
-                     confirmProxyFields(memo.parent.proxy, memo.fields))
+            owner = takeOwner(*state, row, *batch, before, words[1]);
+            owner.single = record.count == 1 && batch->renderer + 0x574280 + std::uint64_t(record.transformIndex) * 48 ==
+                                                    reinterpret_cast<std::uint64_t>(transforms);
+            stages.Split(HookStageAppendTicket);
+            if (batch->eager && owner.parent.generation)
             {
-                // Same context, entry and geometry record as a packet that
-                // already resolved this slot, and the lifetime ticket still
-                // matches, so the proxy fields cannot have changed between the
-                // two packets. The 0x90-byte field read and the second ticket
-                // are not repeated.
-                bump(row.parentMemoHits);
-                fields = memo.fields;
-                record.parent = memo.parent;
-                resolved = true;
-            }
-            else if (index >= 131072 ||
-                     before.entry != batch->renderer + 0x274248 + std::uint64_t(index) * 24 ||
-                     !copyAt(before.entry, encoded) || !copyAt(before.geometry, geometry) ||
-                     geometry.kind != 0)
-                bump(row.parentNoEntry);
-            else
-            {
+                // Array probe run: the probe below needs the element order now,
+                // so the owner completes here and the draw only revalidates it.
+                ProxyFields fields;
                 bump(row.parentMemoMisses);
-                const auto proxy = encoded & 0x00ffffffffffffffull;
                 try
                 {
-                    // Bracket header reads with the lifetime/array mutation
-                    // ticket. A setter active or completed between these reads
-                    // cannot publish a mixed old header with a new generation.
-                    auto generation = state->registry->ticket(proxy, index);
-                    if (!generation && seedObject(*state, proxy))
+                    switch (checkOwner(*state, owner.parent, fields))
                     {
-                        generation = state->registry->ticket(proxy, index);
-                        if (generation) bump(row.parentSeeded);
-                    }
-                    if (!generation)
-                        bump(row.parentNoTicket);
-                    else
-                    {
-                        stages.Split(HookStageAppendTicket);
-                        if (!readProxyFields(proxy, fields) || fields.slot != index)
-                            bump(row.parentNoSlot);
-                        else if (!fields.mesh || fields.mesh != geometry.mesh)
-                            bump(row.parentNoMesh);
-                        else if (state->registry->ticket(proxy, index) != generation)
-                            bump(row.parentNoHeader);
-                        else
-                        {
-                            stages.Split(HookStageAppendFields);
-                            record.parent = { proxy, fields.mesh, index, generation };
-                            memo.context = batch->context;
-                            memo.entry = before.entry;
-                            memo.geometry = before.geometry;
-                            memo.batch = batch;
-                            memo.tick = batch->frame;
-                            memo.index = index;
-                            memo.parent = record.parent;
-                            memo.fields = fields;
-                            memo.valid = true;
-                            resolved = true;
-                        }
+                    case OwnerCheck::Owner:
+                        stages.Split(HookStageAppendFields);
+                        record.parent = owner.parent;
+                        selectOwner(record, fields, owner.single, skin, ReadControls(), row);
+                        break;
+                    case OwnerCheck::NoSlot: bump(row.parentNoSlot); break;
+                    case OwnerCheck::NoMesh: bump(row.parentNoMesh); break;
+                    case OwnerCheck::Changed: bump(row.parentNoHeader); break;
                     }
                 }
-                catch (...) {}
+                catch (...)
+                {
+                }
             }
-            if (resolved)
-                try
-                {
-                    if (record.count == 1 && source == reinterpret_cast<std::uint64_t>(transforms) &&
-                        !fields.transforms && !fields.instanceCount && fields.globalStart == UINT32_MAX)
-                        record.identity = record.parent;
-                    CyberpunkInstanceSelection selection;
-                    if (selection.resolveGlobalPacket(record.global, record.transformIndex, record.count,
-                                                      fields.globalStart, fields.instanceCount, fields.flags))
-                    {
-                        record.orderKind = 1;
-                        record.originalFirst = static_cast<std::uint16_t>(selection.linearFirst);
-                    }
-                    else
-                    {
-                        bump(row.parentNoSelection);
-                        const auto code = CyberpunkInstanceSelection::rejectCode(
-                            record.global, record.transformIndex, record.count, fields.globalStart,
-                            fields.instanceCount, fields.flags);
-                        switch (code)
-                        {
-                        case 1:
-                            bump(row.parentNoSelectionGrouped);
-                            // Grouped update array. The engine repacks the source
-                            // elements into this same allocation in group order, so
-                            // the packet ordinal is the element's position in the
-                            // group. It is only used together with the array's
-                            // observed lifetime generation, which invalidates the
-                            // history whenever the array is mutated.
-                            if (ReadControls().groupedOrder && record.count > 1)
-                            {
-                                record.orderKind = 2;
-                                record.originalFirst = 0;
-                            }
-                            break;
-                        case 2:
-                            bump(row.parentNoSelectionNonGlobal);
-                            // Only count>1 non-skinned spans can become kind 3/4
-                            // and reach the order probe, so split the population
-                            // that stays at ordinal 0 instead of guessing: a
-                            // count==1 span is a single element, and a count==0
-                            // span selects nothing and lands in count_more.
-                            if (ReadControls().arrayProbe)
-                            {
-                                const auto counter = record.count == 1
-                                                         ? &row.parentNonGlobalCount1
-                                                         : (skin ? &row.parentNonGlobalCountMoreSkin
-                                                                 : &row.parentNonGlobalCountMore);
-                                bump(*counter);
-                            }
-                            // Packet-local instanced selection: particles and other
-                            // instanced transparency. The engine keeps the element
-                            // bytes in the packet itself and exposes no source
-                            // index. Kind 3 marks the span as a probe target; kind 4
-                            // authorizes the packet ordinal once the order probe has
-                            // shown it is stable for this family.
-                            if (record.count > 1)
-                            {
-                                record.orderKind = ReadControls().packetLocalOrder ? 4 : 3;
-                                record.originalFirst = 0;
-                            }
-                            break;
-                        default: bump(row.parentNoSelectionRange); break;
-                        }
-                    }
-                }
-                catch (...) {}
             stages.Split(HookStageAppendSelect);
         }
     }
@@ -710,7 +696,8 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
     originalAppend(transforms, packet, c, d, context);
     // Kind 2 is the grouped array path; kinds 3 and 4 are the packet-local
     // family. Both are compared from the array the engine itself read for this
-    // packet (see probeArrayOrder).
+    // packet (see probeArrayOrder). Only an array probe run (Batch::eager) has
+    // selected the order kind by this point.
     if (tracked && state && batch && (record.orderKind == 3 || record.orderKind == 4))
     {
         // The call gate below is the last place a kind 3/4 span can be lost
@@ -748,7 +735,11 @@ void append(void* transforms, void* packet, std::uintptr_t c, std::uintptr_t d, 
         bump(row.rejected);
         return;
     }
-    records.append(skin ? before.skinCount : before.rigidCount, skin ? after.skinCount : after.rigidCount, record);
+    const auto instances = skin ? after.skinCount : after.rigidCount;
+    records.append(skin ? before.skinCount : before.rigidCount, instances, record);
+    // A kept span is the last one of the view; its owner takes the same index.
+    if (const auto kept = records.view(instances); !kept.empty())
+        (skin ? batch->skinnedOwners : batch->rigidOwners)[kept.size() - 1] = owner;
     bump(row.appends);
     stages.Split(HookStageAppendTail);
     if (record.identity)
@@ -845,11 +836,84 @@ std::uint32_t upload(void* target, void* source, std::uint32_t count, void* allo
     }
     return result;
 }
+// Draw-time check of a batch whose owners completed at append (array probe
+// run): each distinct owner's mesh and lifetime ticket, as before.
+bool validateOwners(const Flush& flush, std::span<const GeometryBatchSpan> spans)
+{
+    std::uint64_t checkedProxy = 0;
+    std::uint32_t checkedSlot = 0, checkedGeneration = 0;
+    for (const auto& record : spans)
+    {
+        const auto& owner = record.parent ? record.parent : record.identity;
+        if (!owner)
+            continue;
+        if (owner.mesh != flush.mesh)
+            return false;
+        if (owner.proxy == checkedProxy && owner.slot == checkedSlot && owner.generation == checkedGeneration)
+            continue;
+        if (flush.state->registry->ticket(owner.proxy, owner.slot) != owner.generation)
+            return false;
+        checkedProxy = owner.proxy;
+        checkedSlot = owner.slot;
+        checkedGeneration = owner.generation;
+    }
+    return true;
+}
+// Draw-time half of the owner check (see PacketOwner). False when an owner's
+// lifetime ticket changed since its append or an owner has another mesh than
+// the draw; the draw is then refused, as the former draw-time ticket check did.
+bool completeOwners(const Flush& flush, std::span<GeometryBatchSpan> spans)
+{
+    auto& row = flush.state->row();
+    const auto controls = ReadControls();
+    const bool skin = flush.records == &flush.batch->skinned;
+    const auto& owners = skin ? flush.batch->skinnedOwners : flush.batch->rigidOwners;
+    const GeometryDrawIdentity* previous = nullptr;
+    auto check = OwnerCheck::Changed;
+    ProxyFields fields;
+    for (std::size_t i = 0; i < spans.size(); ++i)
+    {
+        const auto& owner = owners[i];
+        if (!owner.parent.generation)
+            continue; // Counted at append; the span keeps no owner.
+        // Consecutive spans can repeat an owner (an array split over several
+        // packets). Its header read and ticket are reused, as the former
+        // draw-time check reused the ticket.
+        if (previous && owner.parent.proxy == previous->proxy && owner.parent.slot == previous->slot &&
+            owner.parent.generation == previous->generation && owner.parent.mesh == previous->mesh)
+            bump(row.parentMemoHits);
+        else
+        {
+            bump(row.parentMemoMisses);
+            check = checkOwner(*flush.state, owner.parent, fields);
+            previous = &owner.parent;
+        }
+        if (check == OwnerCheck::Changed)
+        {
+            bump(row.parentNoHeader);
+            return false;
+        }
+        if (check != OwnerCheck::Owner)
+        {
+            bump(check == OwnerCheck::NoSlot ? row.parentNoSlot : row.parentNoMesh);
+            continue;
+        }
+        auto& span = spans[i];
+        span.parent = owner.parent;
+        if (span.parent.mesh != flush.mesh)
+            return false;
+        selectOwner(span, fields, owner.single, skin, controls, row);
+        if (span.identity)
+            bump(row.identities);
+    }
+    return true;
+}
 } // namespace
 
 GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
                                            std::uint32_t instanceCount, std::uint32_t startIndex,
-                                           std::int32_t baseVertex, std::uint32_t startInstance) noexcept
+                                           std::int32_t baseVertex, std::uint32_t startInstance,
+                                           bool owners) noexcept
 {
     auto* value = currentFlush;
     if (!value || !value->state || value->invalid || value->consumed || !value->uploaded ||
@@ -860,39 +924,42 @@ GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std:
     const auto records = value->records->view(value->count);
     if (records.empty())
         return {};
+    // The view lends the batch's own span storage, which only this flush
+    // reads, so the owner fields are completed (or cleared) in place.
+    const std::span spans(const_cast<GeometryBatchSpan*>(records.data()), records.size());
     try
     {
-        // Ordinary identity is copied from parent at append. Validate its
-        // lifetime once per distinct owner, not once per span: the spans of one
-        // draw almost always repeat the same array parent, and the registry
-        // ticket is a random read into a multi-megabyte table. This memo is a
-        // pure cache, every distinct owner is still checked before it is used.
-        std::uint64_t checkedProxy = 0;
-        std::uint32_t checkedSlot = 0, checkedGeneration = 0;
-        for (const auto& record : records)
+        if (!owners)
         {
-            const auto& owner = record.parent ? record.parent : record.identity;
-            if (!owner)
-                continue;
-            if (owner.mesh != value->mesh)
-                return {};
-            if (owner.proxy == checkedProxy && owner.slot == checkedSlot &&
-                owner.generation == checkedGeneration)
-                continue;
-            if (value->state->registry->ticket(owner.proxy, owner.slot) != owner.generation)
-                return {};
-            checkedProxy = owner.proxy;
-            checkedSlot = owner.slot;
-            checkedGeneration = owner.generation;
+            if (value->batch->eager)
+                for (auto& span : spans)
+                {
+                    span.identity = span.parent = {};
+                    span.orderKind = 0;
+                    span.originalFirst = 0;
+                }
+        }
+        else if (value->batch->eager ? !validateOwners(*value, records) : !completeOwners(*value, spans))
+        {
+            value->invalid = true; // A repeated read refuses the same draw.
+            return {};
         }
     }
     catch (...)
     {
+        value->invalid = true;
         return {};
     }
     value->consumed = true;
     bump(value->state->row().draws);
     return { records, value->mesh, value->batch->frame, value->chunk, value->stride, value->origin, value->count };
+}
+GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
+                                           std::uint32_t instanceCount, std::uint32_t startIndex,
+                                           std::int32_t baseVertex, std::uint32_t startInstance) noexcept
+{
+    return ReadCyberpunkGeometryDraw(sourceReturnAddress, indexCount, instanceCount, startIndex, baseVertex,
+                                     startInstance, true);
 }
 namespace
 {

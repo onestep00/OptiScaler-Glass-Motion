@@ -23,7 +23,6 @@ inline bool install(ID3D12Device* device)
     callbacks.stateTracked = [](void*, ID3D12GraphicsCommandList*) { return false; };
     callbacks.reset = [](void*, ID3D12GraphicsCommandList*, bool, ID3D12PipelineState*) {};
     callbacks.mutation = [](void*, ID3D12GraphicsCommandList*) {};
-    callbacks.barrier = [](void*, ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*) {};
     callbacks.signal = [](void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) {};
     callbacks.wait = [](void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) {};
     callbacks.beforeSubmit = [](void*, ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)

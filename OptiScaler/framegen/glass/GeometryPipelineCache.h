@@ -70,6 +70,11 @@ void PublishOpaqueProbeCounters(std::uint64_t ready, std::uint64_t rejected) noe
 std::uint64_t ReadOpaqueProbeReadyCount() noexcept;
 std::uint64_t ReadOpaqueProbeRejectedCount() noexcept;
 
+// Changes whenever find() of any cache in this process can return a different
+// result: an entry became ready, a published entry may change (re-queue, erase)
+// or a cache stopped. A caller that memoizes find() results, misses included,
+// reuses one only while this value is unchanged. Never 0.
+std::uint64_t GeometryPipelineLookupGeneration() noexcept;
 
 // Captures successful public creation calls, then builds the paired shaders on
 // one worker. find() never compiles, waits for a result, or calls a D3D12 method.

@@ -79,6 +79,16 @@ inline unsigned PipelineFindMemoSlot(ID3D12PipelineState* identity) noexcept
     return static_cast<unsigned>((mixed >> 26) & (PipelineFindMemoSlots - 1));
 }
 std::atomic<std::uint64_t> nextPipelineCacheEpoch { 1 };
+// GeometryPipelineLookupGeneration(). Starts at 1 so a zeroed memo never
+// matches. Read on every indexed draw and written only when a lookup result
+// changes, so it owns its cache line.
+struct alignas(64) LookupGeneration
+{
+    std::atomic<std::uint64_t> value { 1 };
+    // Explicit padding: /W4 treats the implicit alignment padding as C4324.
+    std::uint8_t pad[56] {};
+};
+LookupGeneration lookupGeneration;
 // Diagnostic opaque probe registration cap. The probe adds pipelines that the
 // product gate refuses, and every added entry costs a rewritten VS/PS pair, a
 // PSO and one compiler job on the single worker thread. 256 keeps the
@@ -213,7 +223,11 @@ struct GeometryPipelineCache::Impl
     // Bumped under the unique lock whenever a published entry can change.
     std::atomic<std::uint64_t> generations { 0 };
 
-    void invalidateLookups() noexcept { generations.fetch_add(1, std::memory_order_release); }
+    void invalidateLookups() noexcept
+    {
+        generations.fetch_add(1, std::memory_order_release);
+        lookupGeneration.value.fetch_add(1, std::memory_order_release);
+    }
 
     Impl(ID3D12Device* d, std::filesystem::path path, GeometryCacheLimits l)
         : device(d), compilerPath(std::move(path)), limits(l)
@@ -414,6 +428,8 @@ struct GeometryPipelineCache::Impl
                             std::lock_guard lock(mutex);
                             work.ready = true;
                             ++counters.ready;
+                            // find() stops returning null for this pipeline.
+                            lookupGeneration.value.fetch_add(1, std::memory_order_release);
                         }
                     }
                     else
@@ -650,6 +666,10 @@ bool GeometryPipelineCache::pipelineCreated(ID3D12PipelineState* identity,
     }
 }
 
+std::uint64_t GeometryPipelineLookupGeneration() noexcept
+{
+    return lookupGeneration.value.load(std::memory_order_acquire);
+}
 std::shared_ptr<const GeometryPipelineEntry> GeometryPipelineCache::find(ID3D12PipelineState* identity) const
 {
     const auto& r = *implementation;

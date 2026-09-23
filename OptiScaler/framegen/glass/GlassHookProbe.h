@@ -266,7 +266,7 @@ inline HookCostCounters& SkinnedHookCost() noexcept
         slot = hookCostOwnSlot = ClaimHookCostSlot();
     return slot->skinned;
 }
-// Command-queue and command-list observer hooks (barriers, submissions).
+// Command-queue and command-list observer hooks (state setters, resets, submissions).
 inline HookCostCounters& ObserverHookCost() noexcept
 {
     auto* slot = hookCostOwnSlot;

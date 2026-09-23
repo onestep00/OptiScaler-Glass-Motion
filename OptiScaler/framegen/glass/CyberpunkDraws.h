@@ -13,9 +13,20 @@ std::uint32_t ReadCyberpunkDrawFrame() noexcept;
 // Called only from an actual public DrawIndexedInstanced observer. The source
 // return address must be the audited engine call site. The borrowed result is
 // valid only inside this callback; a GPU owner must copy admitted identities.
+// Every span carries its packet owner provenance (parent, single-object
+// identity, element order); the draw is refused when an owner's lifetime
+// changed after its append.
 GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
                                            std::uint32_t instanceCount, std::uint32_t startIndex,
                                            std::int32_t baseVertex, std::uint32_t startInstance) noexcept;
+// The same read. The owner provenance is completed here, at the draw, with one
+// proxy header read per distinct owner, so a caller that only needs the frame,
+// mesh and instance intervals passes owners=false: its spans carry no owner
+// fields and no owner lifetime is checked.
+GeometryDrawView ReadCyberpunkGeometryDraw(const void* sourceReturnAddress, std::uint32_t indexCount,
+                                           std::uint32_t instanceCount, std::uint32_t startIndex,
+                                           std::int32_t baseVertex, std::uint32_t startInstance,
+                                           bool owners) noexcept;
 struct CyberpunkMeshShape
 {
     std::uint64_t chunkAddress = 0;
@@ -76,8 +87,16 @@ std::size_t ReadCyberpunkShapeSamples(CyberpunkShapeSample* out, std::size_t cap
 struct CyberpunkDrawStatus
 {
     bool active = false;
+    // `identities` counts spans admitted as single objects. Like the owner
+    // counters below it is decided when a draw that reads owners consumes the
+    // span, so it counts consumed spans, not appends.
     std::uint64_t batches = 0, appends = 0, identities = 0, draws = 0, rejected = 0;
     // Why an array span could not receive a verified owner (proxy) identity.
+    // no_flag/no_entry/no_ticket and seeded are decided at the engine's append;
+    // no_slot/no_mesh/no_header, the selection split below and the memo pair
+    // when a draw that reads owners consumes the span. no_header then means the
+    // owner's lifetime ticket changed between the append and the draw, which
+    // refuses the draw. An array probe run decides everything at the append.
     std::uint64_t parentNoFlag = 0, parentNoEntry = 0, parentNoTicket = 0, parentNoSlot = 0;
     std::uint64_t parentNoMesh = 0, parentNoHeader = 0, parentNoSelection = 0;
     // Split of parentNoSelection: grouped update (0x2000), packet-local
@@ -92,8 +111,8 @@ struct CyberpunkDrawStatus
     std::uint64_t parentNonGlobalCount1 = 0, parentNonGlobalCountMore = 0,
                   parentNonGlobalCountMoreSkin = 0;
     std::uint64_t parentSeeded = 0;
-    // Context parent memo: packets that reused an already resolved parent
-    // (ticket still matching) and packets that had to read the full state.
+    // Owner completion: spans that reused the header read of the previous
+    // span's identical owner in the same draw, and header reads.
     std::uint64_t parentMemoHits = 0, parentMemoMisses = 0;
     // Grouped-array order probe: consecutive frames of the same array are
     // compared by element bytes. "permuted" counts frames where every element
@@ -115,7 +134,8 @@ struct CyberpunkDrawStatus
     // Kind 3/4 spans that reached the probe call site: those that passed the
     // full gate, those dropped because the count was 1, and those dropped
     // because the destination is the skinned stream. gate_pass grows with
-    // arrayProbeLocal when the local probe is reached at all.
+    // arrayProbeLocal when the local probe is reached at all. Only array probe
+    // runs select the order kind at the append, so these count only then.
     std::uint64_t arrayProbeLocalGatePass = 0, arrayProbeLocalGateCount = 0,
                   arrayProbeLocalGateSkin = 0;
     std::uint64_t arrayProbeSameAddress = 0, arrayProbeDistinctAddress = 0;

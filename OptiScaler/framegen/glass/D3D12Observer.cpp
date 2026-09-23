@@ -25,7 +25,7 @@ std::mutex installMutex;
 struct Call
 {
     bool active;
-    explicit Call(bool selected = true) : active(!internalDepth && selected)
+    Call() : active(!internalDepth)
     {
         if (active)
             callbacks.enter(callbacks.context);
@@ -57,14 +57,32 @@ HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12
         callbacks.reset(callbacks.context, command, SUCCEEDED(result), pipeline);
     return result;
 }
+
+// Binding setters and Close run on every list of the device. On the tracked
+// list this enters the observer section and reports the mutation; the hook
+// runs the original inside that section and Leave ends it, so nothing between
+// enter and Leave may throw. Every other list pays only the probe scope and
+// the identity check, and the hook's original call has nothing left to unwind.
+bool enterMutation(Command* command) noexcept
+{
+    const HookCostScope cost(ObserverHookCost(), true);
+    if (!stateTracked(command))
+        return false;
+    callbacks.enter(callbacks.context);
+    callbacks.mutation(callbacks.context, command);
+    return true;
+}
+struct Leave
+{
+    ~Leave() { callbacks.leave(callbacks.context); }
+};
+
 MethodType<&Command::Close> originalClose = nullptr;
 HRESULT WINAPI close(Command* command)
 {
-    const HookCostScope cost(ObserverHookCost(), true);
-    Call call(stateTracked(command));
-    if (call.active)
-        callbacks.mutation(callbacks.context, command);
-    cost.Stop();
+    if (!enterMutation(command))
+        return originalClose(command);
+    const Leave leave;
     return originalClose(command);
 }
 
@@ -72,11 +90,9 @@ HRESULT WINAPI close(Command* command)
     MethodType<&Class::Name> original##Name = nullptr;                                                                 \
     void WINAPI hook##Name Declaration                                                                                 \
     {                                                                                                                  \
-        const HookCostScope cost(ObserverHookCost(), true);                                          \
-        Call call(stateTracked(command));                                                                              \
-        if (call.active)                                                                                               \
-            callbacks.mutation(callbacks.context, command);                                                            \
-        cost.Stop();                                                                                                   \
+        if (!enterMutation(command))                                                                                   \
+            return original##Name Arguments;                                                                           \
+        const Leave leave;                                                                                             \
         original##Name Arguments;                                                                                      \
     }                                                                                                                  \
     static_assert(std::is_same_v<decltype(&hook##Name), MethodType<&Class::Name>>);
@@ -112,27 +128,6 @@ GLASS_SETTER(SetProgram, ID3D12GraphicsCommandList10,
              (ID3D12GraphicsCommandList10 * command, const D3D12_SET_PROGRAM_DESC* desc), (command, desc))
 #undef GLASS_SETTER
 
-MethodType<&Command::ResourceBarrier> originalBarrier = nullptr;
-void WINAPI barrier(Command* command, UINT count, const D3D12_RESOURCE_BARRIER* barriers)
-{
-    const HookCostScope cost(ObserverHookCost(), true);
-    bool selected = false;
-    constexpr auto read = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    if (!internalDepth && barriers && count <= 4096)
-        for (UINT i = 0; i < count; ++i)
-            selected |= barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
-                        barriers[i].Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE &&
-                        barriers[i].Transition.StateBefore == D3D12_RESOURCE_STATE_DEPTH_WRITE &&
-                        barriers[i].Transition.StateAfter == read;
-    Call call(selected);
-    {
-        HookCostPause pause(cost);
-        originalBarrier(command, count, barriers);
-    }
-    if (call.active)
-        callbacks.barrier(callbacks.context, command, count, barriers);
-}
 MethodType<&ID3D12CommandQueue::ExecuteCommandLists> originalSubmit = nullptr;
 void WINAPI submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands)
 {
@@ -295,14 +290,14 @@ static bool installLocked(Command* command, const D3D12Callbacks& supplied)
     const auto listType = command != nullptr ? command->GetType() : D3D12_COMMAND_LIST_TYPE_BUNDLE;
     if (command == nullptr ||
         (listType != D3D12_COMMAND_LIST_TYPE_COMPUTE && listType != D3D12_COMMAND_LIST_TYPE_DIRECT) ||
-        !supplied.enter || !supplied.leave || !supplied.reset || !supplied.mutation || !supplied.barrier ||
-        !supplied.submit || !supplied.signal || !supplied.wait)
+        !supplied.enter || !supplied.leave || !supplied.reset || !supplied.mutation || !supplied.submit ||
+        !supplied.signal || !supplied.wait)
         return false;
     ComPtr<ID3D12Device> device;
     if (FAILED(command->GetDevice(IID_PPV_ARGS(&device))))
         return false;
     auto table = *reinterpret_cast<void***>(command);
-    constexpr unsigned slots[] = { 9, 10, 11, 25, 26, 28, 29, 31, 33, 35, 37, 39, 41, 55, 59 };
+    constexpr unsigned slots[] = { 9, 10, 11, 25, 28, 29, 31, 33, 35, 37, 39, 41, 55, 59 };
     for (auto slot : slots)
         commandTargets[slot] = table[slot];
     methods = ComputeRecording::BaseMethods;
@@ -338,7 +333,7 @@ static bool installLocked(Command* command, const D3D12Callbacks& supplied)
     if (FAILED(direct->Close()))
         return false;
     const auto directTable = *reinterpret_cast<void***>(direct.Get());
-    if (directTable[10] != table[10] || directTable[26] != table[26])
+    if (directTable[10] != table[10])
         return false;
     D3D12_COMMAND_QUEUE_DESC desc {};
     desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -357,8 +352,8 @@ static bool installLocked(Command* command, const D3D12Callbacks& supplied)
         return false;
     callbacks = supplied; // Complete callbacks are visible before any hook runs.
     bool okay = attach(originalReset, table[10], reset) && attach(originalClose, table[9], close) &&
-                attach(originalBarrier, table[26], barrier) && attach(originalSubmit, queues[10], submit) &&
-                attach(originalSignal, queues[14], signal) && attach(originalWait, queues[15], wait);
+                attach(originalSubmit, queues[10], submit) && attach(originalSignal, queues[14], signal) &&
+                attach(originalWait, queues[15], wait);
 #define GLASS_ATTACH(Name, Slot) okay = attach(original##Name, commandTargets[Slot], hook##Name) && okay
     GLASS_ATTACH(ClearState, 11);
     GLASS_ATTACH(SetPipelineState, 25);

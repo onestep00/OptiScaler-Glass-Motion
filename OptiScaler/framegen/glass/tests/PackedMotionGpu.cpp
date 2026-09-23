@@ -336,6 +336,9 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
 
         GlassFg::Controls controls { true, 50, false, 2 };
         controls.packedRows = partialRows;
+        // Staging ladder configuration: with the FG input swap off the copy is
+        // row-limited too (the product default swaps and copies whole frames).
+        controls.packedSubstitute = false;
         // Deterministic release-gate check: the queue is blocked on a fence the
         // CPU owns, so the submitted compose provably cannot have completed.
         ComPtr<ID3D12Fence> gate;
@@ -746,6 +749,12 @@ int wmain(int argc, wchar_t** argv)
             destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             command->CopyTextureRegion(&destinationLocation, 0, 0, 0, &source, nullptr);
         }
+        // The frame declares reverse depth (DLSSG.DepthInverted): larger is
+        // nearer. Object 1 (.8) lies in front of the engine surface (.6);
+        // object 2 (.3) lies behind it, so the engine's own opaque surface is
+        // the visible one there and the compose must leave it untouched. The
+        // record's comparator stamp only decodes the depth key.
+        GlassFg::SetFrameDepthInverted(1u);
         std::vector<UINT64> packedData(Width * Height);
         for (unsigned y = 4; y < 16; ++y)
             for (unsigned x = 4; x < 16; ++x)
@@ -768,12 +777,9 @@ int wmain(int argc, wchar_t** argv)
         GlassFg::PackedMotionGpu gpu;
         require(gpu.initialize(device.Get(), motion->GetDesc(), depth->GetDesc(), argv[1], stdout), "initialize");
         GlassFg::PackedMotionFrame frame { packed.Get(), Width, Height, 1 };
-        // Two dispatches with different declared jitter. The first seeds the
-        // predecessor pair (conversion is zero for that frame); the second
-        // removes (current - previous) = (1, 0) px, so every delivered object
-        // pixel carries the measured convention conversion plus the object
-        // motion. This is the offline A/B that separates the delivered field
-        // from the uncorrected one.
+        // Two dispatches with different declared jitter (1 px change). In
+        // jitter mode 0 the compose applies no conversion term, so the second
+        // dispatch must deliver the recorded object motion unchanged (C7).
         require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
                              .5f, .5f, { true, 50, false, 2 }), "seed dispatch");
@@ -831,14 +837,15 @@ int wmain(int argc, wchar_t** argv)
         };
         require(motionAt(1, 1, 0) == background[0] && depthAt(1, 1) == backgroundDepth &&
                 selectionAt(1, 1) == 0, "background changed");
-        // The convention term adds (1 px / 32 px) = .03125 to x on this frame.
-        require(std::abs(motionAt(4, 8, 0) - .09375f) < .001f &&
+        // Jitter mode 0 (C7 default): the declared jitter change between the two
+        // dispatches adds no term, so the object motion is delivered as recorded.
+        require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f &&
                 std::abs(motionAt(4, 8, 1) + .05f) < .001f && std::abs(depthAt(4, 8) - .8f) < .001f &&
                 selectionAt(4, 8) > .99f, "reverse-depth edge mismatch");
         // Interior at or above the opacity threshold (the dispatch passes 50%):
         // the object's own motion and depth replace the engine's value exactly.
         // No blend is applied, so the value equals the boundary value.
-        require(std::abs(motionAt(10, 10, 0) - .09375f) < .001f &&
+        require(std::abs(motionAt(10, 10, 0) - .0625f) < .001f &&
                 std::abs(motionAt(10, 10, 1) + .05f) < .001f && std::abs(depthAt(10, 10) - .8f) < .001f &&
                 selectionAt(10, 10) > .99f,
                 "interior above the threshold did not take the object motion");
@@ -851,8 +858,11 @@ int wmain(int argc, wchar_t** argv)
                     DirectX::PackedVector::XMConvertFloatToHalf(background[1])) &&
                 depthAt(24, 10) == backgroundDepth && selectionAt(24, 10) == 0,
                 "interior below the threshold changed");
-        require(std::abs(motionAt(20, 9, 0) + .0625f) < .001f &&
-                std::abs(depthAt(20, 9) - .3f) < .001f, "forward-depth edge mismatch");
+        // Object 2 sits behind the engine's surface in the frame's convention:
+        // even its boundary keeps the engine's motion, depth and selection.
+        require(motionAt(20, 9, 0) == background[0] && depthAt(20, 9) == backgroundDepth &&
+                    selectionAt(20, 9) == 0,
+                "engine-nearer record was not occluded");
         for (unsigned y = 0; y < Height; ++y)
             for (unsigned x = 0; x < Width; ++x)
             {
@@ -868,7 +878,7 @@ int wmain(int argc, wchar_t** argv)
         for (auto& read : reads) read->Unmap(0, nullptr);
         gpu.releaseAfterGpuDrain();
         std::puts("PACKED_MOTION_GPU_OK background_preserved=1 exact_inner_edge=1 threshold_interior=1 "
-                  "forward_depth=1 reverse_depth=1 jitter_convention=1 passes=1");
+                  "reverse_depth=1 engine_nearer_occluded=1 jitter_mode0=1 passes=1");
         return 0;
     }
     catch (const std::exception& error)

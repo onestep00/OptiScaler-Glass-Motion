@@ -416,7 +416,6 @@ D3D12Callbacks makeCallbacks()
     };
     value.mutation = [](void* p, ID3D12GraphicsCommandList* c)
     { static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onStateMutation(c); }); };
-    value.barrier = [](void*, ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*) {};
     value.beforeSubmit = [](void* p, ID3D12CommandQueue* q, UINT count, ID3D12CommandList* const* lists)
     {
         auto& r = *static_cast<Runtime*>(p);

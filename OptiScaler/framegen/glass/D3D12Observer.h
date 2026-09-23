@@ -13,7 +13,6 @@ struct D3D12Callbacks
     bool (*stateTracked)(void*, ID3D12GraphicsCommandList*) = nullptr;
     void (*reset)(void*, ID3D12GraphicsCommandList*, bool, ID3D12PipelineState*) = nullptr;
     void (*mutation)(void*, ID3D12GraphicsCommandList*) = nullptr;
-    void (*barrier)(void*, ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*) = nullptr;
     void (*submit)(void*, ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) = nullptr;
     void (*signal)(void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) = nullptr;
     void (*wait)(void*, ID3D12CommandQueue*, ID3D12Fence*, UINT64) = nullptr;
