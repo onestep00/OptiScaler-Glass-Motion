@@ -605,6 +605,23 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             }
             if (arrayDraw)
             {
+                // Gate-trace evidence for the engine's array convention: which
+                // draws of a graft pipeline arrive with more than one instance
+                // or a non-single span, and whether their depth test is on.
+                if (gate && log && gateDetailLines < GateDetailLimit)
+                {
+                    ++gateDetailLines;
+                    const bool depthTest = pipeline->description.DepthStencilState.DepthEnable != 0;
+                    const bool blended = pipeline->description.BlendState.RenderTarget[0].BlendEnable != 0;
+                    std::fprintf(log, "GATE_DETAIL reason=array chunk=%u instances=%u spans=%zu depth=%d blend=%d frame=%u",
+                                 draw.chunk, args.instances, draw.objects.size(), depthTest ? 1 : 0, blended ? 1 : 0,
+                                 frameNumber);
+                    for (const auto& span : draw.objects)
+                        std::fprintf(log, " [first=%u count=%u id=%d parent=%d]", span.first, span.count,
+                                     span.identity ? 1 : 0, span.parent ? 1 : 0);
+                    std::fputc('\n', log);
+                    std::fflush(log);
+                }
                 if (!pipeline->packedHistory)
                 {
                     NoteGeometryGraft(GraftArrayRejected);
