@@ -1476,38 +1476,6 @@ void WarmPackedShaderOnce() noexcept
     }
 }
 
-namespace
-{
-// Frame generation identity learned at runtime. Only the frame generator names
-// the DLSS-G parameter set, so a handle observed with those names stays the
-// generator even when a later evaluation of the same handle arrives with just
-// the shared MotionVectors/Depth alias. Bounded, lock free and purely additive:
-// an unknown handle is never treated as frame generation, so no session, GPU
-// work or parameter replacement can happen on the upscaler or Ray
-// Reconstruction, which read the same two names on their own evaluations.
-constexpr unsigned kFrameGenerationHandles = 8;
-bool frameGenerationHandle(unsigned id, bool learn) noexcept
-{
-    static std::atomic<unsigned> handles[kFrameGenerationHandles] {};
-    static std::atomic<unsigned> count { 0 };
-    if (id == 0)
-        return false;
-    const auto used = (std::min)(count.load(std::memory_order_acquire), kFrameGenerationHandles);
-    for (unsigned i = 0; i < used; ++i)
-        if (handles[i].load(std::memory_order_relaxed) == id)
-            return true;
-    if (!learn)
-        return false;
-    const auto slot = count.fetch_add(1, std::memory_order_acq_rel);
-    if (slot < kFrameGenerationHandles)
-    {
-        handles[slot].store(id, std::memory_order_release);
-        return true;
-    }
-    return false;
-}
-} // namespace
-
 NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
                                   NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
                                   NativeEvaluate original, bool providerFrameGeneration, bool dlssgProviderModule,
@@ -1645,28 +1613,25 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                 inputs.scaleY = scale.y;
             }
         }
-        // Frame generation identity gate. The correction may only run on an
-        // evaluation that carries the DLSS-G parameter set, or on a handle that
-        // was already observed as the generator, or on an evaluation the
-        // DLSS-G provider hook proved belongs to a handle the provider created
-        // for NVSDK_NGX_Feature_FrameGeneration. Every other evaluation is the
-        // upscaler or Ray Reconstruction reading the shared MotionVectors/Depth
-        // names, and is passed straight through: no session, no GPU work and no
-        // parameter replacement of any kind.
-        // A driver-level evaluation whose parameter table carries no DLSSG.* key
-        // can still be the generator: when the dedicated provider module is not
-        // loaded, Streamline's frame generation plugin evaluates through the
-        // generic NGX core and its handle can predate this hook. The calling
-        // module is then the identity, and it is the same class of proof the
-        // provider hook gives: neither the upscaler nor Ray Reconstruction is
-        // evaluated from the frame generation plugin.
-        const bool callerIdentity = frameGenerationCaller && !inputs.frameGeneration;
-        const bool providerIdentity = (providerFrameGeneration || callerIdentity) && !inputs.frameGeneration;
-        // The identity the table itself carries. A frame generation evaluation
-        // that names the textures MotionVectors/Depth still publishes at least
-        // one DLSSG.* key, and no upscaler or Ray Reconstruction table does, so
-        // this is admitted and also teaches the handle for the rest of the
-        // session (the branch below registers it like any other generator).
+        // Frame generation identity gate (C9). Only a proof about this handle
+        // admits the evaluation:
+        // - providerFrameGeneration: OptiScaler's own NGX seam checked the
+        //   feature id of the handle the game created, or the provider's create
+        //   hook registered this handle pointer for
+        //   NVSDK_NGX_Feature_FrameGeneration (ProviderConfirmsFrameGeneration);
+        // - callerIdentity: the calling module is the frame generation plugin,
+        //   which never evaluates the upscaler or Ray Reconstruction.
+        // The parameter table is not an identity. Streamline shares one block
+        // between the upscaler, Ray Reconstruction and frame generation, so once
+        // the generator has run the DLSSG.* keys are present in the other two
+        // features' evaluations as well, and the native feature handles all
+        // carry id 1. Admitting by table keys and by learned ids let the native
+        // upscaler and Ray Reconstruction evaluations through in the 2026-09-23
+        // session (pid 50008: about 80,775 of 113,619 admitted evaluations),
+        // which then prepared a session and read the composed motion and depth.
+        const bool callerIdentity = frameGenerationCaller;
+        const bool providerIdentity = providerFrameGeneration || callerIdentity;
+        // Diagnostic only: whether the table names DLSS-G keys.
         static std::atomic<unsigned> tableIdentityLogged { 0 };
         if (dlssgProviderModule && tableIdentityLogged.fetch_add(1, std::memory_order_relaxed) < 6)
         {
@@ -1678,26 +1643,23 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             }
             if (r.log)
             {
-                std::fprintf(r.log, "GLASS_FG_TABLE handle=%u mask=%x identity=%u key=%s\n",
+                std::fprintf(r.log, "GLASS_FG_TABLE handle=%u mask=%x table=%u key=%s proven=%u\n",
                              handle != nullptr ? handle->Id : 0u, inputs.identityMask ? inputs.identityMask : 0u,
-                             inputs.frameGeneration ? 1u : 0u, inputs.motionKey != nullptr ? inputs.motionKey : "-");
+                             inputs.frameGeneration ? 1u : 0u, inputs.motionKey != nullptr ? inputs.motionKey : "-",
+                             providerIdentity ? 1u : 0u);
                 std::fflush(r.log);
             }
         }
-        if (inputs.frameGeneration)
-        {
-            frameGenerationHandle(handle != nullptr ? handle->Id : 0u, true);
-        }
-        else if (!frameGenerationHandle(handle != nullptr ? handle->Id : 0u, false) && !providerIdentity)
+        if (!providerIdentity)
         {
             {
                 std::lock_guard lock(r.mutex);
-                ++r.evaluationsByPath[1];
+                ++r.evaluationsByPath[pathIndex];
                 ++r.nonFrameGenerationEvaluations;
                 if (dlssgProviderModule)
                     ++r.providerUnconfirmedEvaluations;
                 static std::atomic<unsigned> gateLogged { 0 };
-                if (gateLogged.fetch_add(1, std::memory_order_relaxed) < 4)
+                if (gateLogged.fetch_add(1, std::memory_order_relaxed) < 8)
                 {
                     if (!r.logAttempted)
                     {
@@ -1707,10 +1669,12 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                     if (r.log)
                     {
                         std::fprintf(r.log,
-                                     "NATIVE_FG_GATE skip handle=%u motionKey=%s provider=%u mask=%x evaluations=%llu\n",
-                                     handle != nullptr ? handle->Id : 0u,
+                                     "NATIVE_FG_GATE skip handle=%u ptr=%p motionKey=%s provider=%u caller=%u "
+                                     "table=%u mask=%x evaluations=%llu\n",
+                                     handle != nullptr ? handle->Id : 0u, static_cast<const void*>(handle),
                                      inputs.motionKey != nullptr ? inputs.motionKey : "-",
-                                     providerFrameGeneration ? 1u : 0u,
+                                     providerFrameGeneration ? 1u : 0u, frameGenerationCaller ? 1u : 0u,
+                                     inputs.frameGeneration ? 1u : 0u,
                                      inputs.identityMask ? inputs.identityMask : 0u,
                                      static_cast<unsigned long long>(r.nonFrameGenerationEvaluations));
                         std::fflush(r.log);
@@ -1719,15 +1683,12 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             }
             return original(command, handle, parameters, callback);
         }
+        // A proven handle is remembered by pointer, so an evaluation of the
+        // same handle that reaches the provider hook without the seam's
+        // feature check is recognised there; both release paths forget it.
+        RememberFrameGenerationHandle(static_cast<const void*>(handle), handle != nullptr ? handle->Id : 0u);
         frameGenerationEvaluation = true;
-        if (providerIdentity)
         {
-            // The provider hook only wraps DLSS-G providers, and it reports the
-            // handles those providers created for the frame generation feature.
-            // The driver-level table names only MotionVectors/Depth, so this is
-            // the identity the gate has to use; it is also what keeps the
-            // correction off every upscaler and Ray Reconstruction handle,
-            // which never register there.
             std::lock_guard lock(r.mutex);
             ++r.providerConfirmedEvaluations;
             if (callerIdentity)
@@ -2077,8 +2038,9 @@ void RetireNativeFG(const NVSDK_NGX_Handle* handle)
         r.retire();
     // Only a released frame generation feature ends an output dump; the
     // upscaler and Ray Reconstruction are released through the same call.
-    if (handle != nullptr && frameGenerationHandle(handle->Id, false))
+    if (handle != nullptr && ProviderConfirmsFrameGeneration(static_cast<const void*>(handle), false))
         RetireFgOutputDump(fgDumpLog);
+    ForgetRememberedFrameGenerationHandle(static_cast<const void*>(handle), handle != nullptr ? handle->Id : 0u);
     r.reap();
 }
 void StopNativeFG()

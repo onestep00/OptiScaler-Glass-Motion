@@ -23,25 +23,25 @@ struct Inputs
     // hands to the NGX core (via _nvngx.dll) uses MotionVectors/Depth.
     const char* motionKey = "DLSSG.MVecs";
     const char* depthKey = "DLSSG.Depth";
-    // True only when the evaluation carried the DLSS-G parameter identity
-    // (DLSSG.MVecs plus the multi-frame metadata). The frame generator is the
-    // only consumer that names those keys, so this is also the gate that keeps
-    // the correction off the upscaler and Ray Reconstruction, which share the
-    // MotionVectors/Depth names on their own evaluations.
+    // True when the table carried the DLSS-G parameter set (DLSSG.MVecs plus
+    // the multi-frame metadata). Diagnostic only, never a frame generation
+    // identity: Streamline shares one parameter block between the upscaler,
+    // Ray Reconstruction and frame generation, so after the generator has run
+    // the upscaler and Ray Reconstruction tables carry the same keys
+    // (2026-09-23, pid 50008). The identity comes from the handle (see the
+    // gate in NativeHost.cpp).
     bool frameGeneration = true;
     // Native Streamline frame domain, independent of the engine render tick.
     // UINT64_MAX means absent (for example an older replay); never infer it
     // from a repeated resource address or the multipass interpolation index.
     std::uint64_t frame = UINT64_MAX;
-    // Which DLSSG.* keys the table carried. Zero on the upscaler and Ray
-    // Reconstruction tables, so a non-zero mask is the frame generation
-    // identity even when the textures are named MotionVectors/Depth.
+    // Which DLSSG.* keys the table carried. Diagnostic only, like
+    // frameGeneration above.
     unsigned identityMask = 0;
 
-    // The keys only a frame generation evaluation publishes. The upscaler and
-    // Ray Reconstruction never set any of them, so one present marker is enough
-    // to tell the generator from the other two features that share the
-    // MotionVectors/Depth texture names.
+    // The keys a frame generation evaluation publishes. Present in the
+    // upscaler and Ray Reconstruction tables too once Streamline's shared block
+    // holds them, so they name the table shape, not the feature.
     static constexpr unsigned markerCount = 12;
     static const char* const* markers() noexcept
     {
@@ -66,8 +66,8 @@ struct Inputs
         }
         return mask;
     }
-    // True when the table names at least one DLSS-G only parameter. The texture
-    // aliases alone cannot prove the identity; these keys can.
+    // True when the table names at least one DLSS-G parameter. Selects the
+    // DLSS-G read path only; not an identity.
     static bool tableNamesFrameGeneration(unsigned mask) noexcept
     {
         static constexpr unsigned strong = (1u << 0) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 9);
