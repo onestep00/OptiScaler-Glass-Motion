@@ -6,7 +6,7 @@
 - Applied: `glass-motion` branch of this fork, deployed as `dxgi.dll` through MO2. Source defaults keep the correction off.
 - Deprecated: no
 - Scope: in-world transparent surfaces of Cyberpunk 2077, HUD excluded. Only the DLSS-G (FG) evaluation receives substituted motion and depth. DLSS-SR, Ray Reconstruction and ray-traced passes read the unchanged engine textures.
-- Upstream base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` from `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`
+- Base: `7b7220bbb4994a9c8ae60cfc75a44cb67995efb8` (tags `nightly`, `v10.0.0-dev-fork-y4my4my4m-v4`), branch `dlss-neural-rendering` of the fork `y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG`, not official `optiscaler/OptiScaler`. The git remote `upstream` of this repository is that fork. The port onto official OptiScaler is described in [Port to official + wilsjo2 DLSSNR](#port-to-official--wilsjo2-dlssnr).
 
 The conditions C1–C22 are defined in the workspace file `research/objective.md`. The resume point and raw-evidence index is the workspace file `research/ACTIVE.md`. Line numbers cited below refer to the revision of that file that contains the section "통합 빌드 게임 검증 (2026-09-23 16:36~)". Related documents:
 
@@ -15,7 +15,7 @@ The conditions C1–C22 are defined in the workspace file `research/objective.md
 - Workspace `docs/glass-engine-supply-integration.md`: decision record for camera-only arrays, the opaque occlusion test and the vertex-factory rule.
 - [CompletionPlan.md](CompletionPlan.md): the plan and its 2026-09-23 status.
 
-The upstream integration is limited to explicit calls: `OptiScaler.vcxproj` imports `GlassFg.props`, `dllmain.cpp` calls `InstallNativeMotionDeclarations` at process attach, the D3D12 device hook starts the geometry host, the native FG Evaluate branch and the NGX provider hook call `NativeHost`, and the Streamline common-plugin loader calls the tag bridge. ASI loading and MFG unlock stay upstream-owned.
+Outside `framegen/glass/`, the module reaches the base fork's code only through explicit calls: `OptiScaler.vcxproj` imports `GlassFg.props`, `dllmain.cpp` calls `InstallNativeMotionDeclarations` at process attach, the D3D12 device hook starts the geometry host, the native FG Evaluate branch and the NGX provider hook call `NativeHost`, the `nvngx_dlssg.dll` load branch installs that provider hook, the Streamline common-plugin loader calls the tag bridge, the menu draws the Glass settings, and the fork's DLSS-NR pass takes the composed guides when `NrMotion` is on. [Port to official + wilsjo2 DLSSNR](#port-to-official--wilsjo2-dlssnr) lists the nine seams. ASI loading and the MFG unlock are neither Glass code nor official OptiScaler code: `version.dll` loads `plugins/mfg-unlock.asi`, and the base fork carries its own optional `MfgUnlock` ([MFG unlock](#mfg-unlock-not-part-of-glass)).
 
 ## Pipeline
 
@@ -204,7 +204,7 @@ The integration build ran the in-DLL declaration hook, the factory rule, the are
 - Not yet run: the full user protocol (`research/ACTIVE.md:62`); the 2026-09-19 report of railings and panes rotating individually; the quest icon under rotation beyond the A-B-A-B pan; vehicle glass, particles, smoke, holograms, liquids, destruction and procedural deformation in game (`research/requirements-and-evidence-20260923.md` §5).
 - Opaque-probe equivalence (T3) has not been run (`research/native-supply-integration-plan.md:90`).
 - C13: the compose GPU time on the integration build is `gpu_ms=0.128` with mask 1 (`research/ACTIVE.md:130`). The CPU hook cost was last measured on 2026-09-19 at 3.62 ms/frame (`research/requirements-and-evidence-20260923.md` §3). CPU+GPU total with diagnostics off, the P6 pass criterion, has not been measured.
-- The port to the official latest OptiScaler is the last stage (`research/objective.md:27`).
+- The port to official OptiScaler is the last stage (`research/objective.md:27`). It has started in the workspace tree `glass-port-source`; see [Port to official + wilsjo2 DLSSNR](#port-to-official--wilsjo2-dlssnr).
 
 ## Native FG host and session contract
 
@@ -226,9 +226,14 @@ The wrapper reads a borrowed `CommonResource` without modifying it or copying a 
 
 `NativeHost` calls `ReadStreamlineStates` once per native evaluation. When the tags are present, it takes the Streamline frame identity and the resource states from them. Phase 1 then requires fresh matching depth, motion and HUD-less tags; incomplete, mixed-frame or repeated data are rejected (`NativeHost.cpp:1703-1711`). The driver-level block, in which Streamline's FG plugin hands the textures straight to the NGX core, carries no tag state. For that block the host uses the DLSS-G input convention (`COPY_DEST`) and the engine render frame that also numbers the packed capture (`NativeHost.cpp:1713-1759`).
 
-## Existing MFG unlock
+## MFG unlock (not part of Glass)
 
-Keep the existing Ultimate ASI Loader `version.dll`, `plugins/mfg-unlock.asi` and the OptiScaler loader configuration. The module substitutes FG inputs only. It does not replace the ASI loader, patch support gates or kernels, or write multiplier options.
+The MFG unlock is not Glass code, and official OptiScaler has none. It has two possible owners:
+
+- `plugins/mfg-unlock.asi`, loaded by the Ultimate ASI Loader `version.dll` (6.0.0, shipped in the CET layer of the MO2 pack). The deployed pack uses this one. Its log `overwrite/Root/bin/x64/plugins/mfg-unlock.log` records rewritten support gates and rebuilt kernels in `nvngx_dlssg.dll` and a wrapped `slDLSSGSetOptions` for the multiplier override.
+- The base fork's `MfgUnlock` (`framegen/dlssg/MfgUnlock.cpp`, INI `[DLSSG] AdaMfgUnlock` and `AdaBlackwellKernels`). The fork applies it from its `nvngx_dlssg.dll` load branch (`hooks/LibraryLoad_Hooks.cpp:135`) and from its Streamline hooks. The deployed `OptiScaler.ini` sets `AdaMfgUnlock = false`, so this path stays idle.
+
+Keep `version.dll`, `plugins/mfg-unlock.asi` and the OptiScaler loader configuration. The module substitutes FG inputs only. It does not replace the ASI loader, patch support gates or kernels, or write multiplier options. The load branch hands the real `nvngx_dlssg.dll` back unchanged, so an unlocker can still patch it (`NvngxDlssgBridge.h:9-19`). The port leaves the unlock out of scope because it is injected through `version.dll` (user decision, `research/ACTIVE.md:203`).
 
 ## Standalone tests
 
@@ -240,11 +245,11 @@ From an x64 Visual Studio Developer PowerShell in `glass-optiscaler-source`, wit
 
 The runner builds and runs the contract executables under `artifacts/glass-tests`: packed frame selection, material blend classification, compute recording, command lifetime, tag metadata, array mapping, hook gate, motion dump format, Streamline tag bridge, GPU timer, native session queue type and release, pipeline-cache memo, the native graft packed rewrite and settings. The pipeline-cache memo needs `artifacts/glass-geometry-shader` from `tests/build_geometry_shader.ps1`. The graft rewrite needs the local catalog from `tools/export_native_grafts.py`. It runs a root graft (`4140f6d4…`, rows `7 8 7 8`) and a camera-only record (`39f8b555…`, `none none 10 11`) with their paired original PS (`tests/run-tests.ps1:91-113`). These tests check shader and host contracts on an independent device; they are not game-quality evidence.
 
-## Build and upstream updates
+## Build and fork updates
 
 Clone with submodules or run `git submodule update --init --recursive`, then build `OptiScaler.sln` in Release x64 (or use `glass-build.bat`). `GlassFg.props` copies `GlassObjectMotion.hlsl`, `dxcompiler.dll`, `dxil.dll`, the graft catalog and the declaration data into `$(TargetDir)Glass` and `x64\Release\a\Glass` (`GlassFg.props:102-139`). Deployment requires this directory beside the DLL; paths resolve from the loaded DLL, not the working directory.
 
-Development is committed on `glass-motion`. Keep `upstream` pointing to the original repository and `origin` to the user's fork:
+Development is committed on `glass-motion`. In this repository `upstream` is the y4my4my4m fork, not official OptiScaler, and `origin` is the user's repository `onestep00/OptiScaler-Glass-Motion`. Fork updates are merged like this:
 
 ```sh
 git fetch upstream
@@ -253,7 +258,56 @@ git merge upstream/dlss-neural-rendering
 git submodule update --init --recursive
 ```
 
-Review conflicts and build before pushing. Keep the single `GlassFg.props` import and the explicit integration calls. Upstream changes to native NGX inputs, command-list state handling or feature lifetime require adapter review. The original repository history, submodule pins and license remain intact.
+Review conflicts and build before pushing. Keep the single `GlassFg.props` import and the explicit integration calls. Fork changes to native NGX inputs, command-list state handling, feature lifetime, the `nvngx_dlssg.dll` load branch or the DLSS-NR pass require adapter review. The fork's history, submodule pins and license remain intact. Official OptiScaler is not merged here; the port tree follows it.
+
+## Port to official + wilsjo2 DLSSNR
+
+Plan and seam analysis: workspace `research/upstream-port-plan-20260923.md`. On 2026-09-23 the user chose official OptiScaler as the new base, with wilsjo2's DLSS-NR fork for the NR stage, and left the MFG unlock out of scope (`research/ACTIVE.md:203`). This repository and `glass-motion` stay the reference and are not rebased.
+
+The port tree is the workspace directory `glass-port-source`, branch `glass-port`:
+
+| Commit | Content |
+| --- | --- |
+| `1bd39091` | `main` of `wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass` (remote `origin`). It brings its own DLSS-NR (`shaders/dlssnr/`), an `MfgUnlock` adapted from this base (`framegen/dlssg/MfgUnlock.cpp:1`) and `AmpereMfgLoader` |
+| `74fda1a3` | merge of official `optiscaler/OptiScaler` master `6ec6681d` (remote `official`, local branch `official-master`). Conflicts resolved; Release x64 build exit 0 before the module was added (`research/ACTIVE.md:203`) |
+| `1f90a753` | DLSS-NR headers and filters registered in `OptiScaler.vcxproj` |
+| `fc645484` | the Glass module (`framegen/glass/`) and the nine seams below |
+
+The tree's remote `glass` points to this repository. `GlassFg.props` reads the graft catalog and the declaration data from `<tree>/artifacts/glass-grafts/Glass/`, so the port tree keeps its own copy of this export. On 2026-09-23 the copy was identical (`index.bin` `52e45006…`, `motion-shader-pairs.bin` `827bf29b…`).
+
+Seams outside the module, from `git diff --numstat 7b7220bbb..0e4bcc21f` without `framegen/glass/` and one CI workflow. Line numbers are this repository's at `0e4bcc21f`:
+
+| # | File (+/−) | Calls |
+| --- | --- | --- |
+| 1 | `OptiScaler.vcxproj` (+1) | `GlassFg.props` import (:868) |
+| 2 | `dllmain.cpp` (+11) | includes (:9-10); `NoteProcessAttach`, `InstallNativeMotionDeclarations` and `InstallProcessDiagnostics` at attach (:1787-1794); `NoteProcessDetach` (:2192) |
+| 3 | `hooks/D3D12_Hooks.cpp` (+13/−8) | five `o_CreateRootSignature` calls through `CreateObservedGeometryRoot` (:1955, :1967, :1977, :2079, :2098); `InitializeGeometryHost` (:2245) |
+| 4 | `inputs/NVNGX_DLSS_Dx12.cpp` (+58/−2) | `StopNativeFG` in both Shutdown paths (:377, :427); `NoteNgxCreate` and `CreatedNativeFG` (:777-819); `RetireNativeFG` (:832); `GlassUpstreamDLSSG` (:1109); `NoteNgxFeature` (:1143); native FG branch with `NativeFgScope` and `EvaluateNativeFG` (:1241-1248); replacement FG branch (:1282-1283) |
+| 5 | `hooks/LibraryLoad_Hooks.cpp` (+23) | `NoteNvngxLoad` for NGX library names (:76-85); `InstallNgxEvaluateHook` inside the fork's `nvngx_dlssg` load branch (:136-145 in :124-150) |
+| 6 | `hooks/Streamline_Hooks.cpp` (+8/−2) | `NoteStreamlineFeature` (:521), `GlassMvecScale` capture (:1054), `OnStreamlineCommonLoad` (:1080), `WrapStreamlineCommonFunction` (:1750) |
+| 7 | `hooks/Streamline_Hooks.h` (+7) | `GlassMvecScale` accessor (:143-149) |
+| 8 | `menu/menu_common.cpp` (+2) | include (:21), `RenderSettings` (:3162) |
+| 9 | `shaders/dlssnr/DlssNr_Dx12.cpp` (+48/−4), `DlssNr_Dx12.h` (+6/−1) | `SecondConsumerGuides` in `EvaluateAtSeam` (:3203-3243); `guideArrival` parameter of `Dispatch` (`DlssNr_Dx12.h:89-97`) |
+
+Seams 1–4 and 6–8 keep the same calls at the corresponding sites. The plan's drift check against official master found 1, 2, 3, 6, 7 and 8 at their anchors, 3 and 6 with an offset. Seam 4 needs manual context: in this repository the native FG branch sits in the native passthrough beside the fork's DLSS-NR pre-upscale step (`PreUpscaleNr`, `inputs/NVNGX_DLSS_Dx12.cpp:1230-1231`), and official `Shutdown1` calls `Nvngx_FG::D3D12_Shutdown1` (plan §2). Seams 5 and 9 change shape:
+
+- **5, `nvngx_dlssg.dll` load branch: adapted.** In this repository the branch belongs to the base fork. It loads the module unchanged through `NtdllProxy::LoadLibraryExW_Ldr`, calls `MfgUnlock::TryApply()` and installs the Glass evaluate detour. The detour is needed because `sl.dlss_g.dll` calls the provider's `NVSDK_NGX_D3D12_EvaluateFeature` directly, past the NGX proxy (`NvngxDlssgBridge.h:9-19`). Official master has no such branch and no `MfgUnlock` (plan §2 item 5). wilsjo2 enters its own branch only while `MfgUnlock::Pending()` (`glass-port-source` `hooks/LibraryLoad_Hooks.cpp:121-128` at `1f90a753`). On `glass-port` the branch runs for every `nvngx_dlssg.dll` load: it loads the module unchanged, calls `MfgUnlock::TryApply` only while the unlock is pending, and always installs the detour and records it with `NoteNvngxLoad` (`hooks/LibraryLoad_Hooks.cpp:134-158` at `fc645484`). The detour no longer depends on the unlock. wilsjo2's external-FG early return stays: with `[FrameGen] External=true` or `[DLSSG] AmpereMfgUnlock=true` it leaves `sl.*`, OTA FG and `nvngx_dlssg.dll` loads to the game or the external unlocker (`hooks/LibraryLoad_Hooks.cpp:61-69`, `dllmain.cpp:1881-1882` at `fc645484`). In that mode the provider is hooked after it has loaded, by `InstallLoadedNgxHooks` on the one-second health poll, for at most 1200 attempts (`NvngxDlssgBridge.cpp:392-408`, `GeometryHost.cpp:38`, `:146`).
+- **9, DLSS-NR second consumer: re-homed.** In this repository the base fork's `EvaluateAtSeam` is the only caller of `GlassFg::SecondConsumerGuides`. It passes the composed pair to `Dispatch` together with the state the pair rests in, `COPY_DEST` (`shaders/dlssnr/DlssNr_Dx12.cpp:3239`). Without this seam `NrMotion` has no effect. The plan dropped the seam because official master has no DLSS-NR (plan §2 item 9). `glass-port` carries wilsjo2's DLSS-NR, so the call moves into wilsjo2's `EvaluateInternal` instead (`glass-port-source` `shaders/dlssnr/DlssNr_Dx12.cpp:3562-3611` at `fc645484`). There is no `guideArrival` parameter there: wilsjo2's `ReadableGuide` expects the guides in `NON_PIXEL_SHADER_RESOURCE` (same file, :1263-1300). The re-homed call therefore runs inside the pass's `ScopedNrStateEnvelope` and moves the composed pair from `COPY_DEST` to `NON_PIXEL_SHADER_RESOURCE` around `Dispatch` and back.
+
+Status on 2026-09-23: the module and all nine seams are committed on `glass-port` as `fc645484`. Its Release x64 build (exit 0) produced `x64\Release\a\OptiScaler.dll` (SHA-256 `a950768d…`) with the `Glass/` payload: 867 grafts plus `index.bin`, the declaration data, `GlassObjectMotion.hlsl`, `dxcompiler.dll` and `dxil.dll`. The port has not been deployed or checked in game. The acceptance check is plan §3 step 6: `DECL hook=1` with `status=installed`, `GRAFT ready>0 catalog=641`, rising `fg_evals`, SR and RR passing through unchanged (`engine_writes=0`) on Streamline 2.14.0, and dumps compared with the `glass-motion` DLL. Plan §4 lists the open risks: the FG providers official master adds (re-validate the provider gate in `NativeHost` and the replacement-branch seam; OptiFG, FSR-FG and XeFG through `FGInput::Upscaler` are not substituted), the Streamline 2.14.0/2.14.1 `CommonResource` offsets, and every `o_CreateRootSignature` call site.
+
+To update the port tree, merge a pinned official commit, not a moving `official/master` (plan §4):
+
+```sh
+git fetch origin
+git fetch official
+git switch glass-port
+git merge origin/main
+git merge <pinned official commit>
+git submodule update --init --recursive
+```
+
+Then recheck the nine seams and build.
 
 ## Code from earlier stages still in the tree
 

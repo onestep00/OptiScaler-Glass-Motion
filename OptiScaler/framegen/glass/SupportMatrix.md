@@ -89,7 +89,24 @@ Material names come from `glass-native-material-v1/all-cache-techniques.json` (t
 | world UI (`ui_panel`, `ui_text_element`, `ui_default_*`) | 2 | 0 | 2 c1 | 0 |
 | `cloak*`, `optical_camouflage` | 62 | 36 (9 c1, 27 c2) | 26 (24 c1, 2 c2) | 0 |
 | `hair*`, `eye_shadow*`, `blackwall_blendable_eye_wet` | 38 | 34 (12 c1, 22 c2) | 4 c2 | 0 |
-| screen effects (`screen_*`, `*screen_glitch`, `world_to_screen_glitch`, `cybermask*`) | 56 | 12 (4 c1, 8 c2) | 41 (28 c1, 13 c2) | 3 (screen space) |
+| screen effects (`screen_*`, `*screen_glitch`, `world_to_screen_glitch`, `cybermask*`) | 56 | 12 (4 c1, 8 c2) | 41 (28 c1, 13 c2) | 3 (screen space, clip from the b1[48] viewport terms: ParticleScreen `42531526` and `91800aa3`, Fullscreen `d4cb2318`) |
+
+### Selected materials
+
+Single materials checked on 2026-09-23 for signs, screens, rain, water, neon and windows. They are counted the same way as the family rows: transparency-route VS from `all-cache-techniques.json`, route and supply class from the exported `index.bin`. The rows overlap the family rows. The screen-glitch materials are in the "screen effects" row above.
+
+| Material | VS | Root graft | Camera-only | Unsupported | Passes and VS |
+| --- | --- | --- | --- | --- | --- |
+| `signages_transparent_no_txaa` | 15 | 15 (3 c1, 12 c2) | 0 | 0 | screen pass `transparent_notxaa` (also `highlights`): MeshStatic `1ddcba6f` (c1) and four skinned or garment VS (c2). The other 10 VS draw only in the shadow cascade pass (`cascade_regular`) |
+| `parallaxscreen_transparent`, `parallaxscreen_transparent_ui`, `parallaxscreen_transparent_ui_txaa` | 14 | 14 (6 c1, 8 c2) | 0 | 0 | screen passes `transparent` and `transparent_notxaa`: MeshStatic `de5e58b4`, DrawBuffer `b03bdede` and Debug `a3aef0a0` (c1), four skinned VS (c2). The other 7 VS draw only in the `highlights` pass |
+| `holographic_waterfall` | 1 | 1 c1 | 0 | 0 | `transparent`: MeshStatic `bcab12b3`. Also counted in the hologram row |
+| `rain`, `distant_rain` | 9 | 0 | 9 c1 | 0 | `transparent`: MeshStatic 5 (`distant_rain` is `8bad3bdb`), MeshDestructible 4 |
+| `glass_window_rain` | 1 | 1 c1 | 0 | 0 | `transparent`, `distortion`, `transparent_mark_rt`: MeshStatic `95e12825`. Also counted in the `glass_blendable` row |
+| `global_water_patch` | 3 | 0 | 3 c1 | 0 | `transparent`, `distortion`, `transparent_mark_rt`: MeshStatic `21b0543f`; `screen_space_water_depth`: `46aa4872`, `ccea6dab` |
+| `neon_tubes`, `neon_parallax` (opaque) | 0 of 14 | — | — | — | `gbuffer_regular`, `gbuffer_velbuff_regular`, `highlights`; `neon_parallax` also `cascade_regular` |
+| `window_parallax_interior`, `window_parallax_interior_proxy`, `window_parallax_interior_proxy_buffer`, `window_very_long_distance`, `window_interior_uv` (opaque) | 0 of 72 | — | — | — | `gbuffer_regular` and `cascade_regular`; `gbuffer_velbuff_regular` for the first two; `depth` and wireframe passes for `window_interior_uv` |
+
+No technique of the opaque rows takes a transparency route, and none of their VS is in `native-grafted/index.json`. They need no record: their pixels keep the engine MV and depth. The large club windows are such opaque `window` materials (`research/ACTIVE.md:201`). Twelve of the 15 signage VS and eight of the 14 parallax-screen VS are skinned class 2 and stay off with the default `GraftClassMask` 1. The MeshStatic signs and screens are class 1. The rain and `global_water_patch` records carry camera motion only (see [Runtime limits](#runtime-limits-that-apply-to-every-family)).
 
 ## Observed in game
 
