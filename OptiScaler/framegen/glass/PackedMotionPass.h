@@ -356,6 +356,9 @@ class PackedMotionPass
     }
     // Release gate used by the host before the session resources are freed.
     bool drained() { return gpu.drained(); }
+    // The session proved that no list it composed on or served inline can
+    // execute anymore.
+    void retireInline() { gpu.retireInline(); }
     bool composeInFlight() const { return gpu.composeInFlight(); }
     std::uint64_t composeSubmitted() const { return gpu.composeSubmitted(); }
     std::uint64_t composeCompleted() const { return gpu.composeCompleted(); }
