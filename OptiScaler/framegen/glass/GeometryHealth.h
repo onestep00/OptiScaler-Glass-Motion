@@ -195,6 +195,8 @@ enum GeometryGraftCounter : unsigned
     // root previous transform would be applied to independently moving
     // elements; the draw keeps the engine's motion instead.
     GraftArrayRejected,
+    // Diagnostic graftarray=on: array/multi-instance draws that kept the graft.
+    GraftArrayDraws,
     GraftDraws,
     NativePreviousEvaluations,
     GraftCounterCount

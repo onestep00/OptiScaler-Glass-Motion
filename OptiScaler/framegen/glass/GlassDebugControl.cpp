@@ -105,6 +105,8 @@ void writeStatus(std::ofstream& file)
          << " rejected=" << ReadGeometryGraft(GraftRejected)
          << " class_disabled=" << ReadGeometryGraft(GraftClassDisabled)
          << " array_rejected=" << ReadGeometryGraft(GraftArrayRejected)
+         << " array_draws=" << ReadGeometryGraft(GraftArrayDraws)
+         << " graftarray=" << (GraftArrayProbeEnabled() ? 1 : 0)
          << " draws=" << ReadGeometryGraft(GraftDraws)
          << " fg_evals=" << ReadGeometryGraft(NativePreviousEvaluations)
          << " catalog=" << NativeGraftCount() << " classmask=" << ReadGraftClassMask()
@@ -377,6 +379,15 @@ void PollGlassDebugControl() noexcept
                 const bool enabled = line.substr(11) == "on" || line.substr(11) == "1";
                 SetVertexHistoryFallback(enabled);
                 output << "vhfallback=" << (enabled ? 1 : 0) << "\n";
+                continue;
+            }
+            if (line.rfind("graftarray=", 0) == 0)
+            {
+                // Diagnostic: apply graft pipelines to array/multi-instance
+                // draws too. Takes effect on the next prepared draw.
+                const bool enabled = line.substr(11) == "on" || line.substr(11) == "1";
+                SetGraftArrayProbe(enabled);
+                output << "graftarray=" << (enabled ? 1 : 0) << "\n";
                 continue;
             }
             if (line.rfind("graftclass=", 0) == 0)

@@ -597,6 +597,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             bool arrayDraw = args.instances != 1;
             for (const auto& span : draw.objects)
                 arrayDraw = arrayDraw || (span.count && (!span.identity || span.count != 1));
+            if (arrayDraw && GraftArrayProbeEnabled())
+            {
+                // Diagnostic: keep the graft on the array draw and count it.
+                NoteGeometryGraft(GraftArrayDraws);
+                arrayDraw = false;
+            }
             if (arrayDraw)
             {
                 if (!pipeline->packedHistory)
@@ -701,7 +707,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 // Second half of the graft gate: an identity the resolver
                 // placed in an array lifetime is an array element even when
                 // the span looked single.
-                if (graftDraw && key.arrayGeneration)
+                if (graftDraw && key.arrayGeneration && !GraftArrayProbeEnabled())
                 {
                     NoteGeometryGraft(GraftArrayRejected);
                     continue;
