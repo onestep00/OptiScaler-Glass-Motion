@@ -26,6 +26,7 @@ enum class GeometryGraftKind : std::uint8_t
 };
 // Lower-case log name: pending, vertex_only, missing, refused, class_disabled,
 // rejected, camera_only, root, root_noarray.
+const char* GeometryGraftKindName(GeometryGraftKind kind) noexcept;
 
 struct GeometryPipelineEntry
 {
