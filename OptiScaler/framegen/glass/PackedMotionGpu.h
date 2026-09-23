@@ -1550,6 +1550,10 @@ class PackedMotionGpu
             // without the live status snapshot.
             std::fprintf(file, "stripes=%u stripe_skip=%u debug_mode=%u\n",
                          (lastDebugMode & 32u) ? 1u : 0u, value[14], lastDebugMode);
+            // Opaque occlusion (slot 15, byte 60): selected pixels whose engine
+            // depth is nearer than the object's record; they keep the engine's
+            // motion and depth. Diagnostic bit 6 disables the test.
+            std::fprintf(file, "occluded=%u\n", value[15]);
         }
         if (packedMotionPixels)
             std::fprintf(file,

@@ -250,6 +250,25 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     // so a capture names the route it measured: depth_sub is the applied count
     // while the bit is off, and zero while it is on.
     const bool keepDepth = (DebugMode & 16u) != 0;
+    // Opaque occlusion (C8 extended to the engine's own surfaces). The engine's
+    // depth is the nearest opaque surface at this pixel. A transparent record
+    // whose surface lies behind it was rasterized behind an opaque object that
+    // the engine drew later in frame order (skinned characters render after
+    // the transparent pass in the observed scene: 2026-09-23 champagne table,
+    // NPC arm in front of the glasses received the glass motion). The visible
+    // surface is the opaque one, so the pixel keeps the engine's motion and
+    // depth byte for byte. Four record quanta of tolerance keep a surface that
+    // wrote its own depth from rejecting itself. Counter slot 15.
+    const float occlusionEps = 4.0 / 131071.0;
+    const bool engineNearer = reverseDepth ? (originalDepth > objectDepth + occlusionEps)
+                                           : (originalDepth < objectDepth - occlusionEps);
+    if (engineNearer && (DebugMode & 64u) == 0u)
+    {
+        if (count)
+            Counters.InterlockedAdd(60u, 1u, ignored);
+        Selection[pixel] = 0.0;
+        return;
+    }
     if (count && !keepDepth)
         Counters.InterlockedAdd(52u, 1u, ignored);
     Motion[pixel] = float4(objectMotion, originalMotion.z, originalMotion.w);
