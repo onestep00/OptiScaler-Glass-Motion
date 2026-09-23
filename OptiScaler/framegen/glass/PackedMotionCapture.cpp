@@ -1090,9 +1090,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     // Between two batches of this draw another thread moved the
                     // slot to a newer frame, which voids the reservation, or
                     // began the next frame, which ends admission for the rest.
-                    ++counters.orderingRejected;
-                    refusal = GatePrepareOrdering;
+                    // A draw that keeps its reservation is a partial capture,
+                    // not an ordering refusal.
                     reserved = reserved && frameSlot->serial == slotSerial;
+                    if (!reserved)
+                        ++counters.orderingRejected;
+                    refusal = GatePrepareOrdering;
                     break;
                 }
                 else if (!reserved && !fits(*frameSlot, args.instances))
@@ -1268,9 +1271,11 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             return false;
         }
         // Admission ended early (the next frame began between two batches):
-        // the admitted part stands and the rest keeps the engine's motion.
-        if (refusal != GateStageCount)
-            refuse(gate, pipeline.get(), refusal);
+        // the admitted part stands and the rest keeps the engine's motion. The
+        // draw counts as a capture, so it goes to `partial`, which the coverage
+        // report does not take off the eligible draws, never to `ordering`.
+        if (refusal != GateStageCount && gate)
+            pipeline->coverage.gates[GeometryPipelineEntry::GatePartial].fetch_add(1, std::memory_order_relaxed);
         if (historyFree)
             NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
         if (gate)
