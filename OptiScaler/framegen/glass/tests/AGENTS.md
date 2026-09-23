@@ -14,7 +14,7 @@
 - ComputeRecording.cpp checks missing observer coverage, stale Reset tickets and interleaved state rejection. It does not install hooks or prove live observer coverage.
 - NativeSession.cpp runs synthetic inputs on independent DIRECT/COMPUTE queues. It checks rejected admission and unsubmitted/in-flight retirement, not glass quality. Its artificial GPU gate and CPU drains are test-only.
 - TaggedInputs.cpp checks fresh phase admission and stale/mixed metadata rejection. StreamlineTagBridge.cpp tests the production registration/forwarding code with a mock parameter registry and independent D3D12 textures. It does not attach to or initialize the game's Streamline plugin.
-- NativeGraftPacked.cpp checks the catalog lookup and the packed native-graft VS/PS rewrite (no history resources, linked graft rows, no jitter term) through DXC assembly and validation on one exported graft. Offline; no device, PSO or game.
+- NativeGraftPacked.cpp checks the catalog lookup and the packed native-graft VS/PS rewrite (no history resources, linked graft rows, no jitter term) through DXC assembly and validation on one exported graft and its camera-only array variant (root reads b7[24..26]; camera variant reads no b7[24..26] and the native previous camera rows). Offline; no device, PSO or game.
 
 - CommandLifetime.cpp verifies official destruction notifications on an independent device. ObservedSession.h drives the NativeSession tests through real production D3D12 hooks; it recognizes an explicit fixture surface, not a game signature.
 

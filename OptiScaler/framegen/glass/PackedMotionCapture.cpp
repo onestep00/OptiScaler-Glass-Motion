@@ -585,24 +585,23 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         }
         // Graft variant gate. The engine evaluates the MotionMatrix supply once
         // per draw proxy and its array append copies every element's transform
-        // without a per-element evaluation (EngineMotionSupply.md), so a grafted
-        // VS would move every element of an array/grouped span, and every
+        // without a per-element evaluation (EngineMotionSupply.md), so the root
+        // graft would move every element of an array/grouped span, and every
         // instance of a multi-instance draw, by the root's previous transform.
-        // Such a draw takes the vertex-history variant when one was compiled
-        // under VertexHistoryFallback, otherwise it keeps the engine's motion.
+        // Such a draw takes the camera-only graft variant (packedArray): the
+        // engine's own velocity for array elements is the previous
+        // view-projection applied to each element's current world position.
+        // Without it the draw takes the vertex-history variant when one was
+        // compiled under VertexHistoryFallback, otherwise it keeps the engine's
+        // motion.
         ID3D12PipelineState* packedPipeline = pipeline->packed.Get();
         bool graftDraw = pipeline->nativeGraft;
+        bool graftArrayDraw = false;
         if (graftDraw)
         {
             bool arrayDraw = args.instances != 1;
             for (const auto& span : draw.objects)
                 arrayDraw = arrayDraw || (span.count && (!span.identity || span.count != 1));
-            if (arrayDraw && GraftArrayProbeEnabled())
-            {
-                // Diagnostic: keep the graft on the array draw and count it.
-                NoteGeometryGraft(GraftArrayDraws);
-                arrayDraw = false;
-            }
             if (arrayDraw)
             {
                 // Gate-trace evidence for the engine's array convention: which
@@ -622,12 +621,18 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     std::fputc('\n', log);
                     std::fflush(log);
                 }
-                if (!pipeline->packedHistory)
+                if (pipeline->packedArray)
+                {
+                    packedPipeline = pipeline->packedArray.Get();
+                    graftArrayDraw = true;
+                }
+                else if (pipeline->packedHistory)
+                    packedPipeline = pipeline->packedHistory.Get();
+                else
                 {
                     NoteGeometryGraft(GraftArrayRejected);
                     return false;
                 }
-                packedPipeline = pipeline->packedHistory.Get();
                 graftDraw = false;
             }
         }
@@ -723,11 +728,18 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 }
                 // Second half of the graft gate: an identity the resolver
                 // placed in an array lifetime is an array element even when
-                // the span looked single.
-                if (graftDraw && key.arrayGeneration && !GraftArrayProbeEnabled())
+                // the span looked single (one instance, so at most one element
+                // precedes this switch). It takes the camera-only variant.
+                if (graftDraw && key.arrayGeneration)
                 {
-                    NoteGeometryGraft(GraftArrayRejected);
-                    continue;
+                    if (!pipeline->packedArray)
+                    {
+                        NoteGeometryGraft(GraftArrayRejected);
+                        continue;
+                    }
+                    packedPipeline = pipeline->packedArray.Get();
+                    graftDraw = false;
+                    graftArrayDraw = true;
                 }
                 const auto allocation = objectMappings.acquire(key, vertices, frameNumber);
                 if (!allocation)
@@ -829,9 +841,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", frameNumber, draw.chunk);
             std::fflush(log);
         }
-        if (graftDraw)
+        if (graftDraw || graftArrayDraw)
         {
-            NoteGeometryGraft(GraftDraws);
+            NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
             ++frameSlot->graftDraws;
         }
         return true;

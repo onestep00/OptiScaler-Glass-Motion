@@ -1,10 +1,12 @@
 // Packed native-graft rewrite on one exported Cyberpunk graft and a paired
 // original pixel shader. Offline compiler/validator check: no device, no game.
 // Usage: NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous
+//        camera-current camera-previous
 // module-dir must contain Glass/grafts written by tools/export_native_grafts.py.
 #include "pch.h"
 #include <dxcapi.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <regex>
@@ -110,9 +112,11 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 7, "NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous");
+        require(argc == 9, "NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous "
+                           "camera-current camera-previous");
         moduleDirectory = argv[2];
         const unsigned expectedCurrent = std::stoul(argv[5]), expectedPrevious = std::stoul(argv[6]);
+        const unsigned expectedCameraCurrent = std::stoul(argv[7]), expectedCameraPrevious = std::stoul(argv[8]);
         const auto dll = LoadLibraryExW(argv[1], nullptr,
                                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         require(dll != nullptr, "Cannot load dxcompiler");
@@ -139,71 +143,121 @@ int wmain(int argc, wchar_t** argv)
         std::printf("catalog grafts=%zu hit current=%u previous=%u class=%u bytes=%zu\n", GlassFg::NativeGraftCount(),
                     graft->currentOutput, graft->previousOutput, graft->supplyClass, graft->size);
 
-        // Vertex stage in native-previous mode.
-        const GlassFg::VertexClipPair outputs { graft->currentOutput, graft->previousOutput };
-        const auto vertex = GlassFg::RewriteVertexHistory(dxc.disassemble(graft->bytes, graft->size),
-                                                          GlassFg::GeometryLayout::PerInstance, nullptr, nullptr,
-                                                          nullptr, false, false, &outputs);
-        require(bool(vertex), "Vertex rewrite failed: " + vertex.error);
-        const auto& vs = vertex.assembly;
-        require(vs.find("GlassHistory") == std::string::npos && vs.find("%glass.srv") == std::string::npos,
-                "Native VS declares or loads GlassHistory");
-        require(vs.find("GlassNext") == std::string::npos && vs.find("@dx.op.bufferStore") == std::string::npos,
-                "Native VS declares or stores GlassNext");
-        require(vs.find("GLASS_PREVIOUS") == std::string::npos && vs.find("GLASS_CAPTURE_DELTA") == std::string::npos,
-                "Native VS exports a history varying");
-        require(vs.find("!\"GlassInstances\", i32 31, i32 1,") != std::string::npos &&
-                    vs.find("!\"GlassConstants\", i32 31, i32 0,") != std::string::npos,
-                "Native VS lost GlassInstances t1 / GlassConstants b0");
-        require(vertex.missingRegister == vertex.previousRegister, "Native VS missing flag must start the rows");
-        dxc.assembleAndValidate(vs, "vertex");
-
-        // Pixel stage: packed native material pair from the linked graft rows.
-        GlassFg::NativeClipInputs inputs { graft->currentOutput, graft->previousOutput, false, true };
-        inputs.linked = vertex.nativeVaryings;
+        // Constant-buffer rows a VS loads through the handle bound to register
+        // b<binding> (space 0), from its disassembly.
+        auto loadedRows = [](const std::string& assembly, unsigned binding) {
+            std::vector<unsigned> rows;
+            const std::regex handle("(%[0-9A-Za-z_.]+) = call %dx.types.Handle @dx.op.createHandle\\(i32 57, i8 2, "
+                                    "i32 \\d+, i32 " + std::to_string(binding) + ", i1 false\\)");
+            for (std::sregex_iterator it(assembly.begin(), assembly.end(), handle), end; it != end; ++it)
+            {
+                const std::regex load("@dx.op.cbufferLoadLegacy.\\w+\\(i32 59, %dx.types.Handle " + (*it)[1].str() +
+                                      ", i32 (\\d+)\\)");
+                for (std::sregex_iterator row(assembly.begin(), assembly.end(), load); row != end; ++row)
+                    rows.push_back(std::stoul((*row)[1].str()));
+            }
+            return rows;
+        };
+        auto loads = [](const std::vector<unsigned>& rows, unsigned first, unsigned count) {
+            unsigned found = 0;
+            for (unsigned row = first; row < first + count; ++row)
+                found += std::find(rows.begin(), rows.end(), row) != rows.end() ? 1 : 0;
+            return found;
+        };
+        // Packed rewrite of one grafted VS and the paired PS: native-previous VS
+        // mode, linked graft rows, DXC assembly and validation of both stages.
         const auto pixelText = dxc.disassemble(pixel.data(), pixel.size());
-        auto material = GlassFg::RewriteMaterialMotion(
-            pixelText, GlassFg::MaterialSource::Alpha, GlassFg::MaterialDestination::OneMinusAlpha,
-            GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion, vertex.previousRegister,
-            GlassFg::GeometryLayout::PerInstance, &inputs, true, false);
-        const char* variant = "alpha";
-        if (!material)
-        {
-            std::printf("material equation rejected (%s); coverage-only variant\n", material.error.c_str());
-            material = GlassFg::RewriteMaterialMotion(
-                pixelText, GlassFg::MaterialSource::Zero, GlassFg::MaterialDestination::CoverageOnly,
+        auto rewritePacked = [&](const char* label, const void* bytes, std::size_t size, unsigned current,
+                                 unsigned previous) {
+            const GlassFg::VertexClipPair outputs { current, previous };
+            const auto vertex = GlassFg::RewriteVertexHistory(dxc.disassemble(bytes, size),
+                                                              GlassFg::GeometryLayout::PerInstance, nullptr, nullptr,
+                                                              nullptr, false, false, &outputs);
+            require(bool(vertex), std::string(label) + " vertex rewrite failed: " + vertex.error);
+            const auto& vs = vertex.assembly;
+            require(vs.find("GlassHistory") == std::string::npos && vs.find("%glass.srv") == std::string::npos,
+                    "Native VS declares or loads GlassHistory");
+            require(vs.find("GlassNext") == std::string::npos && vs.find("@dx.op.bufferStore") == std::string::npos,
+                    "Native VS declares or stores GlassNext");
+            require(vs.find("GLASS_PREVIOUS") == std::string::npos && vs.find("GLASS_CAPTURE_DELTA") == std::string::npos,
+                    "Native VS exports a history varying");
+            require(vs.find("!\"GlassInstances\", i32 31, i32 1,") != std::string::npos &&
+                        vs.find("!\"GlassConstants\", i32 31, i32 0,") != std::string::npos,
+                    "Native VS lost GlassInstances t1 / GlassConstants b0");
+            require(vertex.missingRegister == vertex.previousRegister, "Native VS missing flag must start the rows");
+            dxc.assembleAndValidate(vs, (std::string(label) + " vertex").c_str());
+
+            // Pixel stage: packed native material pair from the linked graft rows.
+            GlassFg::NativeClipInputs inputs { current, previous, false, true };
+            inputs.linked = vertex.nativeVaryings;
+            auto material = GlassFg::RewriteMaterialMotion(
+                pixelText, GlassFg::MaterialSource::Alpha, GlassFg::MaterialDestination::OneMinusAlpha,
                 GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion, vertex.previousRegister,
                 GlassFg::GeometryLayout::PerInstance, &inputs, true, false);
-            variant = "coverage";
-        }
-        require(bool(material), "Pixel rewrite failed: " + material.error);
-        const auto& ps = material.assembly;
-        require(ps.find("%glass.j") == std::string::npos && ps.find("%glass.captureDelta") == std::string::npos,
-                "Packed native PS adds a jitter or capture-delta term");
-        require(ps.find("GLASS_PREVIOUS") == std::string::npos, "Packed native PS declares GLASS_PREVIOUS");
-        // Linkage: every varying the rewrite introduced sits at the same row
-        // and semantic in both stages.
-        auto name = [](const std::string& quoted) { return quoted.substr(2, quoted.size() - 3); };
-        for (const auto& semantic : { name(vertex.nativeVaryings[0].semantic), name(vertex.nativeVaryings[1].semantic),
-                                      std::string("GLASS_HISTORY_MISSING"), std::string("GLASS_OBJECT_INDEX") })
-        {
-            const auto vsElement = signatureElement(vs, semantic), psElement = signatureElement(ps, semantic);
-            std::printf("link %s vs_row=%d ps_row=%d vs_index=%d ps_index=%d\n", semantic.c_str(), vsElement.row,
-                        psElement.row, vsElement.index, psElement.index);
-            require(vsElement.row >= 0 && vsElement.row == psElement.row, "Varying " + semantic + " does not link");
-            require(vsElement.index == psElement.index, "Varying " + semantic + " semantic index differs");
-        }
-        for (const auto& varying : vertex.nativeVaryings)
-        {
-            const auto vsElement = signatureElement(vs, name(varying.semantic));
-            const auto psElement = signatureElement(ps, name(varying.semantic));
-            require(psElement.row == int(varying.row), "Clip varying row differs from the graft output row");
-            require(vsElement.index == int(varying.semanticIndex) && psElement.index == int(varying.semanticIndex),
-                    "Clip varying semantic index differs from the graft output");
-        }
-        dxc.assembleAndValidate(ps, "pixel");
-        std::printf("native graft packed rewrite passed (%s variant, missing_row=%u)\n", variant,
-                    vertex.missingRegister);
+            const char* variant = "alpha";
+            if (!material)
+            {
+                std::printf("%s material equation rejected (%s); coverage-only variant\n", label,
+                            material.error.c_str());
+                material = GlassFg::RewriteMaterialMotion(
+                    pixelText, GlassFg::MaterialSource::Zero, GlassFg::MaterialDestination::CoverageOnly,
+                    GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion, vertex.previousRegister,
+                    GlassFg::GeometryLayout::PerInstance, &inputs, true, false);
+                variant = "coverage";
+            }
+            require(bool(material), std::string(label) + " pixel rewrite failed: " + material.error);
+            const auto& ps = material.assembly;
+            require(ps.find("%glass.j") == std::string::npos && ps.find("%glass.captureDelta") == std::string::npos,
+                    "Packed native PS adds a jitter or capture-delta term");
+            require(ps.find("GLASS_PREVIOUS") == std::string::npos, "Packed native PS declares GLASS_PREVIOUS");
+            // Linkage: every varying the rewrite introduced sits at the same row
+            // and semantic in both stages.
+            auto name = [](const std::string& quoted) { return quoted.substr(2, quoted.size() - 3); };
+            for (const auto& semantic : { name(vertex.nativeVaryings[0].semantic), name(vertex.nativeVaryings[1].semantic),
+                                          std::string("GLASS_HISTORY_MISSING"), std::string("GLASS_OBJECT_INDEX") })
+            {
+                const auto vsElement = signatureElement(vs, semantic), psElement = signatureElement(ps, semantic);
+                std::printf("%s link %s vs_row=%d ps_row=%d vs_index=%d ps_index=%d\n", label, semantic.c_str(),
+                            vsElement.row, psElement.row, vsElement.index, psElement.index);
+                require(vsElement.row >= 0 && vsElement.row == psElement.row, "Varying " + semantic + " does not link");
+                require(vsElement.index == psElement.index, "Varying " + semantic + " semantic index differs");
+            }
+            for (const auto& varying : vertex.nativeVaryings)
+            {
+                const auto vsElement = signatureElement(vs, name(varying.semantic));
+                const auto psElement = signatureElement(ps, name(varying.semantic));
+                require(psElement.row == int(varying.row), "Clip varying row differs from the graft output row");
+                require(vsElement.index == int(varying.semanticIndex) && psElement.index == int(varying.semanticIndex),
+                        "Clip varying semantic index differs from the graft output");
+            }
+            dxc.assembleAndValidate(ps, (std::string(label) + " pixel").c_str());
+            std::printf("%s graft packed rewrite passed (%s variant, missing_row=%u)\n", label, variant,
+                        vertex.missingRegister);
+        };
+
+        // Root graft: previous clip reads the relocated MotionMatrix rows b7[24..26].
+        const auto rootText = dxc.disassemble(graft->bytes, graft->size);
+        require(loads(loadedRows(rootText, 7), 24, 3) == 3, "Root graft does not read MotionMatrix b7[24..26]");
+        rewritePacked("root", graft->bytes, graft->size, graft->currentOutput, graft->previousOutput);
+
+        // Camera-only array variant of the same original VS: previous clip is the
+        // native previous view-projection (b1 rows 16..19, or 12..15 in the
+        // forward layout) on the VS's own current world position, with no
+        // MotionMatrix read.
+        require(graft->cameraBytes && graft->cameraSize, "Catalog hit has no camera-only variant");
+        require(graft->cameraCurrentOutput == expectedCameraCurrent &&
+                    graft->cameraPreviousOutput == expectedCameraPrevious,
+                "Catalog camera output ids differ from index.json");
+        require(again->cameraBytes == graft->cameraBytes, "Second lookup did not reuse the loaded camera variant");
+        const auto cameraText = dxc.disassemble(graft->cameraBytes, graft->cameraSize);
+        require(loads(loadedRows(cameraText, 7), 24, 3) == 0, "Camera variant reads MotionMatrix b7[24..26]");
+        const auto cameraRows = loadedRows(cameraText, 1);
+        require(loads(cameraRows, 16, 4) == 4 || loads(cameraRows, 12, 4) == 4,
+                "Camera variant lacks the native previous camera rows b1[16..19] / b1[12..15]");
+        std::printf("camera variant bytes=%zu current=%u previous=%u\n", graft->cameraSize, graft->cameraCurrentOutput,
+                    graft->cameraPreviousOutput);
+        rewritePacked("camera", graft->cameraBytes, graft->cameraSize, graft->cameraCurrentOutput,
+                      graft->cameraPreviousOutput);
         return 0;
     }
     catch (const std::exception& error)

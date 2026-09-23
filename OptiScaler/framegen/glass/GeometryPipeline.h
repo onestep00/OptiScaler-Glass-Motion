@@ -76,7 +76,9 @@ class GeometryCompiler
     // previous clip from the engine's MotionMatrix supply, no vertex history is
     // read or written, and the pixel stage adds neither a jitter term nor a
     // capture delta. capture must be null then; pairMissing stays false and a
-    // failed graft rewrite is returned as the failure (no pair-less retry).
+    // failed graft rewrite is returned as the failure (no pair-less retry). The
+    // cache passes the camera-only variant (NativeGraft::cameraBytes and its
+    // outputs) the same way to build the array/multi-instance pipeline.
     HRESULT createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,

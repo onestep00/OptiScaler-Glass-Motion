@@ -309,6 +309,24 @@ struct GeometryPipelineCache::Impl
                                     packedError = "Native graft rejected for vertex shader " +
                                                   hashPrefix(vertexHash) + ": " + packedError;
                                 }
+                                else if (graft->cameraBytes)
+                                {
+                                    // Array variant: the same PS rewrite on the
+                                    // camera-only grafted VS of the same original.
+                                    const NativeGraft camera { graft->cameraBytes, graft->cameraSize,
+                                                               graft->cameraCurrentOutput,
+                                                               graft->cameraPreviousOutput, graft->supplyClass,
+                                                               nullptr, 0, 0, 0 };
+                                    std::string arrayError;
+                                    const bool arrayReady = SUCCEEDED(compiler.createPackedMotion(
+                                        device.Get(), *work.root->result, entry.description, entry.packedArray,
+                                        arrayError, nullptr, nullptr, &camera));
+                                    if (!arrayReady)
+                                        entry.packedArray.Reset();
+                                    NoteGeometryGraft(arrayReady ? GraftArrayReady : GraftArrayMissing);
+                                }
+                                else
+                                    NoteGeometryGraft(GraftArrayMissing);
                             }
                             else
                             {
@@ -317,8 +335,9 @@ struct GeometryPipelineCache::Impl
                             }
                             // Module vertex history only on explicit request: as
                             // the packed variant when no graft is usable, or as
-                            // the array/multi-instance variant of a graft pipeline.
-                            if (historyFallback)
+                            // the array/multi-instance variant of a graft pipeline
+                            // without a camera-only variant.
+                            if (historyFallback && !entry.packedArray)
                             {
                                 std::string historyError;
                                 auto& historyTarget = graftReady ? entry.packedHistory : entry.packed;

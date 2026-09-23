@@ -11,9 +11,16 @@ struct GeometryPipelineEntry
 {
     std::shared_ptr<const GeometryRoot> root;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> original, instrumented, packed;
+    // Camera-only graft variant for array/grouped or multi-instance draws of a
+    // graft pipeline: the grafted VS's previous clip is the native previous
+    // view-projection applied to each element's own current world position
+    // (the engine's own convention for array elements, which have no per-element
+    // previous transform). Compiled with `packed` when the graft has one.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> packedArray;
     // Vertex-history packed variant for array/grouped or multi-instance draws of
-    // a graft pipeline. Compiled only when VertexHistoryFallback was on at
-    // compile time; otherwise such draws keep the engine's motion.
+    // a graft pipeline without packedArray. Compiled only when
+    // VertexHistoryFallback was on at compile time; otherwise such draws keep
+    // the engine's motion.
     Microsoft::WRL::ComPtr<ID3D12PipelineState> packedHistory;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
     std::uint64_t identity = 0;

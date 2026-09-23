@@ -51,3 +51,34 @@ def verify_graft(original, grafted, native, r, route, contracts):
     return dict(sha256=r['sha256'], original_outputs_unchanged=True,
                 original_branches_unchanged=True, native_previous_expression_identical=True,
                 current_clip_convention_verified=True)
+
+
+def verify_camera_graft(original, grafted, r):
+    """Camera-only variant: previous clip is the target's own current projection
+    with its current camera rows replaced by the native previous camera rows."""
+    a,b=Shader(original),Shader(grafted)
+    assert all(b.defs.get(v)==rhs for v,rhs in a.defs.items())
+    assert all(b.roots[oid]==roots for oid,roots in a.roots.items())
+    assert all(b.blocks.get(block)==edges for block,edges in a.blocks.items())
+    current_id=next(i for i,f in a.outs.items() if f[1]=='!"SV_Position"')
+    original_current=[a.roots[current_id][i] for i in range(4)]
+    recorded_current=[b.roots[r['camera_current_output']][i] for i in range(4)]
+    assert b.before_jitter_subtraction(recorded_current)==original_current,'incorrect current jitter convention'
+    load=re.compile(r'(@dx.op.cbufferLoadLegacy.\w+\(i32 59, %dx.types.Handle )(%\d+), i32 (\d+)\)')
+    for v,rhs in b.defs.items():
+        if v in a.defs:continue
+        m=load.search(rhs)
+        assert not m or b.handles[m[2]][2]!=7,'camera variant reads b7'
+    current_rows,previous_rows=r['camera_current_rows'],r['camera_rows']
+    def relocate(m):
+        h=a.handles.get(m[2])
+        if not h or h[0]!=2 or h[2]!=1 or int(m[3]) not in current_rows:return m[0]
+        return m[1]+m[2]+', i32 '+str(previous_rows[current_rows.index(int(m[3]))])+')'
+    reference=Shader(load.sub(relocate,original))
+    if r.get('coverage_guard'):roots,_=a.uncollapsed_position()
+    else:roots=original_current
+    expected,_=reference.position_graph(roots)
+    actual,_=b.position_graph([b.roots[r['camera_previous_output']][i] for i in range(4)])
+    assert expected==actual,'camera previous differs from current projection with previous camera rows'
+    return dict(camera_original_outputs_unchanged=True,camera_no_b7=True,
+                camera_previous_is_current_world_with_previous_rows=True,camera_current_clip_convention_verified=True)

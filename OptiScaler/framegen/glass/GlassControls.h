@@ -263,26 +263,6 @@ inline bool VertexHistoryFallbackEnabled() noexcept
 {
     return VertexHistoryFallbackFlag().load(std::memory_order_relaxed);
 }
-// Diagnostic only, live graftarray=on|off, default off, never persisted. On:
-// the packed capture applies a graft pipeline to array/grouped and
-// multi-instance draws as well, so their root MotionMatrix motion can be
-// compared against the engine's own velocity on opaque-probe draws. The
-// engine's native velocity shaders read INSTANCE_TRANSFORM only in the
-// current graph and MotionMatrix rows in the previous graph, so this probe
-// measures whether the engine itself moves array elements by the root.
-inline std::atomic<bool>& GraftArrayProbeFlag() noexcept
-{
-    static std::atomic<bool> value { false };
-    return value;
-}
-inline void SetGraftArrayProbe(bool enabled) noexcept
-{
-    GraftArrayProbeFlag().store(enabled, std::memory_order_relaxed);
-}
-inline bool GraftArrayProbeEnabled() noexcept
-{
-    return GraftArrayProbeFlag().load(std::memory_order_relaxed);
-}
 // Graft supply classes admitted at pipeline compile time (INI
 // GlassFG/GraftClassMask, live graftclass=<n>, default 1). Bit 0: the previous
 // graph reads only the MotionMatrix and camera rows (root transform). Bit 1: it

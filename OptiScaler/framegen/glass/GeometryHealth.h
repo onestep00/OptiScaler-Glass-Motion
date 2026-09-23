@@ -179,23 +179,32 @@ inline void PublishGeometryMotionDegraded(bool value)
 // Native graft path outcomes (engine MotionMatrix supply through a grafted VS).
 // Compile outcomes are counted once per packed pipeline on the cache worker:
 // ready + missing + rejected + class disabled = pipelines that asked for a
-// packed variant. Draw outcomes are counted by the packed capture's prepare,
-// and NativePreviousEvaluations by the FG host for a substituted evaluation
-// whose frame drew at least one graft variant while the vertex-history
-// fallback was off. Diagnostics only; no render path reads them.
+// packed variant; array ready + array missing = ready. Draw outcomes are
+// counted by the packed capture's prepare, and NativePreviousEvaluations by the
+// FG host for a substituted evaluation whose frame drew at least one graft
+// variant while the vertex-history fallback was off. Diagnostics only; no
+// render path reads them.
 enum GeometryGraftCounter : unsigned
 {
     GraftReady,
     GraftMissing,
     GraftRejected,
     GraftClassDisabled,
+    // Graft pipelines that also compiled the camera-only array variant
+    // (packedArray), and those whose graft has no camera variant or whose
+    // camera variant failed to compile.
+    GraftArrayReady,
+    GraftArrayMissing,
     // Draws of a graft pipeline whose identity is an array/grouped span or
-    // that carries more than one instance. The engine evaluates MotionMatrix
-    // once per proxy (no per-element evaluation in the array append), so one
-    // root previous transform would be applied to independently moving
-    // elements; the draw keeps the engine's motion instead.
+    // that carries more than one instance, with no camera-only variant (and no
+    // vertex-history variant). The engine evaluates MotionMatrix once per proxy
+    // (no per-element evaluation in the array append), so one root previous
+    // transform would be applied to independently moving elements; the draw
+    // keeps the engine's motion instead.
     GraftArrayRejected,
-    // Diagnostic graftarray=on: array/multi-instance draws that kept the graft.
+    // Array/multi-instance draws of a graft pipeline drawn with the camera-only
+    // variant: the engine's own array convention, previous view-projection
+    // applied to each element's current world position.
     GraftArrayDraws,
     GraftDraws,
     NativePreviousEvaluations,

@@ -95,8 +95,9 @@ if (!(Test-Path -LiteralPath (Join-Path $memoFixture 'instances.dxil'))) {
 & $memoExe $memoFixture (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll')
 if ($LASTEXITCODE -ne 0) { throw 'Pipeline cache memo contract failed' }
 
-# Packed native graft rewrite on one exported graft and a paired original PS
-# (transparent_liquid). Needs the local catalog from tools/export_native_grafts.py.
+# Packed native graft rewrite on one exported graft and its camera-only array
+# variant with a paired original PS (transparent_liquid). Needs the local
+# catalog from tools/export_native_grafts.py.
 $graftModule = Join-Path $repository 'artifacts\glass-grafts'
 $graftWorkspace = Join-Path (Split-Path $repository -Parent) 'glass-native-material-v1'
 if (!(Test-Path -LiteralPath (Join-Path $graftModule 'Glass\grafts\index.bin'))) {
@@ -109,7 +110,7 @@ $graftExe = Join-Path $buildDirectory 'NativeGraftPacked.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Native graft packed test build failed' }
 & $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
     (Join-Path $graftWorkspace 'all-transparent-vs\4140f6d44e631b23d56730116a2fe84189c7740676be7b5c4661301636516ad6.dxbc') `
-    (Join-Path $graftWorkspace 'all-transparent-ps\4d4bdc5d8fa67396475344d2efc98c0a071f3066244dc4c41a4f73b91c23aa3e.dxbc') 7 8
+    (Join-Path $graftWorkspace 'all-transparent-ps\4d4bdc5d8fa67396475344d2efc98c0a071f3066244dc4c41a4f73b91c23aa3e.dxbc') 7 8 7 8
 if ($LASTEXITCODE -ne 0) { throw 'Native graft packed rewrite contract failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'

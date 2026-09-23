@@ -1,10 +1,18 @@
 """Export validated native grafts for the module's Glass/grafts catalog.
 
 Reads <workspace>/native-grafted/index.json and verification.json and writes
-<out>/grafts/index.bin plus one <sha256>.dxil per exported graft. index.bin is
-"GGRAFT01", u32 count, u32 reserved (0), then count records sorted by sha:
-{ u8 sha256[32]; u32 current_output; u32 previous_output; u32 supply_class }.
+<out>/grafts/index.bin plus one <sha256>.dxil per exported graft and, when its
+camera-only variant is verified, <sha256>.camera.dxil. index.bin is
+"GGRAFT02", u32 count, u32 reserved (0), then count 52-byte records sorted by sha:
+{ u8 sha256[32]; u32 current_output; u32 previous_output; u32 supply_class;
+  u32 camera_current_output; u32 camera_previous_output }.
 sha256 is the original VS DXBC container hash the module compares against.
+The camera outputs are 0xFFFFFFFF when the camera variant is not exported.
+
+The camera-only variant (instanced array draws) applies the native previous
+camera rows to the target's own current world position; it reads no b7 row.
+It is exported only with its root graft, when camera_status is "validated" and
+its camera verification row has all checks true.
 
 A graft is exported only when its status is "validated", its verification row
 has all four checks true and it requires engine motion rows [24, 25, 26].
@@ -39,7 +47,11 @@ import struct
 
 CHECKS = ('original_outputs_unchanged', 'original_branches_unchanged',
           'native_previous_expression_identical', 'current_clip_convention_verified')
+CAMERA_CHECKS = ('camera_original_outputs_unchanged', 'camera_no_b7',
+                 'camera_previous_is_current_world_with_previous_rows',
+                 'camera_current_clip_convention_verified')
 ROWS = [24, 25, 26]
+NO_OUTPUT = 0xFFFFFFFF
 SKINNING_INPUTS = {'BLENDINDICES', 'BLENDWEIGHT', 'INSTANCE_SKINNING_DATA', 'BONEINDEX'}
 SRV, CBV = 0, 2
 CLASS_NAMES = {1: 'root-only', 2: 'skinning', 4: 'preskinned', 6: 'skinning+preskinned'}
@@ -55,6 +67,24 @@ def supply_class(entry):
     return value or 1
 
 
+def camera_outputs(shader, verified, source, refused):
+    """(current, previous, dxil path) of a verified camera-only variant, else None."""
+    if shader.get('camera_status') != 'validated':
+        refused['status'] += 1
+        return None
+    if not verified or not all(verified.get(check) is True for check in CAMERA_CHECKS):
+        refused['verification'] += 1
+        return None
+    current, previous = int(shader['camera_current_output']), int(shader['camera_previous_output'])
+    if current == previous or not (0 <= current < 32 and 0 <= previous < 32):
+        refused['outputs'] += 1
+        return None
+    if source.read_bytes()[:4] != b'DXBC':
+        refused['container'] += 1
+        return None
+    return current, previous, source
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--workspace', type=Path, required=True)
@@ -63,12 +93,15 @@ def main():
     workspace = args.workspace.resolve(strict=True)
     grafted = workspace / 'native-grafted'
     index = json.loads((grafted / 'index.json').read_text(encoding='utf-8'))
-    verification = {row['sha256']: row for row in
-                    json.loads((grafted / 'verification.json').read_text(encoding='utf-8'))['results']}
+    checked = json.loads((grafted / 'verification.json').read_text(encoding='utf-8'))
+    verification = {row['sha256']: row for row in checked['results']}
+    camera_verification = {row['sha256']: row for row in checked.get('camera_results', [])}
     union = {row['sha256']: row for row in
              json.loads((workspace / 'native-previous-supply-union.json').read_text(encoding='utf-8'))['shaders']}
 
+    index_rows = {shader['sha256']: shader.get('camera_rows') for shader in index['shaders']}
     refused = Counter()
+    camera_refused = Counter()
     records = []
     for shader in index['shaders']:
         sha = shader['sha256']
@@ -95,7 +128,8 @@ def main():
         if data[:4] != b'DXBC':
             refused['container'] += 1
             continue
-        records.append((bytes.fromhex(sha), current, previous, supply_class(native), source))
+        camera = camera_outputs(shader, camera_verification.get(sha), grafted / f'{sha}.camera.dxil', camera_refused)
+        records.append((bytes.fromhex(sha), current, previous, supply_class(native), source, camera))
 
     records.sort(key=lambda record: record[0])
     if len({record[0] for record in records}) != len(records):
@@ -104,10 +138,13 @@ def main():
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    blob = bytearray(struct.pack('<8sII', b'GGRAFT01', len(records), 0))
-    for digest, current, previous, supply, source in records:
-        blob += struct.pack('<32sIII', digest, current, previous, supply)
+    blob = bytearray(struct.pack('<8sII', b'GGRAFT02', len(records), 0))
+    for digest, current, previous, supply, source, camera in records:
+        camera_current, camera_previous, camera_source = camera or (NO_OUTPUT, NO_OUTPUT, None)
+        blob += struct.pack('<32sIIIII', digest, current, previous, supply, camera_current, camera_previous)
         shutil.copyfile(source, out / f'{digest.hex()}.dxil')
+        if camera_source:
+            shutil.copyfile(camera_source, out / f'{digest.hex()}.camera.dxil')
     (out / 'index.bin').write_bytes(bytes(blob))
 
     histogram = Counter(record[3] for record in records)
@@ -115,6 +152,12 @@ def main():
     print('refused=' + (', '.join(f'{k}:{v}' for k, v in sorted(refused.items())) or 'none'))
     for value in sorted(histogram):
         print(f'class {value} ({CLASS_NAMES.get(value, "?")}): {histogram[value]}')
+    cameras = Counter('present' if record[5] else 'missing' for record in records)
+    print(f'camera present={cameras["present"]} missing={cameras["missing"]}')
+    print('camera refused=' + (', '.join(f'{k}:{v}' for k, v in sorted(camera_refused.items())) or 'none'))
+    rows = Counter(str(index_rows[record[0].hex()]) for record in records if record[5])
+    for value in sorted(rows):
+        print(f'camera rows {value}: {rows[value]}')
     print(f'index_sha256={hashlib.sha256(bytes(blob)).hexdigest()}')
 
 
