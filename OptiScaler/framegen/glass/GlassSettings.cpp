@@ -78,7 +78,7 @@ bool load()
     // session values outside the full controls word, like OpaqueProbe.
     SetVertexHistoryFallback(ini.GetBoolValue("GlassFG", "VertexHistoryFallback", false));
     SetGraftClassMask(static_cast<unsigned>(
-        std::clamp(ini.GetLongValue("GlassFG", "GraftClassMask", long(GraftClassRootOnly)), 0L, long(GraftClassAll))));
+        std::clamp(ini.GetLongValue("GlassFG", "GraftClassMask", long(GraftClassRootOnly | 2u)), 0L, long(GraftClassAll))));
     controls.store(Controls { ini.GetBoolValue("GlassFG", "Enabled", false),
                               static_cast<unsigned>(std::clamp(opacityPercent, 0L, 100L)),
                               ini.GetBoolValue("GlassFG", "MeasureGpuTime", true),

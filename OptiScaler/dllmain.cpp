@@ -7,6 +7,7 @@
 #include "resource.h"
 #include "DllNames.h"
 #include <framegen/glass/NativeHost.h>
+#include <framegen/glass/NativeMotionDeclarations.h>
 
 #include "proxies/Dxgi_Proxy.h"
 #include "proxies/Kernel32_Proxy.h"
@@ -1787,6 +1788,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // session that ends can be classified from the module log instead of
         // guessed from the surrounding event log.
         GlassFg::NoteProcessAttach();
+        // Before the engine's shader-cache provider builds any layout.
+        GlassFg::InstallNativeMotionDeclarations();
         GlassFg::InstallProcessDiagnostics();
 
         // Main Opti DLL path

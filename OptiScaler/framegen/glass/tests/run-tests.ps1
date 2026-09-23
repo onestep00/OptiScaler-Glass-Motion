@@ -62,20 +62,13 @@ $gpuExe = Join-Path $buildDirectory 'GpuResources.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'GpuResources.cpp') "/Fe$gpuExe" /link d3d12.lib dxgi.lib dxguid.lib
 if ($LASTEXITCODE -ne 0) { throw 'GPU test build failed' }
 & $gpuExe
-if ($LASTEXITCODE -ne 0) { throw 'GPU resource or timer test failed' }
+if ($LASTEXITCODE -ne 0) { throw 'GPU timer test failed' }
 
 $sessionExe = Join-Path $buildDirectory 'NativeSession.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'NativeSession.cpp') "/Fe$sessionExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib
 if ($LASTEXITCODE -ne 0) { throw 'Native session test build failed' }
-& $sessionExe (Join-Path $PSScriptRoot '..\GlassSurface.hlsl') (Join-Path $PSScriptRoot '..\GlassRegion.hlsl')
-if ($LASTEXITCODE -ne 0) { throw 'Native session admission or lifetime test failed' }
-$observerExe = Join-Path $buildDirectory 'ObservedSession.exe'
-& $compiler @common '/DGLASS_TEST_OBSERVER' "/I$optiDirectory" "/I$optiDirectory\include" `
-    (Join-Path $PSScriptRoot 'NativeSession.cpp') "/Fe$observerExe" /link d3d12.lib dxgi.lib dxguid.lib d3dcompiler.lib `
-    (Join-Path $optiDirectory 'library\detours\detours.lib')
-if ($LASTEXITCODE -ne 0) { throw 'Observed session test build failed' }
-& $observerExe (Join-Path $PSScriptRoot '..\GlassSurface.hlsl') (Join-Path $PSScriptRoot '..\GlassRegion.hlsl')
-if ($LASTEXITCODE -ne 0) { throw 'Observed session callback or lifetime test failed' }
+& $sessionExe (Join-Path $PSScriptRoot '..\GlassObjectMotion.hlsl')
+if ($LASTEXITCODE -ne 0) { throw 'Native session queue type or release test failed' }
 
 $memoExe = Join-Path $buildDirectory 'PipelineCacheMemo.exe'
 & $compiler @common '/DNOMINMAX' "/I$optiDirectory" "/I$optiDirectory\include" `

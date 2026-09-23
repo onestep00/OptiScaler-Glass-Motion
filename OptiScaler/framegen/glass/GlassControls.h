@@ -259,7 +259,7 @@ inline bool VertexHistoryFallbackEnabled() noexcept
     return VertexHistoryFallbackFlag().load(std::memory_order_relaxed);
 }
 // Graft supply classes admitted at pipeline compile time (INI
-// GlassFG/GraftClassMask, live graftclass=<n>, default 1). Bit 0: the previous
+// GlassFG/GraftClassMask, live graftclass=<n>, default 3). Bit 0: the previous
 // graph reads only the MotionMatrix and camera rows (root transform). Bit 1: it
 // also reads skinning inputs / the t10 bone buffer. Bit 2: it reads t9/b3
 // preskinned previous vertices. A graft is admitted when every bit of its class
@@ -269,7 +269,10 @@ inline constexpr unsigned GraftClassRootOnly = 1u, GraftClassSkinning = 2u, Graf
                           GraftClassAll = 7u;
 inline std::atomic<unsigned>& GraftClassMaskValue() noexcept
 {
-    static std::atomic<unsigned> value { GraftClassRootOnly };
+    // Default root+skinning (3) since 2026-09-23: skinned targets only take a
+    // root graft from a native twin of the same vertex factory, so the class-2
+    // grafts are the engine's own skinned velocity arithmetic.
+    static std::atomic<unsigned> value { GraftClassRootOnly | 2u };
     return value;
 }
 inline void SetGraftClassMask(unsigned mask) noexcept

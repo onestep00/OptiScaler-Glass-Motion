@@ -15,6 +15,7 @@
 #include "GlassHookProbe.h"
 #include "GeometryHealth.h"
 #include "NativeGraftCatalog.h"
+#include "NativeMotionDeclarations.h"
 #include <Util.h>
 #include <cstdio>
 #include <fstream>
@@ -56,12 +57,11 @@ void writeStatus(std::ofstream& file)
          << " edge=" << controls.edgeWidth << " packed_dispatch=" << controls.packedDispatch
          << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute
          << " packed_compute=" << controls.packedCompute << " trace=" << controls.trace
-         << " autostage=" << controls.autoStage << " writeback=" << controls.packedWriteBack
-         << " nrmotion=" << controls.nrMotion
+         << " autostage=" << controls.autoStage << " nrmotion=" << controls.nrMotion
          << " engine_writes=0"
          << " zeromv=" << controls.zeroMotion
          << " readskip=" << controls.packedSkipRead
-         << " arraymap=" << controls.arrayMapping << " pipelines=" << controls.compilePipelines
+         << " pipelines=" << controls.compilePipelines
          << " grouped=" << controls.groupedOrder << " arrayprobe=" << controls.arrayProbe
          << " packetlocal=" << controls.packetLocalOrder << " supply=" << controls.packedSupply
          << " layer=" << controls.packedLayer << " jitter=" << controls.jitterMode
@@ -100,7 +100,8 @@ void writeStatus(std::ofstream& file)
          << " acquire_ambiguous=" << packed.acquireAmbiguous
          << " acquire_consumer_busy=" << packed.acquireConsumerBusy
          << " packed_opaqueprobe_ready=" << ReadOpaqueProbeReadyCount()
-         << " packed_opaqueprobe_rejected=" << ReadOpaqueProbeRejectedCount() << "\n";
+         << " packed_opaqueprobe_rejected=" << ReadOpaqueProbeRejectedCount()
+         << " history_bypassed=" << packed.historyBypassed << "\n";
     file << "GRAFT ready=" << ReadGeometryGraft(GraftReady) << " missing=" << ReadGeometryGraft(GraftMissing)
          << " rejected=" << ReadGeometryGraft(GraftRejected)
          << " class_disabled=" << ReadGeometryGraft(GraftClassDisabled)
@@ -113,6 +114,14 @@ void writeStatus(std::ofstream& file)
          << " fg_evals=" << ReadGeometryGraft(NativePreviousEvaluations)
          << " catalog=" << NativeGraftCount() << " classmask=" << ReadGraftClassMask()
          << " vhfallback=" << (VertexHistoryFallbackEnabled() ? 1 : 0) << "\n";
+    // Engine declaration hook installed at process attach. hook=0 leaves every
+    // declaration native; status names the step that stopped installation.
+    NativeMotionDeclarationStats declarations;
+    const bool declarationHook = TryNativeMotionDeclarationCounters(declarations);
+    file << "DECL hook=" << (declarationHook ? 1 : 0) << " seen=" << declarations.seen
+         << " matched=" << declarations.matched << " rejected=" << declarations.rejected
+         << " stage_seen=" << declarations.stageSeen << " stage_selected=" << declarations.stageSelected
+         << " status=" << declarations.status << "\n";
     file << "identity resolved=" << identity.resolved << " rejected=" << identity.rejected
          << " no_owner=" << identity.noOwner << " no_view=" << identity.noView
          << " no_lifetime=" << identity.noLifetime << " no_element_index=" << identity.noElementIndex
@@ -340,7 +349,6 @@ void PollGlassDebugControl() noexcept
                 // texture is never written, so nothing else reads the value.
                 auto value = ReadControls();
                 value.nrMotion = line.substr(9) == "on";
-                value.packedWriteBack = false;
                 WriteControls(value);
                 output << "nrmotion=" << (value.nrMotion ? 1 : 0) << " engine_writes=0\n";
                 continue;
@@ -424,11 +432,6 @@ void PollGlassDebugControl() noexcept
             else if (line.rfind("opacity=", 0) == 0)
                 value.opacityPercent =
                     static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 8, nullptr, 10), 0ul, 100ul));
-            // Legacy spelling from the blend-strength era; kept so an old control
-            // file still sets the threshold instead of failing the request.
-            else if (line.rfind("strength=", 0) == 0)
-                value.opacityPercent =
-                    static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 9, nullptr, 10), 0ul, 100ul));
             else if (line.rfind("substitute=", 0) == 0)
                 value.packedSubstitute = line.substr(11) == "on";
             else if (line.rfind("readskip=", 0) == 0)
@@ -445,8 +448,6 @@ void PollGlassDebugControl() noexcept
                 value.autoStage = line.substr(10) == "on";
             else if (line.rfind("compute=", 0) == 0)
                 value.packedCompute = line.substr(8) == "on";
-            else if (line.rfind("arraymap=", 0) == 0)
-                value.arrayMapping = line.substr(9) == "on";
             else if (line.rfind("pipelines=", 0) == 0)
                 value.compilePipelines = line.substr(10) == "on";
             else if (line.rfind("enabled=", 0) == 0)

@@ -16,7 +16,7 @@
 
 - `export_motion_declarations.py`: pending bounded declarations and exact VS/PS cache pairs; records unpaired variants, no automatic deployment or writer/history admission.
 - `export_native_grafts.py`: validated grafts to the local `Glass/grafts` catalog (`GGRAFT02`: root outputs, supply class from the previous-graph union, camera-only variant outputs or 0xFFFFFFFF; camera-only records have root outputs 0xFFFFFFFF, no `<sha>.dxil`, and the target's own current-position class); output is extracted game code and stays in the ignored `artifacts/` tree.
-- `check_motion_declarations.py`: batch-build owned declaration/scope/relocation/callback and foreign-startup tests; never attaches to the game.
+- `check_motion_declarations.py`: batch-build owned declaration/scope/relocation tests; never attaches to the game. The hook itself (`NativeMotionDeclarations.cpp`) is verified live through the status `DECL` line.
 - `audit_motion_gaps.py`: group all unresolved candidates by position/control dependencies; input presence does not prove history supply.
 - `check_native_projection.py`: owned split-output and exact jitter-subtraction checks; invalid components, sign, W and rows reject.
 - `audit_native_instance_inputs.py`: all original velocity VS current/prior data and control inputs; dependency presence is not grouped history admission.

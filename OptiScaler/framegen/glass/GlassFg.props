@@ -10,6 +10,11 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)GeometryPipelineCache.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NativeGraftCatalog.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)NativeGraftCatalog.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)NativeMotionDeclarations.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)NativeMotionDeclarations.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)MotionDeclarationTable.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)MotionShaderScope.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkDeclarationProfile.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)DetourThreads.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryCreation.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GeometryPipelineStream.h" />
@@ -75,11 +80,7 @@
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\..\external\FidelityFX-SDK\sdk\tools\ffx_shader_compiler\libs\dxc\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ClInclude Include="$(MSBuildThisFileDirectory)MaterialCaptureBlend.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)GlassSurfaceGpu.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)GlassRegionGpu.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassFgPass.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)CyberpunkSurfacePass.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)SurfaceQueueLink.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ComputeRecording.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NativeSession.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)CommandLifetime.h" />
@@ -93,36 +94,38 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.cpp" />
     <None Include="$(MSBuildThisFileDirectory)StreamlineTagBridge.LICENSE.txt" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)GlassFgCompile.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)GlassSettings.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassControls.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)GlassGpuTimer.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)SurfaceSnapshotPool.h" />
-    <None Include="$(MSBuildThisFileDirectory)GlassSurface.hlsl" />
-    <None Include="$(MSBuildThisFileDirectory)GlassRegion.hlsl" />
     <None Include="$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl" />
   </ItemGroup>
   <!-- Local graft catalog written by tools/export_native_grafts.py. It holds
        extracted game shader code, so it lives in the ignored artifacts tree and
        is copied only when present; without it every packed pipeline counts as
-       a graft miss. -->
+       a graft miss. The native declaration data beside grafts\ (copies of
+       glass-native-material-v1/pending-motion-declarations as motion-declarations.bin
+       and motion-shader-pairs.bin) follows the same rule; without it the
+       declaration hook stays uninstalled with status declaration_file_missing. -->
   <PropertyGroup>
     <GlassGraftSource>$(MSBuildThisFileDirectory)..\..\..\artifacts\glass-grafts\Glass\grafts\</GlassGraftSource>
+    <GlassDeclarationSource>$(MSBuildThisFileDirectory)..\..\..\artifacts\glass-grafts\Glass\</GlassDeclarationSource>
   </PropertyGroup>
   <Target Name="CopyGlassShaders" AfterTargets="Build">
     <MakeDir Directories="$(TargetDir)Glass" />
-    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl;$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
           DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <ItemGroup>
       <GlassGraftFiles Include="$(GlassGraftSource)*.bin;$(GlassGraftSource)*.dxil" />
+      <GlassDeclarationFiles Include="$(GlassDeclarationSource)motion-*.bin" />
     </ItemGroup>
     <MakeDir Directories="$(TargetDir)Glass\grafts" Condition="'@(GlassGraftFiles)' != ''" />
     <Copy SourceFiles="@(GlassGraftFiles)" DestinationFolder="$(TargetDir)Glass\grafts" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(GlassDeclarationFiles)" DestinationFolder="$(TargetDir)Glass" SkipUnchangedFiles="true" />
     <!-- Upstream moves the Release DLL into a/ before packaging. -->
     <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
-    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassSurface.hlsl;$(MSBuildThisFileDirectory)GlassRegion.hlsl;$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)GlassObjectMotion.hlsl"
           DestinationFolder="$(SolutionDir)x64\Release\a\Glass" SkipUnchangedFiles="true"
           Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxcompiler.dll;$(MSBuildThisFileDirectory)..\..\shaders\shader_tools\dxil.dll"
@@ -131,6 +134,8 @@
     <MakeDir Directories="$(SolutionDir)x64\Release\a\Glass\grafts"
              Condition="'$(Configuration)|$(Platform)'=='Release|x64' And '@(GlassGraftFiles)' != ''" />
     <Copy SourceFiles="@(GlassGraftFiles)" DestinationFolder="$(SolutionDir)x64\Release\a\Glass\grafts"
+          SkipUnchangedFiles="true" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <Copy SourceFiles="@(GlassDeclarationFiles)" DestinationFolder="$(SolutionDir)x64\Release\a\Glass"
           SkipUnchangedFiles="true" Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
   </Target>
 </Project>

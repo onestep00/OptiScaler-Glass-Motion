@@ -212,6 +212,19 @@ enum GeometryGraftCounter : unsigned
     GraftArrayDraws,
     GraftDraws,
     NativePreviousEvaluations,
+    // Native declaration hook (NativeMotionDeclarations.cpp), the engine side
+    // of the same supply: it makes the engine fill MotionMatrix rows 24..26 for
+    // the declared materials. Installed is 1 once both detours committed. Seen
+    // counts provider results, Matched the augmented declarations returned,
+    // Rejected declared keys whose native record did not match its plan.
+    // StageSeen counts native stage resolutions, StageSelected the vertex
+    // stages of a declared VS/PS pair.
+    DeclarationHookInstalled,
+    DeclarationSeen,
+    DeclarationMatched,
+    DeclarationRejected,
+    DeclarationStageSeen,
+    DeclarationStageSelected,
     GraftCounterCount
 };
 namespace GeometryTelemetry
