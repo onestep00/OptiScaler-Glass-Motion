@@ -14,7 +14,9 @@ The camera-only variant applies the native previous camera rows to the target's
 own current world position; it reads no b7 row. It is exported when
 camera_status is "validated" and its camera verification row has all checks
 true, beside its root graft or alone:
-  - a matched shader whose root graft is not exported;
+  - a matched shader whose root graft is not exported (status "unsupported",
+    or "factory_mismatch": a skinned-factory target whose root-only twins
+    graft_native_motion.py refused and whose other twins did not validate);
   - a generic_camera shader (no native current-position twin: the canonical
     native previous view-projection multiply on its own world position).
 A camera-only record's supply_class is the target's own current position class
@@ -110,7 +112,7 @@ def main():
         """(current, previous, supply class, dxil path) of an exportable root graft, else None."""
         sha = shader['sha256']
         if shader['status'] != 'validated':
-            refused['status'] += 1
+            refused[shader['status']] += 1
             return None
         row = verification.get(sha)
         if not row or not all(row.get(check) is True for check in CHECKS):

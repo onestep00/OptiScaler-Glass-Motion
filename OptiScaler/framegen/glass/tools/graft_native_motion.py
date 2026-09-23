@@ -14,6 +14,17 @@ camera-only variant (index.json generic_camera): the canonical native template's
 previous camera multiply on the target's own world position, one template per
 camera layout. Targets whose clip is not a per-vertex view-projection multiply
 of a world position are recorded as unsupported with the reason.
+
+Twin selection is factory-consistent. A target whose vertex factories
+(all-cache-techniques.json) include a skinned one (MeshSkinned, MeshExtSkinned,
+Garment*, SingleBone, SkinnedVehicle, DestructibleSkinned, LightBlockers) never
+takes its root graft from a twin whose previous graph is root-only (class 1:
+MotionMatrix, camera rows and vertex attributes only). Such a twin matches when
+the target's current position collapses to a rigid path; its previous graph
+would supply the proxy root transform instead of per-vertex deformation. Twins
+reading skinning inputs/t10 (class 2) or preskinned t9/b3 history (class 4) stay
+eligible; if none validates, the root status is factory_mismatch and only the
+camera-only variant is written.
 """
 from pathlib import Path
 from collections import Counter,defaultdict
@@ -369,7 +380,7 @@ def camera_graft(target,native,clip,target_contract=None,native_contract=None,sp
     return text,dict(camera_current_output=first,camera_previous_output=first+1,camera_added_instructions=added,
         camera_rows=clip['camera_rows'],camera_current_rows=list(range(current_start,current_start+4)),
         camera_world_operands=sorted(world.values(),key=lambda v:int(v[1:])),
-        camera_world_frame_rows=sorted(current_frame),camera_supply_class=target_supply_class(a,roots),camera_gpu_verified=False)
+        camera_world_frame_rows=sorted(current_frame),camera_supply_class=cone_supply_class(a,roots),camera_gpu_verified=False)
 
 # Generic camera-only graft for transparent VS with no native current-position twin.
 # The engine's velocity-init convention for a surface without object-motion supply:
@@ -471,8 +482,10 @@ def insert_block_lines(text,before_terminator,after_phis):
         out.append(line)
     return '\n'.join(out)
 
-def target_supply_class(a,roots):
-    """Supply class of the target's own current position cone (GraftClass* bits)."""
+def cone_supply_class(a,roots):
+    """Supply class (GraftClass* bits) of the cone of roots in a: 2 skinning inputs or
+    t10 bones, 4 preskinned t9/b3, else 1 root-only. Used for a target's own current
+    position and for a native twin's previous clip."""
     skinning_inputs={'BLENDINDICES','BLENDWEIGHT','INSTANCE_SKINNING_DATA','BONEINDEX'}
     deps=a.dependencies_values(roots)
     skinning=any(name.upper() in skinning_inputs for name,_,_ in deps['inputs'])
@@ -605,11 +618,22 @@ def generic_camera_graft(target,templates):
         camera_world_operands=[sorted(w.values(),key=str) for w in world_sets],
         camera_world_frame_rows=frame_rows,camera_current_dejittered=dejittered,coverage_guard=coverage_guard,
         camera_fast_math_adopted=adopted,
-        camera_supply_class=target_supply_class(a,roots),camera_gpu_verified=False)
+        camera_supply_class=cone_supply_class(a,roots),camera_gpu_verified=False)
 
 def main():
     rows=json.loads((p/'shared-native-motion-matches.json').read_text())['matches']
     contracts=json.loads((p/'shader-modifier-contracts.json').read_text())['shaders']
+    factories=defaultdict(set)
+    for t in json.loads((p/'all-cache-techniques.json').read_text())['techniques']:
+        for program in t['programs']:
+            if program['kind']=='vs':factories[program['sha256']].add(t['vertex_factory'])
+    previous_classes={}
+    def previous_class(n):
+        """cone_supply_class of a native twin's previous clip."""
+        if n['sha256'] not in previous_classes:
+            b=Shader((p/'opaque-velocity-audit'/(n['sha256']+'.ll')).read_text())
+            previous_classes[n['sha256']]=cone_supply_class(b,[b.roots[o][col] for o,col in n['previous'][0]['components']])
+        return previous_classes[n['sha256']]
     out=p/'native-grafted';out.mkdir(exist_ok=True)
     tool=p.parent/'glass-native-material-buildcheck/GeometryShaderTool.exe'
     compiler=p.parent/'glass-optiscaler-source/OptiScaler/shaders/shader_tools/dxcompiler.dll'
@@ -620,6 +644,11 @@ def main():
     def process(r):
         target=(p/'all-transparent-vs'/(r['sha256']+'.ll')).read_text()
         candidates=sorted(r['native_candidates'],key=lambda n:min(x['dependencies']['instructions'] for x in n['previous']))
+        families=sorted(factories.get(r['sha256'],()))
+        if not families:raise ValueError(r['sha256']+' has no technique in all-cache-techniques.json')
+        # Factory-consistent twins (module docstring): a skinned target refuses root-only twins.
+        skinned=any('Skinned' in f for f in families)
+        twins=[n for n in candidates if not skinned or previous_class(n)!=1]
         def attempt(build,path,candidates):
             errors=[]
             for n in candidates:
@@ -630,9 +659,14 @@ def main():
                 except (ValueError,KeyError,StopIteration,AssertionError) as e:errors.append(str(e))
             for stale in (path,path.with_suffix('.dxil')):stale.unlink(missing_ok=True)
             return None,None,sorted(set(errors))
-        n,info,errors=attempt(graft,out/(r['sha256']+'.ll'),candidates)
-        row=(dict(sha256=r['sha256'],native_sha256=n['sha256'],status='validated',specializations=n.get('specializations',{}),**info)
-             if n else dict(sha256=r['sha256'],status='unsupported',errors=errors))
+        n,info,errors=attempt(graft,out/(r['sha256']+'.ll'),twins)
+        if n:row=dict(sha256=r['sha256'],families=families,native_sha256=n['sha256'],status='validated',
+                      specializations=n.get('specializations',{}),**info)
+        elif len(twins)<len(candidates):
+            row=dict(sha256=r['sha256'],families=families,status='factory_mismatch',errors=[
+                f'{len(candidates)-len(twins)} native twin(s) with a root-only previous graph (no skinning input, '
+                't10 or preskinned t9/b3) refused for a skinned vertex factory']+errors)
+        else:row=dict(sha256=r['sha256'],families=families,status='unsupported',errors=errors)
         # Camera-only variant: prefer the root graft's own native candidate.
         if n:candidates=[n]+[c for c in candidates if c is not n]
         c,info,errors=attempt(camera_graft,out/(r['sha256']+'.camera.ll'),candidates)
