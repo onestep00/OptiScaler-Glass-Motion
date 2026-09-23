@@ -326,8 +326,8 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         sentinelTarget.pResource = composed;
         sentinelTarget.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         command->CopyTextureRegion(&sentinelTarget, 0, 0, 0, &sentinelSource, nullptr);
-        // The engine input carries the same sentinel: a write-back wider than the
-        // composed rows would replace it with the composed value.
+        // The engine input carries the same sentinel: a compose that wrote back
+        // into it would replace it with the composed value.
         sentinelTarget.pResource = motion.Get();
         command->CopyTextureRegion(&sentinelTarget, 0, 0, 0, &sentinelSource, nullptr);
         checked(command->Close(), "sentinel close");
@@ -336,7 +336,6 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
 
         GlassFg::Controls controls { true, 50, false, 2 };
         controls.packedRows = partialRows;
-        controls.packedWriteBack = true;
         // Deterministic release-gate check: the queue is blocked on a fence the
         // CPU owns, so the submitted compose provably cannot have completed.
         ComPtr<ID3D12Fence> gate;
@@ -375,11 +374,11 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         // too wide).
         require(std::abs(composedOutside - 9.0f) > .01f && std::abs(composedOutside - .0625f) > .01f,
                 "input copy or dispatch reached rows outside the composed range");
-        // FG-only policy: even with a write-back request the engine's own motion
-        // texture has to stay exactly as the game produced it, because DLSS-SR,
-        // Ray Reconstruction and the ray traced passes read the same texture.
-        require(std::abs(engineEdge - 9.0f) < .01f, "write-back policy modified the engine input");
-        require(std::abs(engineOutside - 9.0f) < .01f, "write-back policy modified rows outside the composed range");
+        // FG-only policy: the engine's own motion texture has to stay exactly as
+        // the game produced it, because DLSS-SR, Ray Reconstruction and the ray
+        // traced passes read the same texture.
+        require(std::abs(engineEdge - 9.0f) < .01f, "partial compose modified the engine input");
+        require(std::abs(engineOutside - 9.0f) < .01f, "partial compose modified rows outside the composed range");
         std::printf("PACKED_MOTION_PARTIAL_OK rows=%u edge=1 outside_untouched=1 engine_input_untouched=1 "
                     "gate_blocks_release=1\n",
                     partialRows);
@@ -453,15 +452,14 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
     require(std::abs(motionAt(4, 8, 0) - .0625f) < .001f, "out-of-band compose did not reach the edge pixel");
     read->Unmap(0, nullptr);
     std::printf("PACKED_MOTION_COMPOSE_OK submit_compose=1 fence_ready=1 edge_pixel=1 background=1\n");
-    // FG-only policy: a write-back request must not touch the engine's own
-    // inputs. The correction is delivered only by the DLSS-G parameter
-    // substitution, so DLSS-SR, Ray Reconstruction and the ray traced passes
-    // keep reading the game's textures.
-    GlassFg::Controls writeBack { true, 50, false, 2 };
-    writeBack.packedWriteBack = true;
-    // The engine input carries a known sentinel so a write-back that reached it
-    // is distinguishable from an untouched texture. Fresh GPU allocations are
-    // not valid evidence.
+    // FG-only policy: a full compose must not touch the engine's own inputs.
+    // The correction is delivered only by the DLSS-G parameter substitution,
+    // so DLSS-SR, Ray Reconstruction and the ray traced passes keep reading the
+    // game's textures.
+    GlassFg::Controls full { true, 50, false, 2 };
+    // The engine input carries a known sentinel so a compose that reached it is
+    // distinguishable from an untouched texture. Fresh GPU allocations are not
+    // valid evidence.
     {
         UINT64 sentinelBytes = 0;
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT sentinelFootprint {};
@@ -495,12 +493,11 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         drain(device.Get(), queue.Get());
     }
     require(gpu.submitCompose(queue.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f, writeBack,
-                              nullptr),
-            "submitCompose write-back");
+                              D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height), 0.f, 0.f, full, nullptr),
+            "submitCompose engine sentinel");
     for (unsigned i = 0; i < 200 && !gpu.composeReady(); ++i)
         Sleep(5);
-    require(gpu.composeReady(), "write-back fence");
+    require(gpu.composeReady(), "engine sentinel fence");
     drain(device.Get(), queue.Get());
     auto engineDescription = motion->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT engineFootprint {};
@@ -526,10 +523,10 @@ static int runCompose(const wchar_t* shader, bool manual, bool partial = false)
         auto* row = reinterpret_cast<const HALF*>(static_cast<const std::byte*>(engineData) +
                                                   8 * engineFootprint.Footprint.RowPitch);
         const auto value = DirectX::PackedVector::XMConvertHalfToFloat(row[4 * 4 + 0]);
-        require(std::abs(value - 9.0f) < .01f, "write-back request modified the engine input edge pixel");
+        require(std::abs(value - 9.0f) < .01f, "compose modified the engine input edge pixel");
     }
     engineRead->Unmap(0, nullptr);
-    std::printf("PACKED_MOTION_WRITEBACK_RETIRED_OK engine_input_untouched=1\n");
+    std::printf("PACKED_MOTION_ENGINE_INPUT_OK engine_input_untouched=1\n");
     gpu.releaseAfterGpuDrain();
     return 0;
 }

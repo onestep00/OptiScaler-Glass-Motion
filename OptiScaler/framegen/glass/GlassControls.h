@@ -31,25 +31,10 @@ struct Controls
     // Isolation switch: keep the input copies and the FG swap but skip the
     // compose compute dispatch, so the swap can be tested with zero new GPU work.
     bool packedCompute = true;
-    // Retired: the game's motion and depth textures are also read by DLSS Super
-    // Resolution, Ray Reconstruction and the ray traced passes, so copying the
-    // composed values into them leaked the correction outside frame generation.
-    // The copy path is removed and this field is forced off; it stays only so
-    // old INI and control files keep parsing.
-    bool packedWriteBack = false;
     // Diagnostic: run the compose dispatch without reading the packed object
     // records, so a GPU stall can be attributed to the dispatch itself or to
     // the record read that the capture raster wrote.
     bool packedSkipRead = false;
-    // Retired 2026-09-17: the module's own engine group hooks publish the
-    // grouped-array element mapping (CyberpunkGroups -> GlassArrayMapping) and
-    // GlassMotionIdentity consumes it without this switch, so no code reads the
-    // field any more. It stays so old INI files and control-channel requests
-    // keep parsing; its bit is still reported in the packed word and in the
-    // status line. The plugin route that used to feed this switch is not to be
-    // enabled next to the engine hooks (both hook 0x9c19e8 and publish to the
-    // same table).
-    bool arrayMapping = false;
     // Bisect switch: when false the module still observes draws and FG frames
     // but never creates its rewritten pipelines. Used to separate the D3D12
     // hooks from the pipeline-creation path in the 2026-09-14 resets.
@@ -165,8 +150,6 @@ struct Controls
                (std::uint64_t((std::min)(packedRows, 0xffffu)) << 13) |
                (packedSubstitute ? (std::uint64_t(1) << 29) : 0u) | (trace ? (std::uint64_t(1) << 30) : 0u) |
                (autoStage ? (std::uint64_t(1) << 31) : 0u) | (packedCompute ? (std::uint64_t(1) << 32) : 0u) |
-               (packedWriteBack ? (std::uint64_t(1) << 33) : 0u) |
-               (arrayMapping ? (std::uint64_t(1) << 34) : 0u) |
                (packedSkipRead ? (std::uint64_t(1) << 36) : 0u) |
                (compilePipelines ? (std::uint64_t(1) << 37) : 0u) |
                (groupedOrder ? (std::uint64_t(1) << 38) : 0u) |
@@ -190,8 +173,7 @@ struct Controls
                  std::clamp(edge ? edge : 2u, 1u, 4u), (value & (1ull << 12)) != 0,
                  unsigned((value >> 13) & 0xffffu), (value & (1ull << 29)) != 0, (value & (1ull << 30)) != 0,
                  (value & (1u << 31)) != 0, (value & (std::uint64_t(1) << 32)) != 0,
-                 (value & (std::uint64_t(1) << 33)) != 0, (value & (std::uint64_t(1) << 36)) != 0,
-                 (value & (std::uint64_t(1) << 34)) != 0, (value & (std::uint64_t(1) << 37)) != 0,
+                 (value & (std::uint64_t(1) << 36)) != 0, (value & (std::uint64_t(1) << 37)) != 0,
                  (value & (std::uint64_t(1) << 38)) != 0, (value & (std::uint64_t(1) << 39)) != 0,
                  (value & (std::uint64_t(1) << 40)) != 0, (value & (std::uint64_t(1) << 41)) != 0,
                  (value & (std::uint64_t(1) << 42)) != 0, unsigned((value >> 43) & 7u),
@@ -209,14 +191,13 @@ struct Controls
 Controls ReadControls();
 void WriteControls(Controls value);
 // Session-only diagnostic, live channel only. Not persisted and not part of
-// the packed control word, whose 64 bits are all assigned. When on, the
-// compose substitutes the object's own motion but leaves the depth the engine
-// wrote under the pixel. The transparent pass writes no depth of its own, so
-// the engine's value describes the content behind the surface while the
-// substituted motion describes the surface itself. The A/B separates "the
-// generator resolves occlusion against the substituted depth" from "the
-// substituted motion alone still ripples the mirror band". Default off keeps
-// the delivered behaviour.
+// the packed control word. When on, the compose substitutes the object's own
+// motion but leaves the depth the engine wrote under the pixel. The
+// transparent pass writes no depth of its own, so the engine's value describes
+// the content behind the surface while the substituted motion describes the
+// surface itself. The A/B separates "the generator resolves occlusion against
+// the substituted depth" from "the substituted motion alone still ripples the
+// mirror band". Default off keeps the delivered behaviour.
 inline std::atomic<bool>& DepthKeepFlag() noexcept
 {
     static std::atomic<bool> value { false };
@@ -239,14 +220,14 @@ inline void SetFrameDepthInverted(unsigned inverted) noexcept
 }
 inline bool FrameDepthInverted() noexcept { return FrameDepthInvertedValue().load(std::memory_order_relaxed) != 0; }
 // Diagnostic opaque-pipeline probe, off by default and persisted in the INI as
-// GlassFG/OpaqueProbe. Session value only: not part of the packed control word,
-// whose 64 bits are all assigned. When on, the pipeline cache admits the
-// depth-writing and unblended pipelines it normally refuses, so the capture can
-// be pointed at the opaque surfaces the user asked to compare against the
-// engine's own motion. The compiler half of the same flag decides whether such
-// a pipeline can be rewritten without losing its colour exports or its SV_Depth
-// export; an unblended target is treated as a fully opaque surface (weight 255)
-// because the game's blend state writes the source colour directly.
+// GlassFG/OpaqueProbe. Session value only: not part of the packed control word.
+// When on, the pipeline cache admits the depth-writing and unblended pipelines
+// it normally refuses, so the capture can be pointed at the opaque surfaces the
+// user asked to compare against the engine's own motion. The compiler half of
+// the same flag decides whether such a pipeline can be rewritten without losing
+// its colour exports or its SV_Depth export; an unblended target is treated as
+// a fully opaque surface (weight 255) because the game's blend state writes the
+// source colour directly.
 inline std::atomic<bool>& OpaqueProbeFlag() noexcept
 {
     static std::atomic<bool> value { false };
@@ -256,7 +237,7 @@ inline void SetOpaqueProbe(bool enabled) noexcept { OpaqueProbeFlag().store(enab
 inline bool OpaqueProbeEnabled() noexcept { return OpaqueProbeFlag().load(std::memory_order_relaxed); }
 // Vertex-history fallback for the packed capture, off by default and persisted
 // in the INI as GlassFG/VertexHistoryFallback; live vhfallback=on|off. Session
-// value only, like OpaqueProbe: the packed control word has no free bit.
+// value only, like OpaqueProbe.
 // Off: a packed pipeline takes the previous clip from the engine's own
 // MotionMatrix supply through a grafted vertex shader, and a pipeline without
 // an enabled graft gets no packed variant (the engine's motion and depth stay).
@@ -305,7 +286,7 @@ inline bool GraftClassEnabled(unsigned supplyClass) noexcept
 // engine's value in odd bands, so both arms sample the same pan, the same
 // animation phase and the same frames. A temporal metric can then compare them
 // inside one capture instead of across two runs. Session-only diagnostic: not
-// part of the packed control word, whose 64 bits are all assigned.
+// part of the packed control word.
 inline std::atomic<bool>& StripeProbeFlag() noexcept
 {
     static std::atomic<bool> value { false };
@@ -360,17 +341,6 @@ inline void PublishLiveStatus(LiveStatusField field, std::uint64_t value) noexce
 inline std::uint64_t ReadLiveStatus(LiveStatusField field) noexcept
 {
     return LiveStatusSlot(field).load(std::memory_order_relaxed);
-}
-// Frames the correction prepared from the engine's DLSS-G tag handoff. Header
-// only so the settings panel and its test do not need the native host headers.
-inline std::atomic<std::uint64_t>& StreamlineFrameCounter() noexcept
-{
-    static std::atomic<std::uint64_t> value { 0 };
-    return value;
-}
-inline std::uint64_t ReadStreamlineFrameCalls() noexcept
-{
-    return StreamlineFrameCounter().load(std::memory_order_relaxed);
 }
 enum class RuntimeStatus : unsigned { Waiting, Correcting, Unavailable, Retiring, Stopped };
 void PublishRuntimeStatus(RuntimeStatus status);

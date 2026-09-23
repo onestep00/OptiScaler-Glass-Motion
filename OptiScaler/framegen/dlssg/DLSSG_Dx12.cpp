@@ -1,7 +1,6 @@
 #include "pch.h"
 
 #include "DLSSG_Dx12.h"
-#include <framegen/glass/NativeHost.h>
 
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
@@ -333,34 +332,6 @@ bool DLSSG_Dx12::Dispatch()
     {
         LOG_WARN("Depth or Velocity is not ready, skipping");
         return false;
-    }
-
-    // Glass: the engine's motion and depth for this frame are right here, and
-    // this is the frame generation call that actually runs in this
-    // configuration. The correction composes the object motion into them and
-    // writes the result back into those same engine textures; the provider and
-    // the unlocker keep their resources and settings untouched.
-    if (auto& glassVelocity = _frameResources[fIndex][FG_ResourceType::Velocity];
-        glassVelocity.resource != nullptr)
-    {
-        auto& glassDepth = _frameResources[fIndex][FG_ResourceType::Depth];
-        auto& glassColor = _frameResources[fIndex][FG_ResourceType::HudlessColor];
-        auto* glassCommand = GetSCCommandList(fIndex);
-        if (glassDepth.resource != nullptr && glassCommand != nullptr)
-        {
-            GlassFg::StreamlineFrame glassRequest {};
-            glassRequest.motion = glassVelocity.resource;
-            glassRequest.motionState = glassVelocity.state;
-            glassRequest.depth = glassDepth.resource;
-            glassRequest.depthState = glassDepth.state;
-            // The hudless color is not read by the correction; the engine's
-            // motion texture stands in when the engine did not tag one.
-            glassRequest.color = glassColor.resource != nullptr ? glassColor.resource : glassVelocity.resource;
-            glassRequest.frame = willDispatchFrame;
-            glassRequest.scaleX = StreamlineHooks::GlassMvecScale().x;
-            glassRequest.scaleY = StreamlineHooks::GlassMvecScale().y;
-            GlassFg::CorrectStreamlineFrame(glassCommand, &fIndex, glassRequest);
-        }
     }
 
     auto& state = State::Instance();

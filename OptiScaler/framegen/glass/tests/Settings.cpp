@@ -149,12 +149,10 @@ int wmain(int argc, wchar_t** argv)
             auto renamed = GlassFg::ReadControls();
             renamed.farSkipStep = 6;
             renamed.packedRows = 900;
-            renamed.arrayMapping = true;
             require(GlassFg::save(renamed), "save renamed options");
             require(GlassFg::load(), "reload renamed options");
             auto loaded = GlassFg::ReadControls();
-            require(loaded.farSkipStep == 6 && loaded.packedRows == 900 && loaded.arrayMapping,
-                    "renamed option round trip");
+            require(loaded.farSkipStep == 6 && loaded.packedRows == 900, "renamed option round trip");
             CSimpleIniA renamedIni;
             require(renamedIni.LoadFile(path.c_str()) >= 0, "reread renamed options");
             require(renamedIni.GetLongValue("GlassFG", "SkipFartherThanMeters", -1) == 150, "far meters stored");
@@ -165,7 +163,9 @@ int wmain(int argc, wchar_t** argv)
         }
         {
             std::ofstream f(path);
-            f << "[GlassFG]\nEnabled=true\nPackedRows=777\nGroupedOrder=false\nSkipFartherThanMeters=50\n";
+            // Retired options: an old file still loads, and the next save drops them.
+            f << "[GlassFG]\nEnabled=true\nPackedRows=777\nGroupedOrder=false\nSkipFartherThanMeters=50\n"
+                 "EngineArrayElementMapping=true\nPackedWriteBack=true\n";
         }
         require(GlassFg::load(), "legacy names reload");
         {
@@ -175,8 +175,15 @@ int wmain(int argc, wchar_t** argv)
         }
         require(GlassFg::save({ true, 37 }) && GlassFg::load(), "restore renamed");
         require(GlassFg::ReadControls().packedRows == 240 && GlassFg::ReadControls().groupedOrder &&
-                    !GlassFg::ReadControls().arrayMapping && GlassFg::ReadControls().farSkipStep == 0,
+                    GlassFg::ReadControls().farSkipStep == 0,
                 "renamed restored");
+        {
+            CSimpleIniA retiredIni;
+            require(retiredIni.LoadFile(path.c_str()) >= 0, "reread retired options");
+            require(std::string(retiredIni.GetValue("GlassFG", "EngineArrayElementMapping", "")) == "" &&
+                        std::string(retiredIni.GetValue("GlassFG", "PackedWriteBack", "")) == "",
+                    "retired options removed");
+        }
         // The rename blocks rewrote the whole file; restore the unrelated
         // section and the threshold the read-only check below expects.
         {

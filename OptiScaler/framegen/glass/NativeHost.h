@@ -2,7 +2,6 @@
 #include <d3d12.h>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_params.h>
-#include <array>
 #include <cstdint>
 
 namespace GlassFg
@@ -92,26 +91,6 @@ void WarmPackedShaderOnce() noexcept;
 // there keeps it off the render thread, where it measured 134.9ms inside the
 // first frame generation evaluation (the focus-regain path, 2026-09-16 05:46).
 bool PreinstallNativeObserver(ID3D12Device* device) noexcept;
-
-// Game-side Streamline handoff, independent of OptiScaler's own frame generation
-// setting. The host passes the motion/depth/hudless tags the engine submits for
-// the frame; the correction runs the existing packed capture and compose and the
-// existing write-back copies the composed pair into those same engine textures.
-// No frame generation provider resource or DLL is touched.
-struct StreamlineFrame
-{
-    ID3D12Resource* motion = nullptr;
-    ID3D12Resource* depth = nullptr;
-    ID3D12Resource* color = nullptr;
-    D3D12_RESOURCE_STATES motionState = D3D12_RESOURCE_STATE_COMMON;
-    D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON;
-    std::uint64_t frame = UINT64_MAX;
-    float scaleX = 1.f, scaleY = 1.f, jitterX = 0.f, jitterY = 0.f;
-    std::array<float, 16> clipToPrevious {};
-    unsigned index = 1, count = 1, reset = 0;
-};
-bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* featureKey,
-                            const StreamlineFrame& frame) noexcept;
 // Bounded observation of the feature ids the host's Streamline evaluate hook
 // sees, so the frame generation id of this engine build can be identified.
 void NoteStreamlineFeature(unsigned id) noexcept;

@@ -71,8 +71,8 @@ bool load()
     const auto farMeters = ini.GetLongValue("GlassFG", "SkipFartherThanMeters", 0);
     // Diagnostic opaque-pipeline probe, default off. Persisted so an offline
     // window can pre-arm it, and overridable live through opaqueprobe=on|off.
-    // The controls word below does not carry it: its 64 bits are all assigned
-    // and this flag is session diagnostic state, like depthkeep.
+    // The controls word below does not carry it: this flag is session
+    // diagnostic state, like depthkeep.
     SetOpaqueProbe(ini.GetBoolValue("GlassFG", "OpaqueProbe", false));
     // Engine-supply policy for the packed capture (GlassControls.h). Both are
     // session values outside the full controls word, like OpaqueProbe.
@@ -92,13 +92,7 @@ bool load()
                               flag("StepTrace", "Trace", false),
                               flag("StagedRamp", "AutoStage", false),
                               flag("ComposeCompute", "PackedCompute", true),
-                              // FG-only policy: writing the composed motion/depth into the
-                              // game's own textures also changed what DLSS-SR, Ray
-                              // Reconstruction and the ray traced passes read. The copy
-                              // path is removed; an old INI cannot re-enable it.
-                              false,
                               flag("SkipRecordRead", "PackedSkipRead", false),
-                              flag("EngineArrayElementMapping", "ArrayMapping", false),
                               flag("RewriteShaders", "CompilePipelines", true),
                               flag("PacketOrderElementIdentity", "GroupedOrder", true),
                               flag("MeasurePacketOrder", "ArrayProbe", false),
@@ -137,12 +131,9 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "StepTrace", value.trace);
     ini.SetBoolValue("GlassFG", "StagedRamp", value.autoStage);
     ini.SetBoolValue("GlassFG", "ComposeCompute", value.packedCompute);
-    // Retired key, always written off: the copy path no longer exists.
-    ini.SetBoolValue("GlassFG", "PackedWriteBack", false);
     ini.SetBoolValue("GlassFG", "ReadTimeDelivery", value.packedSupply);
     ini.SetBoolValue("GlassFG", "TransparencyLayerDelivery", value.packedLayer);
     ini.SetBoolValue("GlassFG", "SkipRecordRead", value.packedSkipRead);
-    ini.SetBoolValue("GlassFG", "EngineArrayElementMapping", value.arrayMapping);
     ini.SetBoolValue("GlassFG", "RewriteShaders", value.compilePipelines);
     ini.SetBoolValue("GlassFG", "PacketOrderElementIdentity", value.groupedOrder);
     ini.SetBoolValue("GlassFG", "MeasurePacketOrder", value.arrayProbe);
@@ -153,11 +144,12 @@ bool save(Controls value)
     ini.SetBoolValue("GlassFG", "VertexHistoryFallback", VertexHistoryFallbackEnabled());
     ini.SetLongValue("GlassFG", "GraftClassMask", ReadGraftClassMask());
     ini.SetLongValue("GlassFG", "SkipFartherThanMeters", std::min(value.farSkipStep, 15u) * 25u);
-    // Legacy spellings are removed so the file has exactly one name per option.
+    // Legacy spellings and retired options are removed so the file has exactly
+    // one name per live option.
     for (const auto* legacy : { "Strength", "EdgeWidth", "InteriorFollowPercent", "InteriorLimitPx",
                                 "InteriorMaxPx", "JitterMode", "JitterGain", "JitterCompensation",
                                 "JitterGainPercent", "ZeroMotion", "WriteBackMotion",
-                                "MotionWriteBack", "PackedWriteBack",
+                                "MotionWriteBack", "PackedWriteBack", "EngineArrayElementMapping",
                                 "PackedDispatch", "PackedRows", "PackedSubstitute", "Trace", "AutoStage",
                                 "PackedCompute", "PackedSupply", "PackedLayer", "PackedSkipRead",
                                 "ArrayMapping", "CompilePipelines", "GroupedOrder", "ArrayProbe",
@@ -362,7 +354,6 @@ void RenderSettings()
     }
     // Short delivery lines stay visible: they are the "did it arrive" check.
     const auto liveEvaluations = ReadLiveStatus(LiveStatusEvaluations);
-    const auto liveTagFrames = ReadStreamlineFrameCalls();
     const auto liveSubstitutions = ReadLiveStatus(LiveStatusSubstitutions);
     const auto liveInFlight = ReadLiveStatus(LiveStatusComposeInFlight) != 0;
     const auto liveSubmitted = ReadLiveStatus(LiveStatusComposeSubmitted);
@@ -386,8 +377,6 @@ void RenderSettings()
     }
     else if (!liveSubstitutions && value.packedSubstitute)
         ImGui::SameLine(), ImGui::TextDisabled("- swap requested but not applied");
-    ImGui::Text("Streamline DLSS-G tag frames: %llu (in-place delivery retired: FG-only)",
-                static_cast<unsigned long long>(liveTagFrames));
     ImGui::Text("Compose fence: %s; submitted %llu; completed %llu%s", liveInFlight ? "in flight" : "idle",
                 static_cast<unsigned long long>(liveSubmitted), static_cast<unsigned long long>(liveCompleted),
                 liveForced ? " (forced release)" : "");

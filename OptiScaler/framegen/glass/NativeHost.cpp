@@ -568,16 +568,10 @@ D3D12Callbacks makeCallbacks()
         // OptiScaler overlay being rendered: this hook runs every frame.
         RefreshGeometryHealthIfNeeded(GetTickCount64());
     };
-    value.signal = [](void* p, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
-    {
-        NotifyGeometryCaptureSignal(q, fence, number);
-        static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onSignal(q, fence, number); });
-    };
-    value.wait = [](void* p, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
-    {
-        NotifyGeometryCaptureWait(q, fence, number);
-        static_cast<Runtime*>(p)->each([&](Entry& e) { e.session.onWait(q, fence, number); });
-    };
+    value.signal = [](void*, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
+    { NotifyGeometryCaptureSignal(q, fence, number); };
+    value.wait = [](void*, ID3D12CommandQueue* q, ID3D12Fence* fence, UINT64 number)
+    { NotifyGeometryCaptureWait(q, fence, number); };
     return value;
 }
 
@@ -852,66 +846,6 @@ bool SecondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* mo
             return false;
         return r.active->session.secondConsumerGuides(command, motion, depth, motionArrival, depthArrival, jitterX,
                                                       jitterY, scaleX, scaleY, outMotion, outDepth);
-    }
-    catch (...)
-    {
-        return false;
-    }
-}
-
-bool CorrectStreamlineFrame(ID3D12GraphicsCommandList* command, const void* featureKey,
-                            const StreamlineFrame& frame) noexcept
-{
-    try
-    {
-        auto& r = runtime();
-        auto controls = ReadControls();
-        if (!controls.active() || !command || !featureKey)
-            return false;
-
-        // FG-only policy: this path used to deliver the correction by copying
-        // the composed motion and depth into the game's own textures. Those
-        // textures are shared with DLSS-SR, Ray Reconstruction and the ray
-        // traced passes, so the copy was removed; the DLSS-G parameter
-        // substitution in EvaluateNativeFG is the only delivery path. The frame
-        // is still logged (bounded) so a future change that reroutes Streamline
-        // frame generation through here is visible instead of silent.
-        Inputs probe;
-        probe.motion = frame.motion;
-        probe.depth = frame.depth;
-        probe.color = frame.color;
-        probe.index = frame.index;
-        probe.count = frame.count;
-        probe.reset = frame.reset;
-        probe.scaleX = frame.scaleX;
-        probe.scaleY = frame.scaleY;
-        probe.jitterX = frame.jitterX;
-        probe.jitterY = frame.jitterY;
-        probe.clipToPrevious = frame.clipToPrevious;
-        probe.frame = frame.frame;
-        static std::atomic<unsigned> calls { 0 };
-        const auto call = calls.fetch_add(1, std::memory_order_relaxed);
-        const bool report = call < 3 || call % 600 == 0;
-        if (report)
-        {
-            std::lock_guard lock(r.mutex);
-            if (!r.logAttempted)
-            {
-                r.logAttempted = true;
-                r.log = _wfopen((Util::DllPath().parent_path() / L"OptiScaler.Glass.log").c_str(), L"a");
-            }
-            if (r.log)
-            {
-                std::fprintf(r.log,
-                             "SL_FRAME call=%u motion=%p depth=%p color=%p scale=%.4f,%.4f frame=%llu valid=%u "
-                             "policy=fg_only in_place=0\n",
-                             call + 1, static_cast<void*>(frame.motion), static_cast<void*>(frame.depth),
-                             static_cast<void*>(frame.color), frame.scaleX, frame.scaleY,
-                             static_cast<unsigned long long>(frame.frame), probe.valid() ? 1u : 0u);
-                std::fflush(r.log);
-            }
-        }
-        return false;
     }
     catch (...)
     {
@@ -1825,7 +1759,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                     prepared = entry->session.prepare(command, inputs, states, controls, true);
                 }
                 else
-                    entry->session.bypass(inputs.index);
+                    entry->session.invalidateHistory();
             }
         }
     }
@@ -1878,7 +1812,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             }
         }
         if (r.active && r.active->handle == handle)
-            r.active->session.bypass(1);
+            r.active->session.invalidateHistory();
         PublishRuntimeStatus(RuntimeStatus::Waiting);
     }
     NVSDK_NGX_Result result;
@@ -1949,7 +1883,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         if (entry)
         {
             std::lock_guard lock(r.mutex);
-            entry->session.nativeFailure();
+            entry->session.invalidateHistory();
             --entry->evaluations;
         }
         throw;
@@ -2055,7 +1989,7 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
         PublishRuntimeStatus(applied && result == NVSDK_NGX_Result_Success ? RuntimeStatus::Correcting
                                                                            : RuntimeStatus::Waiting);
         if (result != NVSDK_NGX_Result_Success || (prepared.motion && !applied))
-            entry->session.nativeFailure();
+            entry->session.invalidateHistory();
         if (auto timing = entry->session.pollTiming())
             PublishGpuMilliseconds(timing->milliseconds);
         // Live panel state: the swap counters plus the compose fence pair that

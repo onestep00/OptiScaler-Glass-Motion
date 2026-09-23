@@ -5,24 +5,17 @@
 #include "ComputeRecording.h"
 #include "GeometryCommands.h"
 #include "CommandLifetime.h"
-#include "SurfaceQueueLink.h"
-#include "SurfaceSnapshotPool.h"
-#include <array>
 #include <optional>
 
 namespace GlassFg
 {
-// One native FG feature on one COMPUTE queue. The platform adapter holds its
-// lock across real queue calls plus these callbacks, and suppresses callbacks
-// only while recording this module's own commands. It identifies the surface
-// with CyberpunkSurfacePass before calling captureIdentifiedSurface.
+// One native FG feature. The platform adapter holds its lock across real queue
+// calls plus these callbacks, and suppresses callbacks only while recording
+// this module's own commands.
 class NativeSession
 {
-    Pass pass;
     PackedMotionPass objectPass;
     PackedMotionProvider objectProvider;
-    SurfaceSnapshotPool pool;
-    SurfaceQueueLink link;
     ComputeRecording recording;
     GpuTimer timer;
     FILE* log = nullptr;
@@ -60,14 +53,9 @@ class NativeSession
     std::uint64_t fgUse[kFgCommandSlots] {};
     std::uint64_t fgUseClock = 0;
     unsigned fgCommandCount = 0;
-    std::array<CommandLifetime, 64> producers {};
-    std::array<ID3D12Fence*, 64> nativeFences {};
-    SurfaceSnapshotPool::Token newest {};
-    SurfaceSnapshot batchSnapshot {};
-    uint64_t generation = 0, submitted = 0;
-    unsigned candidates = 0;
+    uint64_t submitted = 0;
     bool initialized = false, stopped = false, failed = false;
-    bool outputRecording = false, timing = false, objectMode = false;
+    bool outputRecording = false, timing = false;
     // Our compose list is queued on the FG queue immediately before the batch
     // that carries the FG command. Nothing else covers it with the completion
     // fence while the input swap is inactive, so it is tracked explicitly and
@@ -81,28 +69,11 @@ class NativeSession
     // self wait and has to be skipped.
     void* pendingProducerQueue = nullptr;
 
-    bool retainProducer(ID3D12GraphicsCommandList* command)
-    {
-        collectDestroyed();
-        for (const auto& entry : producers)
-            if (entry.identity() == command)
-                return true;
-        for (auto& entry : producers)
-            if (!entry.identity())
-                return entry.attach(command);
-        return false;
-    }
-
     void discardRecording(const void* command, bool destroyed = false)
     {
         objectPass.discardRecording(command);
-        if (objectMode)
+        if (objectProvider)
             objectProvider.discard(command, destroyed);
-        else
-        {
-            pool.discardRecording(command);
-            link.resetCommand(command);
-        }
         timer.discardRecording(command);
         if (knowsFgCommand(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command))))
             outputRecording = false;
@@ -172,34 +143,12 @@ class NativeSession
             discardRecording(command, true);
             forgetFgCommand(static_cast<ID3D12GraphicsCommandList*>(const_cast<void*>(command)));
         }
-        for (auto& producer : producers)
-            if (const auto command = producer.takeDestroyed())
-                discardRecording(command, true);
     }
 
   public:
     NativeSession() = default;
     NativeSession(const NativeSession&) = delete;
     NativeSession& operator=(const NativeSession&) = delete;
-
-    bool initialize(ID3D12Device* device, const D3D12_RESOURCE_DESC (&descs)[3], const wchar_t* seedShader,
-                    const wchar_t* regionShader, FILE* log)
-    {
-        if (!device || initialized || completion || stopped || failed)
-            return false;
-        if (!pass.initialize(device, descs, seedShader, regionShader, log) ||
-            !pool.initialize(device, static_cast<UINT>(descs[0].Width), descs[0].Height) ||
-            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&completion))))
-        {
-            releaseAfterGpuDrain(); // No commands can have been recorded yet.
-            failed = true;
-            return false;
-        }
-        timing = timer.initialize(device); // Optional measurement must not disable correction.
-        this->log = log;
-        initialized = true;
-        return true;
-    }
 
     bool initializePacked(ID3D12Device* device, const D3D12_RESOURCE_DESC (&descs)[3], const wchar_t* shader,
                           FILE* log, PackedMotionProvider provider)
@@ -215,7 +164,6 @@ class NativeSession
         }
         timing = timer.initialize(device);
         this->log = log;
-        objectMode = true;
         objectProvider = provider;
         initialized = true;
         return true;
@@ -284,7 +232,7 @@ class NativeSession
             fgTypes[slot] = D3D12_COMMAND_LIST_TYPE_COMPUTE;
             fgUse[slot] = 0;
         }
-        if (!link.registerFgCommand(command) || !fgLifetimes[slot].attach(command))
+        if (!fgLifetimes[slot].attach(command))
             return false;
         fgCommands[slot] = command;
         fgTypes[slot] = type;
@@ -306,9 +254,6 @@ class NativeSession
             for (auto& lifetime : fgLifetimes)
                 if (lifetime.identity() == command)
                     lifetime.detachLive(command);
-        for (auto& producer : producers)
-            if (producer.identity() == command)
-                producer.detachLive(command);
     }
 
     // Includes Close and every applicable state setter, including predication.
@@ -322,25 +267,6 @@ class NativeSession
     {
         return list == queue ||
                (list == D3D12_COMMAND_LIST_TYPE_COMPUTE && queue == D3D12_COMMAND_LIST_TYPE_DIRECT);
-    }
-
-    // Called immediately AFTER the verified game's depth transition. Multiple
-    // matching candidates between phase-1 evaluations make that batch ambiguous.
-    bool captureIdentifiedSurface(ID3D12GraphicsCommandList* command, ID3D12Resource* depth,
-                                  D3D12_RESOURCE_STATES state)
-    {
-        collectDestroyed();
-        if (objectMode)
-            return false;
-        if (!initialized || stopped || failed || !command || !depth ||
-            command->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !retainProducer(command))
-            return false;
-        candidates = std::min(candidates + 1, 2u);
-        pool.retire(newest);
-        newest = pool.capture(command, depth, state, ++generation);
-        if (!newest || !link.recordSurface(command, generation))
-            return false;
-        return true;
     }
 
     // Called after the real ExecuteCommandLists while still serialized with
@@ -410,11 +336,7 @@ class NativeSession
                 // substituted input.
                 usesOutput |= outputRecording || composeInFlight;
             }
-            if (!objectMode)
-                link.submit(queue, commands[i]);
         }
-        if (!objectMode && (!pool.afterSubmit(queue, count, commands) || !link.healthy()))
-            failed = true;
         if (usesOutput)
         {
             if (!fgQueue || fgQueue != queue || !compatibleQueue(fgCommandType, queue->GetDesc().Type))
@@ -434,37 +356,6 @@ class NativeSession
         return !failed;
     }
 
-    // Only native, successful GPU synchronization calls belong here. Exclude
-    // this module's own completion signals; they do not establish input order.
-    void onSignal(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
-    {
-        if (objectMode || failed || !fence || !link.isProducerQueue(queue))
-            return;
-        bool retained = false;
-        for (auto entry : nativeFences)
-            retained |= entry == fence;
-        if (!retained)
-            for (auto& entry : nativeFences)
-                if (!entry)
-                {
-                    fence->AddRef();
-                    entry = fence;
-                    retained = true;
-                    break;
-                }
-        if (!retained)
-        {
-            failed = true;
-            return;
-        }
-        link.signal(queue, fence, value);
-    }
-    void onWait(ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
-    {
-        if (!objectMode && !failed && queue == fgQueue)
-            link.wait(queue, fence, value);
-    }
-
     PreparedInputs prepare(ID3D12GraphicsCommandList* command, const Inputs& inputs,
                            const D3D12_RESOURCE_STATES (&states)[3], Controls controls,
                            bool allowAnyState = false)
@@ -472,9 +363,8 @@ class NativeSession
         static std::atomic<unsigned> entered { 0 };
         if (log != nullptr && entered.fetch_add(1, std::memory_order_relaxed) < 6)
         {
-            std::fprintf(log, "NATIVE_PREPARE enter index=%u objectMode=%u trace=%u active=%u initialized=%u\n",
-                         inputs.index, objectMode ? 1u : 0u, controls.trace ? 1u : 0u, controls.active() ? 1u : 0u,
-                         initialized ? 1u : 0u);
+            std::fprintf(log, "NATIVE_PREPARE enter index=%u trace=%u active=%u initialized=%u\n", inputs.index,
+                         controls.trace ? 1u : 0u, controls.active() ? 1u : 0u, initialized ? 1u : 0u);
             std::fflush(log);
         }
         collectDestroyed();
@@ -492,155 +382,98 @@ class NativeSession
             }
             return {};
         }
-        if (objectMode)
-        {
-            // The colour of this evaluation, named by the frame generation call
-            // itself. Recorded on every evaluation and read only while a dump is
-            // outstanding, so the frame path pays two stores. Only the packed
-            // object path owns the dump, which is why this sits inside it.
-            if (inputs.color != nullptr)
-                objectPass.setDumpColor(inputs.color, states[1]);
-            PackedMotionFrame objectFrame;
-            if (inputs.index == 1)
-            {
-                auto ticket = recording.begin(command);
-                const bool fresh = ticket && recording.finish(command, ticket);
-                // The pristine-list requirement (Reset observed, nothing set
-                // since) cannot hold for the graphics list Streamline's frame
-                // generation plugin evaluates on: it resets and then binds its
-                // own state before calling the NGX core. The compose runs on
-                // this module's own list, so the engine list's state is not a
-                // precondition there; allowAnyState carries that distinction.
-                // The pristine-list requirement ("Reset seen, nothing set
-                // since") cannot hold for the graphics list Streamline's frame
-                // generation plugin evaluates on: it resets and then binds its
-                // own state before calling the NGX core. In packed mode the
-                // compose runs on this module's own list, so the engine list's
-                // binding history is not a precondition for the substitution.
-                if (!controls.active() || !inputs.valid() || (!fresh && !allowAnyState && !objectMode))
-                {
-                    static std::atomic<unsigned> rejectLog { 0 };
-                    if (log != nullptr && rejectLog.fetch_add(1, std::memory_order_relaxed) < 6)
-                    {
-                        std::fprintf(log, "NATIVE_PREPARE reject active=%u valid=%u fresh=%u ticket=%u\n",
-                                     controls.active() ? 1u : 0u, inputs.valid() ? 1u : 0u, fresh ? 1u : 0u,
-                                     ticket ? 1u : 0u);
-                        std::fflush(log);
-                    }
-                    objectPass.invalidateHistory();
-                    return {};
-                }
-                const auto description = inputs.motion->GetDesc();
-                objectFrame = objectProvider.acquire(command, static_cast<std::uint32_t>(description.Width),
-                                                     description.Height, inputs.frame, inputs.reset != 0);
-                // A frame can be evaluated more than once (one per back-buffer
-                // command list). Only the evaluation that actually received a
-                // packed frame may publish the producer dependency; an empty
-                // acquire used to overwrite it with zero and the pre-submit hook
-                // then found nothing to queue the compose with.
-                if (objectFrame)
-                {
-                    pendingProducerFence = objectFrame.producerFence;
-                    pendingProducerValue = objectFrame.producerValue;
-                    pendingProducerQueue = objectFrame.producerQueue;
-                }
-            }
-            auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
-                                               timing ? &timer : nullptr, allowAnyState,
-                                               GetGeometryCommandStats().lastFrame);
-            outputRecording |= prepared.motion != nullptr;
-            if (controls.trace && log && TraceWanted())
-            {
-                // The motion pointer separates a harmless second evaluation of an
-                // already corrected frame from an evaluation whose frame never
-                // received the correction at all.
-                std::fprintf(log,
-                             "TRACE_SUBSTITUTE index=%u applied=%u frame=%llu count=%u motion=%p command=%p "
-                             "scale=%.6f,%.6f\n",
-                             inputs.index, prepared.motion ? 1u : 0u,
-                             static_cast<unsigned long long>(inputs.frame), inputs.count,
-                             static_cast<void*>(inputs.motion), static_cast<void*>(command), inputs.scaleX,
-                             inputs.scaleY);
-                std::fflush(log);
-            }
-            return prepared;
-        }
+        // The colour of this evaluation, named by the frame generation call
+        // itself. Recorded on every evaluation and read only while a dump is
+        // outstanding, so the frame path pays two stores.
+        if (inputs.color != nullptr)
+            objectPass.setDumpColor(inputs.color, states[1]);
+        PackedMotionFrame objectFrame;
         if (inputs.index == 1)
         {
-            batchSnapshot = {};
-            const auto candidateCount = candidates;
-            candidates = 0;
-            const auto ordered = link.generationForFgCommand(command);
             auto ticket = recording.begin(command);
             const bool fresh = ticket && recording.finish(command, ticket);
-            if (!controls.active() || candidateCount != 1 || !ordered || !newest || newest.generation != ordered ||
-                !inputs.valid() || !fresh)
+            // The pristine-list requirement ("Reset seen, nothing set since")
+            // cannot hold for the graphics list Streamline's frame generation
+            // plugin evaluates on: it resets and then binds its own state before
+            // calling the NGX core. The compose runs on this module's own list,
+            // so the engine list's binding history is not a precondition for the
+            // substitution; fresh is only reported for attribution.
+            if (!controls.active() || !inputs.valid())
             {
-                pass.invalidateHistory();
-                pool.retire(newest);
+                static std::atomic<unsigned> rejectLog { 0 };
+                if (log != nullptr && rejectLog.fetch_add(1, std::memory_order_relaxed) < 6)
+                {
+                    std::fprintf(log, "NATIVE_PREPARE reject active=%u valid=%u fresh=%u ticket=%u\n",
+                                 controls.active() ? 1u : 0u, inputs.valid() ? 1u : 0u, fresh ? 1u : 0u,
+                                 ticket ? 1u : 0u);
+                    std::fflush(log);
+                }
+                objectPass.invalidateHistory();
                 return {};
             }
-            auto* surface = pool.beginRead(newest, command, ordered);
-            if (!surface)
+            const auto description = inputs.motion->GetDesc();
+            objectFrame = objectProvider.acquire(command, static_cast<std::uint32_t>(description.Width),
+                                                 description.Height, inputs.frame, inputs.reset != 0);
+            // A frame can be evaluated more than once (one per back-buffer
+            // command list). Only the evaluation that actually received a
+            // packed frame may publish the producer dependency; an empty
+            // acquire used to overwrite it with zero and the pre-submit hook
+            // then found nothing to queue the compose with.
+            if (objectFrame)
             {
-                pass.invalidateHistory();
-                pool.retire(newest);
-                return {};
+                pendingProducerFence = objectFrame.producerFence;
+                pendingProducerValue = objectFrame.producerValue;
+                pendingProducerQueue = objectFrame.producerQueue;
             }
-            batchSnapshot = { surface, ordered, D3D12_RESOURCE_STATE_COMMON };
         }
-        auto prepared = pass.prepare(command, inputs, batchSnapshot, states, controls, timing ? &timer : nullptr);
-        if (inputs.index == 1)
-        {
-            pool.retire(newest); // Only the phase-1 copy reads the surface snapshot.
-            if (prepared.motion)
-                command->ClearState(nullptr); // Admission proved fresh bindings under the host lock.
-        }
+        auto prepared = objectPass.prepare(command, inputs, objectFrame, states, controls,
+                                           timing ? &timer : nullptr, allowAnyState,
+                                           GetGeometryCommandStats().lastFrame);
         outputRecording |= prepared.motion != nullptr;
+        if (controls.trace && log && TraceWanted())
+        {
+            // The motion pointer separates a harmless second evaluation of an
+            // already corrected frame from an evaluation whose frame never
+            // received the correction at all.
+            std::fprintf(log,
+                         "TRACE_SUBSTITUTE index=%u applied=%u frame=%llu count=%u motion=%p command=%p "
+                         "scale=%.6f,%.6f\n",
+                         inputs.index, prepared.motion ? 1u : 0u, static_cast<unsigned long long>(inputs.frame),
+                         inputs.count, static_cast<void*>(inputs.motion), static_cast<void*>(command),
+                         inputs.scaleX, inputs.scaleY);
+            std::fflush(log);
+        }
         return prepared;
     }
 
-    void nativeFailure() { objectMode ? objectPass.invalidateHistory() : pass.invalidateHistory(); }
+    // Drops the packed batch history: the evaluation was not prepared or its
+    // native call failed, so the next phase-1 evaluation has to start over.
+    void invalidateHistory() { objectPass.invalidateHistory(); }
     bool accepting()
     {
         collectDestroyed();
         return initialized && !stopped && !failed;
     }
-    void bypass(unsigned index)
-    {
-        if (objectMode)
-        {
-            objectPass.invalidateHistory();
-            return;
-        }
-        pass.invalidateHistory();
-        if (index == 1)
-        {
-            candidates = 0;
-            batchSnapshot = {};
-            pool.retire(newest);
-        }
-    }
     std::optional<GpuTimer::Sample> pollTiming() { return timing ? timer.poll() : std::optional<GpuTimer::Sample> {}; }
     // Live debug channel: recompile the packed compose shader in place.
     bool reloadPackedShader(const wchar_t* shader, FILE* log)
     {
-        return objectMode && objectPass.reloadShader(shader, log);
+        return initialized && objectPass.reloadShader(shader, log);
     }
     // Live diagnostics: motion/depth dump and submit correlation.
     void requestDump()
     {
-        if (objectMode)
+        if (initialized)
             objectPass.requestDump();
     }
-    bool serviceDump() { return objectMode && objectPass.serviceDump(); }
+    bool serviceDump() { return initialized && objectPass.serviceDump(); }
     FILE* logFileHandle() const { return log; }
     bool initializedForDiagnostics() const { return initialized; }
     // Deferred compose submission (called from the host pre-submit hook).
-    bool pendingFor(const void* command) const { return objectMode && objectPass.pendingFor(command); }
+    bool pendingFor(const void* command) const { return initialized && objectPass.pendingFor(command); }
     bool executePending(ID3D12CommandQueue* queue, const void* submittedCommand)
     {
-        if (!objectMode || !objectPass.executePending(queue, submittedCommand))
+        if (!initialized || !objectPass.executePending(queue, submittedCommand))
             return false;
         composeInFlight = true;
         return true;
@@ -658,8 +491,7 @@ class NativeSession
             *outMotion = nullptr;
         if (outDepth != nullptr)
             *outDepth = nullptr;
-        if (!objectMode || !initialized || stopped || failed || command == nullptr || motion == nullptr ||
-            depth == nullptr)
+        if (!initialized || stopped || failed || command == nullptr || motion == nullptr || depth == nullptr)
             return false;
         const auto controls = ReadControls();
         if (!controls.active() || !controls.nrMotion)
@@ -690,14 +522,14 @@ class NativeSession
     // outlives the packed outputs it writes into.
     bool packedComposeInFlight() const
     {
-        return composeInFlight || (objectMode && objectPass.composeInFlight());
+        return composeInFlight || (initialized && objectPass.composeInFlight());
     }
-    std::uint64_t packedComposeSubmitted() const { return objectMode ? objectPass.composeSubmitted() : 0; }
-    std::uint64_t packedComposeCompleted() const { return objectMode ? objectPass.composeCompleted() : 0; }
-    std::uint64_t packedComposeForced() const { return objectMode ? objectPass.composeForced() : 0; }
+    std::uint64_t packedComposeSubmitted() const { return initialized ? objectPass.composeSubmitted() : 0; }
+    std::uint64_t packedComposeCompleted() const { return initialized ? objectPass.composeCompleted() : 0; }
+    std::uint64_t packedComposeForced() const { return initialized ? objectPass.composeForced() : 0; }
     // The compose runs on the queue that owns the packed records; the frame
     // generation queue waits on this fence instead of cross-queue reading them.
-    ID3D12Fence* composeFence() const { return objectMode ? objectPass.composeFence() : nullptr; }
+    ID3D12Fence* composeFence() const { return initialized ? objectPass.composeFence() : nullptr; }
     // Cross-queue dependency of the packed raster read. The caller performs the
     // wait on the queue that submits the FG command list.
     bool takeProducerWait(ID3D12Fence*& fence, std::uint64_t& value, void*& producerQueue)
@@ -712,31 +544,17 @@ class NativeSession
     }
     void dumpSubmitted(ID3D12CommandQueue* queue)
     {
-        if (objectMode)
+        if (initialized)
             objectPass.dumpSubmitted(queue);
     }
-    uint64_t renderedDispatches() const
-    {
-        return objectMode ? objectPass.renderedDispatches() : pass.renderedDispatches();
-    }
-    ID3D12Resource* selection() const { return objectMode ? objectPass.selection() : pass.selection(); }
-    ID3D12Resource* failures() { return objectMode ? nullptr : pass.failures(); }
 
     void stop()
     {
         stopped = true;
-        if (objectMode)
-        {
-            objectPass.invalidateHistory();
-            // Retired sessions must not submit a compose that was prepared for
-            // the frame they no longer own.
-            objectPass.cancelPending();
-        }
-        else
-        {
-            pass.invalidateHistory();
-            pool.retire(newest);
-        }
+        objectPass.invalidateHistory();
+        // Retired sessions must not submit a compose that was prepared for
+        // the frame they no longer own.
+        objectPass.cancelPending();
     }
 
     bool readyToRelease()
@@ -746,17 +564,14 @@ class NativeSession
         // the FG command was submitted, so the packed fence is the direct proof
         // that our own GPU work finished. Checking it first also releases the
         // in-flight flag when the signal path never ran.
-        if (objectMode && !objectPass.drained())
+        if (initialized && !objectPass.drained())
             return false;
         composeInFlight = false;
         // A failed session still has to become releasable: the host keeps at
         // most two retiring slots, and a session that could never be released
         // blocked every later substitution for the rest of the process.
-        if (!stopped || outputRecording || (!objectMode && !pool.idle()))
+        if (!stopped || outputRecording)
             return false;
-        for (const auto& producer : producers)
-            if (producer.identity())
-                return false;
         if (!submitted)
             return true;
         auto done = completion->GetCompletedValue();
@@ -769,30 +584,14 @@ class NativeSession
     void releaseAfterGpuDrain()
     {
         composeInFlight = false;
-        if (objectMode)
-        {
-            objectPass.cancelPending();
-            objectPass.releaseAfterGpuDrain();
-        }
-        else
-        {
-            pass.releaseAfterGpuDrain();
-            pool.releaseAfterGpuDrain();
-        }
+        objectPass.cancelPending();
+        objectPass.releaseAfterGpuDrain();
         timer.releaseAfterGpuDrain();
-        for (auto& producer : producers)
-            producer.forget();
         for (unsigned i = 0; i < kFgCommandSlots; ++i)
         {
             fgLifetimes[i].forget();
             fgCommands[i] = nullptr;
         }
-        for (auto& fence : nativeFences)
-            if (fence)
-            {
-                fence->Release();
-                fence = nullptr;
-            }
         if (fgQueue)
             fgQueue->Release();
         if (completion)
@@ -801,7 +600,6 @@ class NativeSession
         fgQueue = nullptr;
         completion = nullptr;
         initialized = false;
-        objectMode = false;
         objectProvider = {};
         stopped = true;
     }

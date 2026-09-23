@@ -12,11 +12,6 @@
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #include <framegen/glass/NativeHost.h>
-
-// Latest Streamline frame token and constants, cached for the glass correction:
-// the tag handoff has no frame or scale of its own.
-static std::uint64_t g_glassLastFrame = UINT64_MAX;
-static sl::Constants g_glassLastConstants {};
 #include <framegen/glass/StreamlineTagBridge.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -434,42 +429,6 @@ sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const
         }
     }
 
-    // Glass: this is where the engine hands its motion, depth and hudless color
-    // for the frame, independent of OptiScaler's own frame generation setting.
-    // The correction writes the composed motion/depth back into these same
-    // engine textures; provider resources and the unlocker stay untouched.
-    if (cmdBuffer != nullptr && numTags > 0)
-    {
-        GlassFg::StreamlineFrame correction {};
-        for (uint32_t i = 0; i < numTags; i++)
-        {
-            if (tags[i].resource == nullptr || tags[i].resource->native == nullptr)
-                continue;
-            auto* resource = (ID3D12Resource*) tags[i].resource->native;
-            if (tags[i].type == sl::kBufferTypeMotionVectors)
-            {
-                correction.motion = resource;
-                correction.motionState = (D3D12_RESOURCE_STATES) tags[i].resource->state;
-            }
-            else if (tags[i].type == sl::kBufferTypeDepth || tags[i].type == sl::kBufferTypeHiResDepth)
-            {
-                if (correction.depth == nullptr || tags[i].type == sl::kBufferTypeDepth)
-                {
-                    correction.depth = resource;
-                    correction.depthState = (D3D12_RESOURCE_STATES) tags[i].resource->state;
-                }
-            }
-            else if (tags[i].type == sl::kBufferTypeHUDLessColor)
-                correction.color = resource;
-        }
-        // Hand over whatever was tagged. The module decides whether the set is
-        // complete and records a bounded diagnostic when it is not.
-        correction.frame = g_glassLastFrame;
-        correction.scaleX = g_glassLastConstants.mvecScale.x;
-        correction.scaleY = g_glassLastConstants.mvecScale.y;
-        GlassFg::CorrectStreamlineFrame((ID3D12GraphicsCommandList*) cmdBuffer, (const void*) &viewport, correction);
-    }
-
     auto result = o_slSetTag(viewport, tags, numTags, cmdBuffer);
     return result;
 }
@@ -550,39 +509,6 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
         }
     }
 
-    // Glass: same handoff as slSetTag, but with the frame token the engine uses
-    // in this path. The correction writes the composed motion/depth back into
-    // these engine textures; provider resources and the unlocker stay untouched.
-    if (cmdBuffer != nullptr && numResources > 0)
-    {
-        GlassFg::StreamlineFrame correction {};
-        for (uint32_t i = 0; i < numResources; i++)
-        {
-            if (resources[i].resource == nullptr || resources[i].resource->native == nullptr)
-                continue;
-            auto* resource = (ID3D12Resource*) resources[i].resource->native;
-            if (resources[i].type == sl::kBufferTypeMotionVectors)
-            {
-                correction.motion = resource;
-                correction.motionState = (D3D12_RESOURCE_STATES) resources[i].resource->state;
-            }
-            else if (resources[i].type == sl::kBufferTypeDepth || resources[i].type == sl::kBufferTypeHiResDepth)
-            {
-                if (correction.depth == nullptr || resources[i].type == sl::kBufferTypeDepth)
-                {
-                    correction.depth = resource;
-                    correction.depthState = (D3D12_RESOURCE_STATES) resources[i].resource->state;
-                }
-            }
-            else if (resources[i].type == sl::kBufferTypeHUDLessColor)
-                correction.color = resource;
-        }
-        correction.frame = static_cast<std::uint64_t>(frame);
-        correction.scaleX = g_glassLastConstants.mvecScale.x;
-        correction.scaleY = g_glassLastConstants.mvecScale.y;
-        GlassFg::CorrectStreamlineFrame((ID3D12GraphicsCommandList*) cmdBuffer, (const void*) &viewport, correction);
-    }
-
     auto result = o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
     return result;
 }
@@ -593,43 +519,6 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
 {
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
     GlassFg::NoteStreamlineFeature(static_cast<unsigned>(feature));
-    g_glassLastFrame = static_cast<std::uint64_t>(frame);
-
-    // Glass: the DLSS-G evaluate call also carries the frame's resource tags in
-    // some engines. Hand whatever is present to the correction, which records a
-    // bounded diagnostic when the set is incomplete.
-    if (feature == sl::kFeatureDLSS_G && cmdBuffer != nullptr && inputs != nullptr && numInputs > 0)
-    {
-        GlassFg::StreamlineFrame correction {};
-        for (uint32_t i = 0; i < numInputs; i++)
-        {
-            if (inputs[i] == nullptr || inputs[i]->structType != sl::ResourceTag::s_structType)
-                continue;
-            const auto* tag = (const sl::ResourceTag*) inputs[i];
-            if (tag->resource == nullptr || tag->resource->native == nullptr)
-                continue;
-            auto* resource = (ID3D12Resource*) tag->resource->native;
-            if (tag->type == sl::kBufferTypeMotionVectors)
-            {
-                correction.motion = resource;
-                correction.motionState = (D3D12_RESOURCE_STATES) tag->resource->state;
-            }
-            else if (tag->type == sl::kBufferTypeDepth || tag->type == sl::kBufferTypeHiResDepth)
-            {
-                if (correction.depth == nullptr || tag->type == sl::kBufferTypeDepth)
-                {
-                    correction.depth = resource;
-                    correction.depthState = (D3D12_RESOURCE_STATES) tag->resource->state;
-                }
-            }
-            else if (tag->type == sl::kBufferTypeHUDLessColor)
-                correction.color = resource;
-        }
-        correction.frame = g_glassLastFrame;
-        correction.scaleX = g_glassLastConstants.mvecScale.x;
-        correction.scaleY = g_glassLastConstants.mvecScale.y;
-        GlassFg::CorrectStreamlineFrame((ID3D12GraphicsCommandList*) cmdBuffer, (const void*) &feature, correction);
-    }
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
     {
@@ -1162,7 +1051,6 @@ sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const 
     std::scoped_lock lock(setConstantsMutex);
     LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
-    g_glassLastConstants = values;
     GlassMvecScale() = values.mvecScale;
     State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
 

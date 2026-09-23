@@ -1,7 +1,8 @@
 // Read-only PE input. Relocations/corruptions happen in owned, non-executable
 // byte vectors; this test never loads, attaches to or modifies a game process.
 #include "../CyberpunkLayout.h"
-#include "../CyberpunkSurfacePass.h"
+#include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -69,9 +70,6 @@ int wmain(int argc, wchar_t** argv)
         require(resolve(original, baseline), "Current executable profile resolution");
         GlassFg::RelocatableCode before;
         require(before.initialize(original), "Current PE inspection");
-        GlassFg::CyberpunkSurfacePass pass;
-        require(pass.resolve(before, original.data()), "Current surface pattern resolution");
-        const auto initialCallers = pass.callers();
         auto relocated = original;
         const auto oldSize = static_cast<UINT>(relocated.size());
         relocated.resize(oldSize + 0x10000);
@@ -142,35 +140,8 @@ int wmain(int argc, wchar_t** argv)
                     actual.drawReturn == expected.drawReturn,
                 "Relocated function/global discovery");
 
-        // Move the actual 64-byte surface signatures independently and retarget
-        // every masked call. Existing patterns disappear; new positions remain unique.
-        constexpr unsigned rayOffsets[] { 17, 28, 40, 53 }, surfaceOffsets[] { 28, 38, 58 };
-        const auto moveWindow = [&](UINT old, std::span<const unsigned> offsets)
-        {
-            const auto next = cursor;
-            cursor += 128;
-            memcpy(relocated.data() + next, original.data() + old, 64);
-            memset(relocated.data() + old, 0xcc, 64);
-            for (const auto offset : offsets)
-            {
-                const GlassFg::RelocatableCode::Reference ref { static_cast<std::uint16_t>(offset),
-                                                                static_cast<std::uint16_t>(offset + 4),
-                                                                GlassFg::RelocatableCode::Target::Code };
-                displacement(relocated, next, ref, before.referenced(old, ref));
-            }
-            return next + 32;
-        };
-        const auto ray = moveWindow(
-            static_cast<UINT>(static_cast<const unsigned char*>(initialCallers[0]) - original.data() - 32), rayOffsets);
-        const auto surface =
-            moveWindow(static_cast<UINT>(static_cast<const unsigned char*>(initialCallers[1]) - original.data() - 32),
-                       surfaceOffsets);
         GlassFg::RelocatableCode after;
-        require(after.initialize(relocated) && pass.resolve(after, relocated.data()), "Relocated surface discovery");
-        void* stack[] { relocated.data() + ray, relocated.data() + surface };
-        require(pass.matchesStack(stack, 2), "Relocated ordered consumer stack");
-        std::swap(stack[0], stack[1]);
-        require(!pass.matchesStack(stack, 2), "Reversed consumer stack admitted");
+        require(after.initialize(relocated), "Relocated PE inspection");
 
         const auto field = expected.functions[expected.Register] + 8;
         relocated[field] ^= 4; // The proxy registry field displacement, not a masked address.
@@ -201,8 +172,8 @@ int wmain(int argc, wchar_t** argv)
             }
         require(duplicate && !resolve(relocated, actual), "Ambiguous function admitted");
         printf("PASS current_profile=1 moved_functions=10 moved_globals=2 changed_timestamp=1 changed_image_size=1 "
-               "moved_surface_patterns=2 object_layout_rejected=1 call_graph_rejected=1 registry_alias_rejected=1 "
-               "ambiguity_rejected=1 executed_game_code=0 game_hooks=0\n");
+               "object_layout_rejected=1 call_graph_rejected=1 registry_alias_rejected=1 ambiguity_rejected=1 "
+               "executed_game_code=0 game_hooks=0\n");
         return 0;
     }
     catch (const std::exception& error)
