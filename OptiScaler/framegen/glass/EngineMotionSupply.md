@@ -898,3 +898,121 @@ carries no vehicle data in its VS and stays camera-only. In the street dumps its
 pixels on moving cars were delivered by the paired root VS `7448a1d2` (frame-3
 ids 638, 691: residual 0.09–0.10 px). A root supply for the refused VS would
 need a MotionMatrix graft without a native twin plus declaration pairs.
+
+## Proxy history convention and stale MotionMatrix rows, 2026-09-24
+
+Observation. The Corpo Plaza terminal screen (`parallaxscreen_transparent`,
+root pair `de5e58b4…`/`f17cc532…`, DLL `3c33ec9f`,
+`glass-live-tools/scene-20260924-rain/mask-dump`, `mask-dump2`) delivered
+0.8–0.9 px on a still camera where the engine background had 0.2–0.3 px. The
+same pair on a City Center street had 0.04 px. At the substituted pixels the
+delivered field of each draw is affine in screen position (least-squares fit
+error 0.03–0.08 px; mask-dump2 id 3: x motion −0.046 px per pixel of x): a rigid
+difference between the root graft's previous and current world positions, not
+noise. `vehicle_glass_proxy` (`c5b56e2c…`, DLL `2ac5ea9f`,
+`scene-20260924b-street/dumps`) delivered 15.5 px where the engine had 6.2 px on
+one moving car (frame-1 id 310, 146 px).
+
+Static evidence. Executable `a7de8294…`, disassembled from
+`glass-decompile/exe-copy-a7de8294`:
+
+1. Evaluation cadence. The batch run `0x1f1208` starts every packet with
+   category mask 1. It sets 5 (categories 1 and 4) when the packet's registry
+   index (qword 1 bits 0..17) differs from the previous packet's
+   (`0x1f152e`–`0x1f155c`), and every category when the material changes to one
+   with modifier records (`0x1f16c9`–`0x1f16da`, `0x11574c`). When the packet's
+   category bits (qword 0 bits 14..16) meet the mask it flushes pending draws and
+   runs the evaluator (`0x1f180c`–`0x1f1846`); `0x1f0418` runs a record whose
+   category (`0x1f04a8`; MotionMatrix is 4) is in the mask. The dirty 0x1c0-byte
+   block is uploaded before the draw that uses it (`0x1f1889`–`0x1f18a6`, and in
+   the flush `0x1f191c` at +0x3d..+0x11d before Rigid at +0xb9 and Skinned at
+   +0x135). A draw's rows are therefore its own proxy's supplier output of the
+   current batch run.
+2. Supplier output (`0x56c194`). Rows 24..26 receive the history pose (record+4,
+   48 bytes) when the proxy's virtual +0x130 returns an object whose +0x130
+   record is non-null, the weight byte proxy+0x9e is nonzero and the record
+   state is ≤ 1 (`0x56c20e`–`0x56c255`, `0x56c408`). Otherwise they receive the
+   proxy's current transform, proxy+0x18 (`0x56c37b`). The 48 bytes arrive
+   unchanged: the write transposes the transposed expansion back
+   (`0x56c38c`–`0x56c3d5`). For mesh proxies the virtual returns the proxy
+   (`0x540500`).
+3. History lifecycle. SetTransform `0x1e5414` calls the snapshot `0x1e54c8`
+   before `0x1da094` writes the new transform. The snapshot copies proxy+0x18
+   into the record: a new record gets state 1, an existing one state 0. The scene
+   update `0x3a54dc` runs the jobs `CRenderScene_UpdateState_DuplicateRemoval`,
+   `CRenderScene_UpdateState` and `CRenderScene_UpdateState_Epilogue` in that
+   order when updates are pending. The epilogue job `0x88e524` calls `0x88e638`,
+   which raises every state below 2 by one and releases state-2 records
+   (proxy+0x130 = 0). The owned run of the original functions
+   (`glass-native-material-v1/original-group-pipeline-owned.json`,
+   `root_history_lifecycle`) confirms these transitions. At draw time, state 1
+   means the transform was set in this frame's update while a record from one of
+   the two previous updates existed; the record then holds the transform before
+   this frame's update, the one the proxy was drawn with a frame earlier. State
+   2 means the first update after rest (the engine drops that frame's motion) or
+   no update this frame. No record means the proxy is at rest.
+4. Engine velocity. The collector `0x1e9228` adds the velocity feature `0x20`
+   (the velocity-buffer technique) for a non-array proxy only when view feature
+   bit 0x1a is set and the record state is exactly 1, or when the motion flag
+   (proxy+0x9c bit 0) is set together with active skinning or a special input
+   (`0x1e92b1`–`0x1e934d`; 512 owned gate cases in
+   `glass-native-material-v1/native-group-pass-matrix-owned.json`). A rigid proxy
+   outside state 1 is not drawn by the velocity technique, so its pixels keep the
+   camera-only velocity initialization (`CompletionPlan.md:142`, `171`). The
+   weight and the motion flag are component settings copied at proxy setup
+   (`0x237518`: +0x9e = clamp(setting, 0, 1) × 255, +0x9c bit 0 from settings
+   flag 2). Proxy+0x90 is the render tick of the last bounds change
+   (`0x1da276`–`0x1da287`; the tick `0x3438a30` is the module's layout tick).
+5. INSTANCE_TRANSFORM of a single proxy. The single-proxy packet builders copy
+   proxy+0x18 into the renderer transform table and put its index in qword 1 bits
+   33..49 (`0x1e7b30`–`0x1e7b63`, `0x1ebf50`–`0x1ebf73`). The draw's instance
+   transform and the supplier's fallback are the same 48 bytes. Other builders
+   differ: `0x1ecbe0` fills the table from a 4x4 of its own object and clears the
+   registry index bits.
+
+Convention. For a rigid proxy the MotionMatrix rows hold the previous frame's
+transform exactly when the proxy was re-transformed in this frame's update after
+an update in one of the two previous frames. In every other frame they hold the
+current transform and the engine's velocity for the proxy is camera-only. The
+evaluator never leaves rows of an older frame in place. A single-instance root
+draw whose instance transform is proxy+0x18 therefore already delivers
+camera-only motion in those frames. A non-zero root motion on a still camera
+needs one of: (A) the engine re-transformed the proxy this frame to a different
+pose (state 1, rows = history pose ≠ instance); (B) the draw's instance transform
+is not proxy+0x18; (C) the rows are not this proxy's supplier output. (A) is the
+engine's own convention for the proxy; (B) and (C) are not. The static evidence
+does not decide which one holds for the terminal or for `vehicle_glass_proxy`.
+
+Diagnostic (`motionprobe=<hex>`, off by default). For draws whose VS hash starts
+with the given 1..16 hex digits the capture logs the rows 24..26 the draw
+actually used, read from the engine's own modifier block on the CPU. The
+module's Rigid/Skinned hooks find that block in the batch run's frame: the flush
+saves the run's rbp, which is the block, in its home slot, and the hook checks
+both the flush return address and that saved value before it trusts the address
+(`CyberpunkDraws.cpp` `modifierBlock`, `resolveProbeFrames`). It also logs the
+draw's INSTANCE_TRANSFORM (the flush's upload source, or the global transform
+table for a global flush), the owner proxy's +0x18, its history record, state,
+weight, flags and bounds stamp, and the rows compared with the transform the
+proxy was drawn with one frame earlier. The first 8 probed draws of every two
+seconds print `MOTION_PROBE` and `MOTION_PROBE_M`; every window starts with a
+`MOTION_PROBE_SUM` of all probed draws since arming. Line format:
+[README.md](README.md#live-channel-counters-and-dumps).
+
+Rule (`stalemotion=camera`, default; `stalemotion=off` for A/B). A
+single-instance root-graft draw whose owner has no supplied previous pose (no
+record, state > 1 or weight 0) and no motion flag takes the camera-only variant,
+the engine's convention for that proxy (`PackedMotionCapture.cpp` prepare,
+`CyberpunkMotionHistory::cameraOnly`). The motion flag keeps the root graft
+because the engine can still give such a proxy object velocity through
+skinning or a special input. An unreadable owner keeps the root graft. There is
+no blend or clamp; a draw takes one variant. Counters: `GRAFT stale_camera`,
+dump variant `stale`. The rule removes (B) and (C) for proxies at rest; it does
+not change (A).
+
+Expected probe readings. A proxy at rest: `rows=cur inst=cur`, `record=0` (or
+`record=1 state=2` in the two frames after its last move), `supplied=0`,
+`earlier=1`, `dt_mm=0.000,0.000,0.000 dr=0`, `variant=stale` (camera) or
+`root` (off). A proxy re-transformed every frame: `rows=prev inst=cur record=1
+state=1 supplied=1 earlier=1`, `stamp` equal to or one below `frame`, `dt_mm`
+its per-frame displacement, `variant=root`. (B): `inst=other`. (C):
+`rows=other`, or `rows=prev` with `earlier=0`. Not yet run in game.

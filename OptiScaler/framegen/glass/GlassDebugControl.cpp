@@ -47,6 +47,19 @@ void writeReadyFile()
     file << "ok=1\n";
 }
 
+// The armed motion probe prefix as its hex digits, or "off".
+std::string motionProbeText()
+{
+    const auto digits = MotionProbeDigits();
+    if (!digits)
+        return "off";
+    char text[17] {};
+    std::snprintf(text, sizeof(text), "%0*llx", int(digits),
+                  static_cast<unsigned long long>(MotionProbePrefixValue().load(std::memory_order_relaxed) >>
+                                                  (64 - 4 * digits)));
+    return text;
+}
+
 void writeStatus(std::ofstream& file)
 {
     const auto packed = ReadPackedMotionCaptureStatus();
@@ -71,6 +84,8 @@ void writeStatus(std::ofstream& file)
          << " depthkeep=" << (DepthKeepEnabled() ? 1 : 0)
          << " opaqueprobe=" << (OpaqueProbeEnabled() ? 1 : 0)
          << " stripes=" << (StripeProbeEnabled() ? 1 : 0)
+         << " stalemotion=" << (StaleMotionCameraEnabled() ? "camera" : "off")
+         << " motionprobe=" << motionProbeText()
          << " hookstages=" << (HookStageTiming() ? 1 : 0)
          << " gate=" << (GateArmed() ? 1 : 0) << "\n";
     const auto draws = GetCyberpunkDrawStatus();
@@ -111,6 +126,7 @@ void writeStatus(std::ofstream& file)
          << " array_missing=" << ReadGeometryGraft(GraftArrayMissing)
          << " array_rejected=" << ReadGeometryGraft(GraftArrayRejected)
          << " array_draws=" << ReadGeometryGraft(GraftArrayDraws)
+         << " stale_camera=" << ReadGeometryGraft(GraftStaleCameraDraws)
          << " draws=" << ReadGeometryGraft(GraftDraws)
          << " fg_evals=" << ReadGeometryGraft(NativePreviousEvaluations)
          << " catalog=" << NativeGraftCount() << " catalog_refused=" << NativeGraftRefusalCount()
@@ -426,6 +442,40 @@ void PollGlassDebugControl() noexcept
                 const bool enabled = line.substr(8) == "on" || line.substr(8) == "1";
                 SetStripeProbe(enabled);
                 output << "stripes=" << (enabled ? 1 : 0) << "\n";
+                continue;
+            }
+            if (line.rfind("motionprobe=", 0) == 0)
+            {
+                // Engine MotionMatrix probe: MOTION_PROBE lines in the log for
+                // draws whose VS hash starts with the given hex digits (1..16,
+                // the vs16 value of the coverage report). off disarms it. Live
+                // channel only, never persisted.
+                auto text = line.substr(12);
+                if (text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0)
+                    text = text.substr(2);
+                const bool valid = !text.empty() && text.size() <= 16 &&
+                                   text.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+                if (text == "off")
+                    SetMotionProbe(0, 0);
+                else if (valid)
+                    SetMotionProbe(std::strtoull(text.c_str(), nullptr, 16), static_cast<unsigned>(text.size()));
+                else
+                {
+                    output << "motionprobe=invalid " << text << "\n";
+                    continue;
+                }
+                output << "motionprobe=" << motionProbeText() << "\n";
+                continue;
+            }
+            if (line.rfind("stalemotion=", 0) == 0)
+            {
+                // Stale MotionMatrix rule (GlassControls.h), A/B switch: camera
+                // (default) draws a root-graft draw whose owner proxy has no
+                // engine-supplied previous pose with the camera-only variant;
+                // off keeps the root graft. Live channel only, never persisted.
+                const auto mode = line.substr(12);
+                SetStaleMotionCamera(mode == "camera" || mode == "on" || mode == "1");
+                output << "stalemotion=" << (StaleMotionCameraEnabled() ? "camera" : "off") << "\n";
                 continue;
             }
             auto value = ReadControls();

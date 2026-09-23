@@ -8,6 +8,7 @@
 #include "GlassHookProbe.h"
 #include <bit>
 #include <atomic>
+#include <intrin.h>
 #include <cmath>
 #include <mutex>
 #include <type_traits>
@@ -60,6 +61,9 @@ struct EngineDrawState
     const volatile std::uint32_t* tick = nullptr;
     const void* rendererGlobal = nullptr;
     const void* drawReturn = nullptr;
+    // Motion probe only (modifierBlock): return addresses of the audited flush's
+    // Rigid and Skinned calls, 0 when the flush is not the audited body.
+    std::uint64_t rigidReturn = 0, skinnedReturn = 0;
     std::array<Batch, 16> pool;
     std::atomic<std::uint32_t> occupied = 0;
     // Every engine append and draw used to bump one shared cache line from
@@ -678,6 +682,12 @@ struct Flush
     std::uint64_t source = 0, mesh = 0;
     std::uint32_t count = 0, chunk = 0, stride = 0, indexCount = 0, origin = UINT32_MAX;
     bool uploaded = false, consumed = false, invalid = false;
+    // The instances are read from the renderer's global transform table at
+    // `origin` instead of an upload of `source` (Rigid with a global origin).
+    bool global = false;
+    // Motion probe only: the engine's material modifier block this flush
+    // uploaded to b7 (modifierBlock), 0 when unknown.
+    std::uint64_t parameters = 0;
 };
 thread_local Flush* currentFlush = nullptr;
 struct FlushScope
@@ -686,6 +696,56 @@ struct FlushScope
     explicit FlushScope(Flush& value) { currentFlush = &value; }
     ~FlushScope() { currentFlush = previous; }
 };
+// Motion probe only. The engine's 448-byte material modifier block of the batch
+// run that called this flush: the bytes the flush uploaded to b7 for the draw
+// that follows (flush 0x1f191c uploads a dirty block at +0x10a..+0x11d before it
+// calls Rigid at +0xb9 or Skinned at +0x135). The run (0x1f1208, audited body)
+// keeps the block at its rbp, which is its rsp + 0x100, and passes it at flush
+// context +0x10; the flush saves the run's rbp in its home slot (entry rsp +
+// 0x10) and calls the hook 0x50 bytes below its entry rsp. From the hook's
+// return slot the block is therefore at +0x158 and the saved rbp at +0x60. Both
+// the return address and the saved rbp must match, so a call from anywhere else
+// yields 0. Reads only this thread's own stack.
+std::uint64_t modifierBlock(const void* returnSlot, std::uint64_t expectedReturn) noexcept
+{
+    if (!expectedReturn)
+        return 0;
+    const auto slot = reinterpret_cast<std::uint64_t>(returnSlot);
+    std::uint64_t returnAddress = 0, savedFrame = 0;
+    if (!copyAt(slot, returnAddress) || returnAddress != expectedReturn || !copyAt(slot + 0x60, savedFrame))
+        return 0;
+    return savedFrame == slot + 0x158 ? savedFrame : 0;
+}
+// Startup half of modifierBlock. The run calls one flush at +0x290, +0x613 and
+// +0x6e6; that flush must be the audited body: the prologue that saves the
+// run's rbp at entry+0x10 and reserves 0x48 bytes, the block test at +0x3d, and
+// the Rigid call at +0xb9 and Skinned call at +0x135. Anything else leaves both
+// return addresses 0, and the probe then reports its rows as unavailable. The
+// run body itself is fixed by its layout profile. Reads mapped code only.
+void resolveProbeFrames(EngineDrawState& state, const unsigned char* base, const CyberpunkLayout& layout) noexcept
+{
+    const auto callTarget = [](const unsigned char* call) noexcept -> const unsigned char*
+    {
+        if (call[0] != 0xe8)
+            return nullptr;
+        std::int32_t displacement = 0;
+        std::memcpy(&displacement, call + 1, sizeof(displacement));
+        return call + 5 + displacement;
+    };
+    static constexpr unsigned char prologue[] { 0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x68,
+                                                0x10, 0x48, 0x89, 0x70, 0x18, 0x48, 0x89, 0x78, 0x20, 0x41,
+                                                0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x30 };
+    static constexpr unsigned char blockTest[] { 0x48, 0x8b, 0x5f, 0x10, 0x80, 0xbb, 0xc4, 0x01, 0x00, 0x00, 0x00 };
+    const auto* run = base + layout.functions[CyberpunkLayout::Run];
+    const auto* flush = callTarget(run + 0x290);
+    if (!flush || callTarget(run + 0x613) != flush || callTarget(run + 0x6e6) != flush ||
+        std::memcmp(flush, prologue, sizeof(prologue)) || std::memcmp(flush + 0x3d, blockTest, sizeof(blockTest)) ||
+        callTarget(flush + 0xb9) != base + layout.functions[CyberpunkLayout::Rigid] ||
+        callTarget(flush + 0x135) != base + layout.functions[CyberpunkLayout::Skinned])
+        return;
+    state.rigidReturn = reinterpret_cast<std::uint64_t>(flush + 0xbe);
+    state.skinnedReturn = reinterpret_cast<std::uint64_t>(flush + 0x13a);
+}
 
 void run(void* a, void* b, void* c)
 {
@@ -885,9 +945,12 @@ void rigid(void* a, void* b, void* c, std::uint32_t globalOrigin, bool half)
     }
     Flush value;
     prepare(value, b, c, 48, half);
+    if (value.records && MotionProbeArmed())
+        value.parameters = modifierBlock(_AddressOfReturnAddress(), value.state->rigidReturn);
     if (value.records && globalOrigin != UINT32_MAX)
     {
         value.origin = globalOrigin;
+        value.global = true;
         value.uploaded = value.records->globalRange(value.count, globalOrigin);
         value.invalid |= !value.uploaded;
     }
@@ -908,6 +971,8 @@ void skinned(void* a, void* b, void* c, bool half)
     }
     Flush value;
     prepare(value, b, c, 64, half);
+    if (value.records && MotionProbeArmed())
+        value.parameters = modifierBlock(_AddressOfReturnAddress(), value.state->skinnedReturn);
     FlushScope scope(value);
     HookCostPause pause(cost);
     originalSkinned(a, b, c, half);
@@ -1228,6 +1293,7 @@ bool InitializeCyberpunkDraws(HMODULE executable) noexcept
         state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + layout->tick);
         state->rendererGlobal = base + layout->rendererGlobal;
         state->drawReturn = base + layout->drawReturn;
+        resolveProbeFrames(*state, base, *layout);
         HMODULE resident = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                                 reinterpret_cast<LPCWSTR>(&InitializeCyberpunkDraws), &resident))
@@ -1364,5 +1430,72 @@ std::size_t ReadCyberpunkShapeSamples(CyberpunkShapeSample* out, std::size_t cap
         out[count++] = shapeSamples[slot];
     }
     return count;
+}
+bool ReadCyberpunkMotionHistory(std::uint64_t proxy, CyberpunkMotionHistory& out) noexcept
+{
+    // One guard for the header fields the supplier and the velocity gate read
+    // (+0x90 stamp, +0x9c flags, +0x9e weight, +0x130 record) and the record's
+    // state byte. The gate reads +0x130 of the proxy itself (0x1e92b1); the
+    // supplier reaches it through the proxy's virtual +0x130, which returns the
+    // proxy for mesh proxies (0x540500; see CyberpunkMotionSample::ownHistory).
+    out = {};
+    __try
+    {
+        if (!readable(proxy + 0x90, 0xa8))
+            return false;
+        const auto* header = reinterpret_cast<const unsigned char*>(proxy);
+        std::memcpy(&out.stamp, header + 0x90, sizeof(out.stamp));
+        out.flags = header[0x9c];
+        out.weight = header[0x9e];
+        std::memcpy(&out.record, header + 0x130, sizeof(out.record));
+        if (out.record)
+        {
+            if (!readable(out.record, 1))
+            {
+                out = {};
+                return false;
+            }
+            out.state = *reinterpret_cast<const volatile unsigned char*>(out.record);
+        }
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        out = {};
+        return false;
+    }
+}
+bool ReadCyberpunkMotionSample(std::uint64_t proxy, std::uint32_t instance, CyberpunkMotionSample& out) noexcept
+{
+    out = {};
+    const auto* flush = currentFlush;
+    if (!flush || !flush->state || !flush->batch || !flush->consumed || flush->invalid)
+        return false;
+    out.frame = flush->batch->frame;
+    if (flush->parameters)
+        out.rowsRead = copyAt(flush->parameters + 24 * 16, out.rows);
+    // The draw's INSTANCE_TRANSFORM: an uploaded flush reads its instances from
+    // the upload of `source`, a global one from the renderer's transform table
+    // at the origin (the same table the single-object packets copy the proxy's
+    // transform into, 0x1e7b30..0x1e7b63).
+    if (instance < flush->count)
+    {
+        const auto address = flush->global
+                                 ? flush->batch->renderer + 0x574280 + std::uint64_t(flush->origin + instance) * 48
+                                 : flush->source + std::uint64_t(flush->stride) * instance;
+        out.instanceRead = (flush->global || flush->source) && copyAt(address, out.instance);
+    }
+    if (!proxy)
+        return true;
+    out.currentRead = copyAt(proxy + 0x18, out.current);
+    out.historyRead = ReadCyberpunkMotionHistory(proxy, out.history);
+    if (out.historyRead && out.history.record)
+        out.previousRead = copyAt(out.history.record + 4, out.previous);
+    // mov rax, rcx; ret: the getter returns the proxy itself.
+    std::uint64_t table = 0, getter = 0;
+    std::uint32_t code = 0;
+    if (copyAt(proxy, table) && copyAt(table + 0x130, getter) && copyAt(getter, code))
+        out.ownHistory = code == 0xc3c18b48u ? 1 : 0;
+    return true;
 }
 } // namespace GlassFg

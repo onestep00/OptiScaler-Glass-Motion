@@ -20,7 +20,7 @@
 
 - [tools/AGENTS.md](tools/AGENTS.md): Offline native motion matching, grafting and expression verification tools; use a local inventory workspace.
 
-- [EngineMotionSupply.md](EngineMotionSupply.md): Engine MotionMatrix supply, declaration hook and graft evidence. The 2026-09-23 section records the in-DLL declaration hook, the exported graft catalog, the live array convention (camera-only; the root graft fails on arrays) and the factory rule. The in-DLL hook and the glasses recheck have not run in game.
+- [EngineMotionSupply.md](EngineMotionSupply.md): Engine MotionMatrix supply, declaration hook and graft evidence. The 2026-09-23 section records the in-DLL declaration hook, the exported graft catalog, the live array convention (camera-only; the root graft fails on arrays) and the factory rule. The 2026-09-24 sections record the vehicle refusal and the proxy history convention (the rows carry a previous pose only for a proxy re-transformed this frame), the `motionprobe=` diagnostic and the `stalemotion=camera` rule. The in-DLL hook and the glasses recheck have not run in game; the probe and the rule have not run in game.
 
 - [tests/Timeline.md](tests/Timeline.md): Live diagnostic array-parent lookup reaches 4,984/5,896 queries; neighbor-frame-only results prohibit temporal admission. Direct packet parent source added; no new MV/FG.
 

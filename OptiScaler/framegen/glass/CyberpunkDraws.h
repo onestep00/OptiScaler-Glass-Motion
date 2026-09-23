@@ -84,6 +84,56 @@ struct CyberpunkShapeSample
     std::uint32_t reason = 0; // 0..5 in the order of the six conditions
 };
 std::size_t ReadCyberpunkShapeSamples(CyberpunkShapeSample* out, std::size_t capacity) noexcept;
+// Engine MotionMatrix supply state of a draw owner (proxy), read the way the
+// engine's own consumers read it (EngineMotionSupply.md "Proxy history
+// convention"). A transform update snapshots the pre-update transform into the
+// proxy's history record (0x1e54c8: new record state 1, reused record state
+// 0); the UpdateState epilogue ages every record (0x88e638: state < 2 gains 1,
+// state 2 releases it). The MotionMatrix supplier writes the record's pose only
+// for state <= 1 and a nonzero weight, and the proxy's current transform
+// otherwise (0x56c211..0x56c255); the velocity-pass gate adds the velocity
+// feature for a non-array proxy only in state 1, or with the motion flag and
+// active skinning or special input (0x1e92b1..0x1e934d). Guarded reads only.
+struct CyberpunkMotionHistory
+{
+    std::uint64_t record = 0;    // proxy+0x130: 52-byte history record, 0 = none
+    std::uint32_t stamp = 0;     // proxy+0x90: render tick of the last bounds change
+    std::uint8_t state = 0xff;   // record byte 0; 0xff without a record
+    std::uint8_t weight = 0;     // proxy+0x9e: MotionMatrix weight x 255
+    std::uint8_t flags = 0;      // proxy+0x9c: bit 0 = motion flag
+    // The supplier writes the record's previous pose into the MotionMatrix
+    // rows; otherwise the rows hold the current transform.
+    bool supplied() const noexcept { return record && state <= 1 && weight; }
+    // No supplied previous pose and no motion-flag route that could still give
+    // the proxy object velocity: the engine's velocity for this proxy is the
+    // camera-only velocity initialization.
+    bool cameraOnly() const noexcept { return !supplied() && !(flags & 1); }
+};
+// Any thread. False when the proxy header or its record is unreadable.
+bool ReadCyberpunkMotionHistory(std::uint64_t proxy, CyberpunkMotionHistory& out) noexcept;
+// Motion probe (motionprobe=<hex>) sample of the draw being recorded, only
+// inside the admitted engine draw callback. Each transform is the 48-byte packed
+// 3x4 layout: three rows of three floats, word 3 of each row the integer world
+// translation in 1/131072 m.
+//   rows      MotionMatrix rows 24..26 of the engine's 448-byte modifier block
+//             that its flush uploaded to b7 for this draw (zero without the
+//             audited flush frames or before motionprobe was armed)
+//   instance  the INSTANCE_TRANSFORM record of instance `instance` of the draw
+//   current   the owner proxy's transform (+0x18), the supplier's fallback
+//   previous  the owner proxy's history pose (record+4)
+struct CyberpunkMotionSample
+{
+    CyberpunkMotionHistory history;
+    std::array<std::uint32_t, 12> rows {}, instance {}, current {}, previous {};
+    std::uint32_t frame = 0;
+    // 1: the proxy's virtual +0x130 (the supplier's history source) returns the
+    // proxy itself, so +0x130 is the record the supplier reads. 0: another
+    // getter. -1: unreadable.
+    std::int8_t ownHistory = -1;
+    bool rowsRead = false, instanceRead = false, currentRead = false, previousRead = false,
+         historyRead = false;
+};
+bool ReadCyberpunkMotionSample(std::uint64_t proxy, std::uint32_t instance, CyberpunkMotionSample& out) noexcept;
 struct CyberpunkDrawStatus
 {
     bool active = false;

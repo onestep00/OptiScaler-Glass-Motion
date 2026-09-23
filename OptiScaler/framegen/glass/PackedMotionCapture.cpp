@@ -14,8 +14,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdarg>
+#include <cstdio>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -150,11 +152,16 @@ class Capture final : public GeometryDrawCaptureOwner
     // Dump id table row (PackedMotionCapture.h): a boundary ID and the constant
     // index of the draw that admitted the element.
     struct DumpId { std::uint16_t id, constant; };
-    // Draw variant of a dump id table row, by constant index.
-    enum DumpVariant : std::uint8_t { DumpVariantHistory, DumpVariantRoot, DumpVariantArray };
+    // Draw variant of a dump id table row, by constant index. Stale: a
+    // single-instance root draw that took the camera-only variant under the
+    // stale MotionMatrix rule (stalemotion=camera).
+    enum DumpVariant : std::uint8_t { DumpVariantHistory, DumpVariantRoot, DumpVariantArray, DumpVariantStale };
     static const char* dumpVariantName(std::uint8_t variant) noexcept
     {
-        return variant == DumpVariantRoot ? "root" : variant == DumpVariantArray ? "array" : "history";
+        return variant == DumpVariantRoot    ? "root"
+               : variant == DumpVariantArray ? "array"
+               : variant == DumpVariantStale ? "stale"
+                                             : "history";
     }
     struct Frame
     {
@@ -244,6 +251,42 @@ class Capture final : public GeometryDrawCaptureOwner
     std::atomic<unsigned> gateDetailLines { 0 }, gateAdmitLines { 0 };
     // Bounded log for the stale-slot recovery in beginMappings (diagnostics).
     unsigned staleSlotReports = 0;
+    // Motion probe (motionprobe=<hex>, probeMotion). Every probed draw updates
+    // the per-proxy track and the totals; the first ProbeDrawsPerWindow draws of
+    // each two-second window also print their MOTION_PROBE lines. The track
+    // holds the INSTANCE_TRANSFORM a proxy's draws used in the last two render
+    // frames it was seen, so a draw's MotionMatrix rows can be compared with
+    // the transform the proxy was drawn with one frame earlier. Fixed storage;
+    // probeMutex is taken only by probed draws.
+    struct ProbeTrack
+    {
+        std::uint64_t proxy = 0;
+        std::uint32_t frame = 0, earlierFrame = 0;
+        std::array<std::uint32_t, 12> instance {}, earlier {};
+    };
+    static constexpr unsigned ProbeTrackCount = 32, ProbeDrawsPerWindow = 8;
+    static constexpr std::uint64_t ProbeWindowMs = 2000;
+    std::mutex probeMutex;
+    std::array<ProbeTrack, ProbeTrackCount> probeTracks {};
+    unsigned probeTrackCursor = 0;
+    std::atomic<std::uint64_t> probeWindow { 0 };
+    std::atomic<unsigned> probeLines { 0 };
+    enum ProbeTotal : unsigned
+    {
+        ProbeDraws,
+        ProbePrinted,
+        ProbeRowsNone,
+        ProbeRowsCurrent,
+        ProbeRowsPrevious,
+        ProbeRowsOther,
+        ProbeInstanceOther,
+        ProbeSupplied,
+        ProbeStale,
+        ProbeEarlierMatch,
+        ProbeEarlierMiss,
+        ProbeTotalCount
+    };
+    std::array<std::atomic<std::uint64_t>, ProbeTotalCount> probeTotals {};
     // The capture mutex. It guards the frame slots and their upload memory, the
     // object mappings, the submission and fence bookkeeping, the dump id table,
     // `counters`, `overflowChunks` and the span family table. Every recording
@@ -742,6 +785,173 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     {
         return used.load(std::memory_order_relaxed) < limit && used.fetch_add(1, std::memory_order_relaxed) < limit;
     }
+    // One packed 3x4 transform (CyberpunkDraws.h CyberpunkMotionSample) as
+    // "m00,m01,m02,T0;m10,m11,m12,T1;m20,m21,m22,T2": floats as %.9g, the
+    // integer translation words in 1/131072 m. "-" when it was not read.
+    static void formatTransform(char* out, std::size_t size, const std::array<std::uint32_t, 12>& value,
+                                bool read) noexcept
+    {
+        if (!read)
+        {
+            std::snprintf(out, size, "-");
+            return;
+        }
+        const auto f = [&](unsigned i) { return double(std::bit_cast<float>(value[i])); };
+        const auto t = [&](unsigned i) { return int(std::int32_t(value[i])); };
+        std::snprintf(out, size, "%.9g,%.9g,%.9g,%d;%.9g,%.9g,%.9g,%d;%.9g,%.9g,%.9g,%d", f(0), f(1), f(2), t(3), f(4),
+                      f(5), f(6), t(7), f(8), f(9), f(10), t(11));
+    }
+    // Motion probe of one draw of the selected pipeline (motionprobe=<hex>,
+    // GlassControls.h), diagnostics only. It reads what the engine's
+    // MotionMatrix supply gave the draw (ReadCyberpunkMotionSample): the rows
+    // 24..26 its flush uploaded to b7, the draw's INSTANCE_TRANSFORM and the
+    // owner proxy's transform and history record. The rows are classified
+    // against the proxy's transform and history pose, and against the transform
+    // the proxy was drawn with one render frame earlier. Guarded reads, fixed
+    // storage and stack buffers only. Called outside the capture mutex.
+    void probeMotion(const GeometryDrawView& draw, const GeometryIndexedArguments& args,
+                     const GeometryPipelineEntry& pipeline, const GeometryBatchSpan* span, const char* variant,
+                     bool stale) noexcept
+    {
+        const auto bump = [this](ProbeTotal total)
+        { probeTotals[total].fetch_add(1, std::memory_order_relaxed); };
+        const std::uint64_t proxy = span ? (span->identity ? span->identity.proxy : span->parent.proxy) : 0;
+        CyberpunkMotionSample sample;
+        const bool sampled = ReadCyberpunkMotionSample(proxy, span ? span->first : 0, sample);
+        bump(ProbeDraws);
+        // rows: cur = the proxy's current transform (no previous pose supplied),
+        // prev = its history pose, other = neither. inst: the draw's
+        // INSTANCE_TRANSFORM against the proxy's transform.
+        const char* rows = !sample.rowsRead ? "none"
+                           : sample.currentRead && sample.rows == sample.current ? "cur"
+                           : sample.previousRead && sample.rows == sample.previous ? "prev"
+                                                                                  : "other";
+        const char* instance = !sample.instanceRead                                    ? "none"
+                               : sample.currentRead && sample.instance == sample.current ? "cur"
+                                                                                        : "other";
+        bump(!sample.rowsRead           ? ProbeRowsNone
+             : rows[0] == 'c'           ? ProbeRowsCurrent
+             : rows[0] == 'p'           ? ProbeRowsPrevious
+                                        : ProbeRowsOther);
+        if (sample.instanceRead && instance[0] == 'o')
+            bump(ProbeInstanceOther);
+        if (sample.historyRead && sample.history.supplied())
+            bump(ProbeSupplied);
+        if (stale)
+            bump(ProbeStale);
+        // earlier: 1 when the rows equal the INSTANCE_TRANSFORM this proxy was
+        // drawn with in the previous render frame, 0 when they differ, -1
+        // without a sample of that frame.
+        int earlier = -1;
+        if (sampled && proxy && sample.instanceRead)
+        {
+            std::lock_guard lock(probeMutex);
+            ProbeTrack* track = nullptr;
+            for (auto& entry : probeTracks)
+                if (entry.proxy == proxy)
+                {
+                    track = &entry;
+                    break;
+                }
+            if (!track)
+            {
+                track = &probeTracks[probeTrackCursor++ % ProbeTrackCount];
+                *track = {};
+                track->proxy = proxy;
+            }
+            if (track->frame != sample.frame)
+            {
+                track->earlierFrame = track->frame;
+                track->earlier = track->instance;
+                track->frame = sample.frame;
+                track->instance = sample.instance;
+            }
+            if (sample.rowsRead && track->earlierFrame && track->earlierFrame + 1 == sample.frame)
+                earlier = track->earlier == sample.rows ? 1 : 0;
+        }
+        if (earlier >= 0)
+            bump(earlier ? ProbeEarlierMatch : ProbeEarlierMiss);
+        if (!log)
+            return;
+        // The first probed draw of a new window writes the totals since arming.
+        const auto window = GetTickCount64() / ProbeWindowMs;
+        auto seen = probeWindow.load(std::memory_order_relaxed);
+        const bool summary =
+            seen != window && probeWindow.compare_exchange_strong(seen, window, std::memory_order_relaxed);
+        if (summary)
+            probeLines.store(0, std::memory_order_relaxed);
+        const bool detail = claimLine(probeLines, ProbeDrawsPerWindow);
+        if (!summary && !detail)
+            return;
+        char line[2048];
+        _lock_file(log);
+        if (summary)
+        {
+            const auto total = [this](ProbeTotal value)
+            { return static_cast<unsigned long long>(probeTotals[value].load(std::memory_order_relaxed)); };
+            const auto digits = MotionProbeDigits();
+            std::snprintf(line, sizeof(line),
+                          "MOTION_PROBE_SUM prefix=%0*llx draws=%llu printed=%llu rows_none=%llu rows_cur=%llu "
+                          "rows_prev=%llu rows_other=%llu inst_other=%llu supplied=%llu stale=%llu "
+                          "earlier_match=%llu earlier_miss=%llu stalemotion=%s\n",
+                          int(digits ? digits : 1),
+                          static_cast<unsigned long long>(
+                              digits ? MotionProbePrefixValue().load(std::memory_order_relaxed) >> (64 - 4 * digits)
+                                     : 0),
+                          total(ProbeDraws), total(ProbePrinted), total(ProbeRowsNone), total(ProbeRowsCurrent),
+                          total(ProbeRowsPrevious), total(ProbeRowsOther), total(ProbeInstanceOther),
+                          total(ProbeSupplied), total(ProbeStale), total(ProbeEarlierMatch), total(ProbeEarlierMiss),
+                          StaleMotionCameraEnabled() ? "camera" : "off");
+            std::fputs(line, log);
+        }
+        if (detail)
+        {
+            bump(ProbePrinted);
+            // Rows minus INSTANCE_TRANSFORM: translation in mm and the largest
+            // rotation/scale entry difference. Both zero when the rows carry no
+            // motion for this draw.
+            double dt[3] {};
+            double dr = 0.0;
+            const bool compared = sample.rowsRead && sample.instanceRead;
+            if (compared)
+                for (unsigned row = 0; row < 3; ++row)
+                {
+                    dt[row] = double(std::int64_t(std::int32_t(sample.rows[row * 4 + 3])) -
+                                     std::int64_t(std::int32_t(sample.instance[row * 4 + 3]))) *
+                              (1000.0 / 131072.0);
+                    for (unsigned column = 0; column < 3; ++column)
+                        dr = (std::max)(dr, std::fabs(double(std::bit_cast<float>(sample.rows[row * 4 + column])) -
+                                                      double(std::bit_cast<float>(sample.instance[row * 4 + column]))));
+                }
+            char state[8] = "-";
+            if (sample.historyRead && sample.history.record)
+                std::snprintf(state, sizeof(state), "%u", unsigned(sample.history.state));
+            std::snprintf(line, sizeof(line),
+                          "MOTION_PROBE frame=%u vs=%016llx ps=%016llx pipeline=%llu chunk=%u instances=%u spans=%zu "
+                          "proxy=%llx variant=%s rows=%s inst=%s record=%d state=%s weight=%u flags=0x%02x "
+                          "stamp=%u own=%d supplied=%d earlier=%d dt_mm=%.3f,%.3f,%.3f dr=%.3g\n",
+                          sample.frame, static_cast<unsigned long long>(pipeline.vertexHash),
+                          static_cast<unsigned long long>(pipeline.pixelHash),
+                          static_cast<unsigned long long>(pipeline.identity), draw.chunk, args.instances,
+                          draw.objects.size(), static_cast<unsigned long long>(proxy), variant, rows, instance,
+                          sample.historyRead ? (sample.history.record ? 1 : 0) : -1, state,
+                          unsigned(sample.history.weight), unsigned(sample.history.flags), sample.history.stamp,
+                          int(sample.ownHistory), sample.historyRead && sample.history.supplied() ? 1 : 0, earlier,
+                          dt[0], dt[1], dt[2], compared ? dr : -1.0);
+            std::fputs(line, log);
+            char rowsText[256], instanceText[256], currentText[256], previousText[256];
+            formatTransform(rowsText, sizeof(rowsText), sample.rows, sample.rowsRead);
+            formatTransform(instanceText, sizeof(instanceText), sample.instance, sample.instanceRead);
+            formatTransform(currentText, sizeof(currentText), sample.current, sample.currentRead);
+            formatTransform(previousText, sizeof(previousText), sample.previous, sample.previousRead);
+            std::snprintf(line, sizeof(line), "MOTION_PROBE_M frame=%u proxy=%llx rows=%s inst=%s cur=%s prev=%s\n",
+                          sample.frame, static_cast<unsigned long long>(proxy), rowsText, instanceText, currentText,
+                          previousText);
+            std::fputs(line, log);
+        }
+        std::fflush(log);
+        _unlock_file(log);
+    }
     // Per-pipeline entry of a draw-level gate; CoverageGateCount for the gates
     // that describe the capture or the draw rather than the pipeline (failed
     // capture, missing command, frame id or instances).
@@ -922,6 +1132,43 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 graftDraw = false;
             }
         }
+        // Stale MotionMatrix rule (stalemotion=camera, GlassControls.h). The
+        // root graft reads the previous transform from the engine's MotionMatrix
+        // rows, which hold a previous pose only while the owner proxy's history
+        // record is in state <= 1 with a nonzero weight; otherwise the supplier
+        // writes the proxy's current transform (EngineMotionSupply.md "Proxy
+        // history convention"). The engine gives such a proxy no object
+        // velocity: its velocity pass skips a non-array proxy outside state 1
+        // unless the motion flag routes skinning or a special input, and the
+        // velocity initialization applies the previous camera to the current
+        // surface. The draw then takes the camera-only variant, which is that
+        // convention. An unreadable owner keeps the root graft.
+        const GeometryBatchSpan* ownerSpan = nullptr;
+        for (const auto& span : draw.objects)
+            if (span.count)
+            {
+                ownerSpan = &span;
+                break;
+            }
+        bool staleCamera = false;
+        if (graftDraw && ownerSpan && pipeline->packedArray && StaleMotionCameraEnabled())
+        {
+            CyberpunkMotionHistory history;
+            if (ReadCyberpunkMotionHistory(ownerSpan->identity.proxy, history) && history.cameraOnly())
+            {
+                packedPipeline = pipeline->packedArray.Get();
+                graftDraw = false;
+                graftArrayDraw = true;
+                staleCamera = true;
+            }
+        }
+        if (MotionProbeArmed() && MotionProbeMatches(pipeline->vertexHash))
+            probeMotion(draw, args, *pipeline, ownerSpan,
+                        graftDraw        ? "root"
+                        : staleCamera    ? "stale"
+                        : graftArrayDraw ? "array"
+                                         : "history",
+                        staleCamera);
         // Graft variants (root or camera) read no GlassHistory and write no
         // GlassNext: their VS tests only the mapping generation and exports the
         // map index. Their elements take identity-only mappings (mapping slot
@@ -1188,6 +1435,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 if (reserved && frameSlot->idsRecording)
                 {
                     frameSlot->idVariants[constantIndex] = graftDraw        ? DumpVariantRoot
+                                                           : staleCamera    ? DumpVariantStale
                                                            : graftArrayDraw ? DumpVariantArray
                                                                             : DumpVariantHistory;
                     for (unsigned i = 0; i < count; ++i)
@@ -1304,11 +1552,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         if (refusal != GateStageCount && gate)
             pipeline->coverage.gates[GeometryPipelineEntry::GatePartial].fetch_add(1, std::memory_order_relaxed);
         if (historyFree)
-            NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
+            NoteGeometryGraft(graftDraw ? GraftDraws : staleCamera ? GraftStaleCameraDraws : GraftArrayDraws);
         if (gate)
         {
             auto& coverage = pipeline->coverage;
             coverage.captures.fetch_add(1, std::memory_order_relaxed);
+            // A stale-rule draw used the camera-only variant, so it counts as
+            // `array` here; GRAFT stale_camera and the dump variant `stale`
+            // tell it apart.
             if (graftDraw)
                 coverage.graft.fetch_add(1, std::memory_order_relaxed);
             else if (graftArrayDraw)

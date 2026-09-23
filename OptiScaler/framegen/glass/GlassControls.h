@@ -303,6 +303,63 @@ inline std::atomic<bool>& StripeProbeFlag() noexcept
 }
 inline void SetStripeProbe(bool enabled) noexcept { StripeProbeFlag().store(enabled, std::memory_order_relaxed); }
 inline bool StripeProbeEnabled() noexcept { return StripeProbeFlag().load(std::memory_order_relaxed); }
+// Engine MotionMatrix probe, live motionprobe=<hex>|off, diagnostic only and off
+// by default. <hex> is a vertex-shader hash prefix of 1..16 hex digits,
+// compared with the top bits of GeometryPipelineEntry::vertexHash (the %016llx
+// value the coverage report prints). Draws of a matching pipeline log what the
+// engine's MotionMatrix supply gave them (MOTION_PROBE lines,
+// PackedMotionCapture.cpp). Session value only. The prefix is written before
+// the digit count and read after it, so a reader never pairs a new count with
+// an old prefix.
+inline std::atomic<std::uint64_t>& MotionProbePrefixValue() noexcept
+{
+    static std::atomic<std::uint64_t> value { 0 };
+    return value;
+}
+inline std::atomic<unsigned>& MotionProbeDigitsValue() noexcept
+{
+    static std::atomic<unsigned> value { 0 };
+    return value;
+}
+// digits 0 turns the probe off. prefix holds the digits right-aligned.
+inline void SetMotionProbe(std::uint64_t prefix, unsigned digits) noexcept
+{
+    digits = std::min(digits, 16u);
+    MotionProbeDigitsValue().store(0, std::memory_order_release);
+    MotionProbePrefixValue().store(digits ? prefix << (64 - 4 * digits) : 0, std::memory_order_relaxed);
+    MotionProbeDigitsValue().store(digits, std::memory_order_release);
+}
+inline unsigned MotionProbeDigits() noexcept { return MotionProbeDigitsValue().load(std::memory_order_acquire); }
+inline bool MotionProbeArmed() noexcept { return MotionProbeDigitsValue().load(std::memory_order_relaxed) != 0; }
+inline bool MotionProbeMatches(std::uint64_t vertexHash) noexcept
+{
+    const auto digits = MotionProbeDigits();
+    if (!digits)
+        return false;
+    const auto shift = 64 - 4 * digits;
+    return (vertexHash >> shift) == (MotionProbePrefixValue().load(std::memory_order_relaxed) >> shift);
+}
+// Stale MotionMatrix rule, live stalemotion=camera|off, default camera. A root
+// graft takes its previous clip from the engine's MotionMatrix rows 24..26. The
+// engine writes a previous pose there only for a proxy whose transform history
+// record is in state <= 1 with a nonzero motion weight (supplier 0x56c194), and
+// it draws a rigid proxy in its velocity pass only in state 1 (gate 0x1e9228).
+// Every other proxy keeps the camera-only velocity of the velocity
+// initialization (EngineMotionSupply.md "Proxy history convention").
+// Camera: a single-instance root-graft draw whose owner proxy has no supplied
+// previous pose and no motion flag takes the camera-only variant, the engine's
+// own convention for that proxy. Off: the draw keeps the root graft whatever
+// the rows hold, for A/B. Session value only.
+inline std::atomic<bool>& StaleMotionCameraFlag() noexcept
+{
+    static std::atomic<bool> value { true };
+    return value;
+}
+inline void SetStaleMotionCamera(bool enabled) noexcept
+{
+    StaleMotionCameraFlag().store(enabled, std::memory_order_relaxed);
+}
+inline bool StaleMotionCameraEnabled() noexcept { return StaleMotionCameraFlag().load(std::memory_order_relaxed); }
 // Bisect switch shared with the pipeline cache. Inline so every build target
 // (module, settings test, GPU fixtures) resolves it without extra linkage.
 inline std::atomic<bool>& GeometryPipelineCompilationFlag() noexcept
