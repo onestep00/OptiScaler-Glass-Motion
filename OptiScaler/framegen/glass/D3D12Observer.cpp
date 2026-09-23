@@ -25,7 +25,7 @@ std::mutex installMutex;
 struct Call
 {
     bool active;
-    Call() : active(!internalDepth)
+    explicit Call(bool forward) : active(forward)
     {
         if (active)
             callbacks.enter(callbacks.context);
@@ -41,13 +41,21 @@ bool stateTracked(Command* command)
     return !internalDepth && (callbacks.stateTracked ? callbacks.stateTracked(callbacks.context, command)
                                                      : command->GetType() == D3D12_COMMAND_LIST_TYPE_COMPUTE);
 }
+bool resetTracked(Command* command)
+{
+    return !internalDepth && (!callbacks.resetTracked || callbacks.resetTracked(callbacks.context, command));
+}
 template <auto Method> using MethodType = typename rewrite_signature<decltype(Method)>::type;
 
+// Every list of the device resets here, ~70 times per engine frame. Only the
+// lists the host's predicate names enter the observer section; the others pay
+// the probe scope and that lock-free identity check, and never wait for the
+// section a concurrent submission holds across ExecuteCommandLists.
 MethodType<&Command::Reset> originalReset = nullptr;
 HRESULT WINAPI reset(Command* command, ID3D12CommandAllocator* allocator, ID3D12PipelineState* pipeline)
 {
     const HookCostScope cost(ObserverHookCost(), true);
-    Call call;
+    Call call(resetTracked(command));
     HRESULT result = E_FAIL;
     {
         HookCostPause pause(cost);
@@ -132,7 +140,7 @@ MethodType<&ID3D12CommandQueue::ExecuteCommandLists> originalSubmit = nullptr;
 void WINAPI submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* commands)
 {
     const HookCostScope cost(ObserverHookCost(), true);
-    Call call;
+    Call call(!internalDepth);
     // Preserve identities through post-submit completion bookkeeping, even if
     // another app thread drops its own reference immediately after submission.
     if (call.active)
@@ -155,7 +163,7 @@ MethodType<&ID3D12CommandQueue::Signal> originalSignal = nullptr;
 HRESULT WINAPI signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value)
 {
     const HookCostScope cost(ObserverHookCost(), true);
-    Call call;
+    Call call(!internalDepth);
     HRESULT result = E_FAIL;
     {
         HookCostPause pause(cost);
@@ -169,7 +177,7 @@ MethodType<&ID3D12CommandQueue::Wait> originalWait = nullptr;
 HRESULT WINAPI wait(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value)
 {
     const HookCostScope cost(ObserverHookCost(), true);
-    Call call;
+    Call call(!internalDepth);
     HRESULT result = E_FAIL;
     {
         HookCostPause pause(cost);

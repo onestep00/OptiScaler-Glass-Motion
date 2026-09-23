@@ -414,6 +414,8 @@ void NoteFgOutputDumpReset(ID3D12GraphicsCommandList* command) noexcept
             s.slots[i].state = SlotState::Dropped;
 }
 
+bool FgOutputDumpTracksResets() noexcept { return active(state().phase.load(std::memory_order_relaxed)); }
+
 void RetireFgOutputDump(FgDumpLog log) noexcept
 {
     auto& s = state();

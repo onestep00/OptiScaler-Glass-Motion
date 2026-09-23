@@ -876,9 +876,51 @@ int wmain(int argc, wchar_t** argv)
                         "outside coverage changed");
             }
         for (auto& read : reads) read->Unmap(0, nullptr);
+
+        // Forward-depth frame on the same records: smaller is nearer, so object
+        // 2 (.3, below the opacity threshold) now lies in front of the engine
+        // surface and object 1 (.8) behind it. The visible boundary of a
+        // low-opacity object takes the exact object motion and depth (C3/C4),
+        // its interior keeps the engine values, and object 1 is occluded.
+        GlassFg::SetFrameDepthInverted(0u);
+        checked(allocator->Reset(), "forward allocator reset");
+        checked(command->Reset(allocator.Get(), nullptr), "forward command reset");
+        for (unsigned i = 0; i < outputs.size(); ++i)
+            transition(command.Get(), outputs[i], D3D12_RESOURCE_STATE_COPY_SOURCE, states[i]);
+        frame.frame = 3;
+        require(gpu.dispatch(command.Get(), frame, motion.Get(), depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_DEST, float(Width), float(Height),
+                             1.5f, .5f, { true, 50, false, 2 }), "forward dispatch");
+        for (unsigned i = 0; i < outputs.size(); ++i)
+        {
+            transition(command.Get(), outputs[i], states[i], D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION source {}, destination {};
+            source.pResource = outputs[i];
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.pResource = reads[i].Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = footprints[i];
+            command->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        checked(command->Close(), "forward close");
+        queue->ExecuteCommandLists(1, lists);
+        drain(device.Get(), queue.Get());
+        for (unsigned i = 0; i < reads.size(); ++i)
+            checked(reads[i]->Map(0, nullptr, &data[i]), "forward read map");
+        require(std::abs(motionAt(20, 9, 0) + .09375f) < .001f && std::abs(motionAt(20, 9, 1) - .05f) < .001f &&
+                    std::abs(depthAt(20, 9) - .3f) < .001f && selectionAt(20, 9) > .99f,
+                "forward-depth low-opacity boundary mismatch");
+        require(motionAt(24, 10, 0) == background[0] && depthAt(24, 10) == backgroundDepth &&
+                    selectionAt(24, 10) == 0,
+                "forward-depth low-opacity interior changed");
+        require(motionAt(4, 8, 0) == background[0] && depthAt(4, 8) == backgroundDepth && selectionAt(4, 8) == 0 &&
+                    motionAt(10, 10, 0) == background[0] && depthAt(10, 10) == backgroundDepth &&
+                    selectionAt(10, 10) == 0,
+                "forward-depth engine-nearer record was not occluded");
+        for (auto& read : reads) read->Unmap(0, nullptr);
         gpu.releaseAfterGpuDrain();
         std::puts("PACKED_MOTION_GPU_OK background_preserved=1 exact_inner_edge=1 threshold_interior=1 "
-                  "reverse_depth=1 engine_nearer_occluded=1 jitter_mode0=1 passes=1");
+                  "reverse_depth=1 forward_depth=1 engine_nearer_occluded=1 jitter_mode0=1 passes=1");
         return 0;
     }
     catch (const std::exception& error)

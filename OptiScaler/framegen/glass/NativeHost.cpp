@@ -79,12 +79,66 @@ struct Entry
         return true;
     }
 };
+// Command lists whose Reset a session has to see: every frame generation list
+// a session adopted and every list the second consumer composed on. All
+// session state keyed by a list identity (known lists, the recording gate, the
+// pending compose owners, the packed batch, the inline compose key) is created
+// for one of these lists, under Runtime::mutex, while that list is open on the
+// calling thread, so no Reset of it can race the add. Read without the lock by
+// the observer's Reset predicate. The table is emptied only once no session
+// entry remains (reap); a list that does not fit makes every Reset tracked
+// until then.
+class alignas(64) TrackedLists
+{
+  public:
+    void add(const void* list) noexcept
+    {
+        const auto used = count.load(std::memory_order_relaxed);
+        if (!list || used > Capacity || contains(list))
+            return;
+        if (used == Capacity)
+        {
+            count.store(Capacity + 1, std::memory_order_release);
+            return;
+        }
+        lists[used].store(list, std::memory_order_relaxed);
+        count.store(used + 1, std::memory_order_release);
+    }
+    void clear() noexcept
+    {
+        if (count.load(std::memory_order_relaxed) != 0)
+            count.store(0, std::memory_order_release);
+    }
+    bool contains(const void* list) const noexcept
+    {
+        const auto used = count.load(std::memory_order_acquire);
+        if (used > Capacity)
+            return true;
+        for (unsigned i = 0; i < used; ++i)
+            if (lists[i].load(std::memory_order_relaxed) == list)
+                return true;
+        return false;
+    }
+
+  private:
+    static constexpr unsigned Capacity = 64;
+    // Published entries, Capacity + 1 once a list did not fit. First, so the
+    // usual two to six lists share its cache line.
+    std::atomic<unsigned> count { 0 };
+    std::array<std::atomic<const void*>, Capacity> lists {};
+};
 struct Runtime
 {
     std::recursive_mutex mutex;
     std::shared_ptr<Entry> active;
-    std::atomic<ID3D12GraphicsCommandList*> activeCommand = nullptr;
+    // Read without the lock by the observer predicates: activeCommand on every
+    // binding setter of the device (~6k per engine frame), tracked on every
+    // Reset (~70). They change only when a session adopts or retires a list or
+    // the second consumer composes on a new one, so they are kept off the cache
+    // lines that every lock, unlock and evaluation counter writes.
+    alignas(64) std::atomic<ID3D12GraphicsCommandList*> activeCommand = nullptr;
     std::atomic<bool> submissionObserved = false;
+    TrackedLists tracked;
     std::array<std::shared_ptr<Entry>, 2> retiring;
     FILE* log = nullptr;
     bool logAttempted = false, unavailable = false, stopped = false;
@@ -184,6 +238,10 @@ struct Runtime
                 entry->session.releaseAfterGpuDrain();
                 entry.reset();
             }
+        // No session is left to refer to a list, so the Reset table starts over
+        // with the next one.
+        if (!active && !retiring[0] && !retiring[1])
+            tracked.clear();
         if (rebuildPending && !active && !retiring[0] && !retiring[1] && rebuildDevice)
         {
             const auto previous = ReadPackedMotionCaptureStatus();
@@ -406,6 +464,13 @@ D3D12Callbacks makeCallbacks()
     value.leave = [](void* p) { static_cast<Runtime*>(p)->mutex.unlock(); };
     value.stateTracked = [](void* p, ID3D12GraphicsCommandList* c)
     { return static_cast<Runtime*>(p)->activeCommand.load(std::memory_order_acquire) == c; };
+    // Reset reaches the sessions only for the lists they may refer to (see
+    // TrackedLists) and, while an output dump batch can hold a copy recorded
+    // into an open list, for every list. Any other Reset has no session or
+    // dump state to update; the packed capture drops its own recordings of it
+    // in the geometry command observer's Reset hook.
+    value.resetTracked = [](void* p, ID3D12GraphicsCommandList* c)
+    { return static_cast<Runtime*>(p)->tracked.contains(c) || FgOutputDumpTracksResets(); };
     value.reset = [](void* p, ID3D12GraphicsCommandList* c, bool okay, ID3D12PipelineState* initial)
     {
         auto& r = *static_cast<Runtime*>(p);
@@ -525,42 +590,28 @@ D3D12Callbacks makeCallbacks()
         // outputs while the compose is still executing therefore leaves it.
         // The frame generation batch can carry any of the lists the session
         // knows (one per back buffer), so the match is by membership.
+        bool matched = false;
+        if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
+            for (UINT i = 0; i < count && !matched; ++i)
+                matched = lists[i] == fg;
+        if (!matched && r.active)
+            for (UINT i = 0; i < count && !matched; ++i)
+                matched = r.active->session.handlesFgCommand(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+        if (matched)
         {
-            bool matched = false;
-            if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
-                for (UINT i = 0; i < count && !matched; ++i)
-                    matched = lists[i] == fg;
-            if (!matched && r.active)
-                for (UINT i = 0; i < count && !matched; ++i)
-                    matched = r.active->session.handlesFgCommand(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
-            if (matched)
-                {
-                    bool inFlight = false;
-                    r.each([&](Entry& e) { inFlight |= e.session.packedComposeInFlight(); });
-                    if (!inFlight)
-                        clearComposeMarker();
-                }
-        }
-        // Attribute a driver reset to the exact submitted batch that carried
-        // our substituted inputs.
-        {
-            bool matched = false;
-            if (auto* fg = r.activeCommand.load(std::memory_order_acquire))
-                for (UINT i = 0; i < count && !matched; ++i)
-                    matched = lists[i] == fg;
-            if (!matched && r.active)
-                for (UINT i = 0; i < count && !matched; ++i)
-                    matched = r.active->session.handlesFgCommand(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
-            if (matched)
-                {
-                    if (r.active)
-                        r.active->session.dumpSubmitted(q);
-                    if (r.log && ReadControls().trace && TraceWanted())
-                    {
-                        std::fprintf(r.log, "TRACE_SUBMIT fg=1 lists=%u queue=%p\n", count, q);
-                        std::fflush(r.log);
-                    }
-                }
+            bool inFlight = false;
+            r.each([&](Entry& e) { inFlight |= e.session.packedComposeInFlight(); });
+            if (!inFlight)
+                clearComposeMarker();
+            // Attribute a driver reset to the exact submitted batch that carried
+            // our substituted inputs.
+            if (r.active)
+                r.active->session.dumpSubmitted(q);
+            if (r.log && ReadControls().trace && TraceWanted())
+            {
+                std::fprintf(r.log, "TRACE_SUBMIT fg=1 lists=%u queue=%p\n", count, q);
+                std::fflush(r.log);
+            }
         }
         r.reap();
         // The live channel and the periodic log must not depend on the
@@ -622,6 +673,7 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
         {
             r.active->command = command;
             r.activeCommand.store(command, std::memory_order_release);
+            r.tracked.add(command);
         }
         const bool sameInputs =
             r.active->session.handlesFgCommand(command) && r.active->matches(command, inputs);
@@ -787,6 +839,7 @@ std::shared_ptr<Entry> acquire(Runtime& r, ID3D12GraphicsCommandList* command, c
     }
     r.active = entry;
     r.activeCommand.store(command, std::memory_order_release);
+    r.tracked.add(command);
     std::fprintf(r.log,
                  "NATIVE_HOST ready=1 handle=%p command=%p methods=%x width=%llu height=%u observer_ms=%.1f "
                  "capture_ms=%.1f session_ms=%.1f preinstall_ms=%.1f\n",
@@ -843,8 +896,14 @@ bool SecondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* mo
         std::lock_guard lock(r.mutex);
         if (!r.active)
             return false;
-        return r.active->session.secondConsumerGuides(command, motion, depth, motionArrival, depthArrival, jitterX,
-                                                      jitterY, scaleX, scaleY, outMotion, outDepth);
+        // The inline compose is keyed by this list, so its Reset has to reach
+        // the session from now on (see TrackedLists).
+        const bool served = r.active->session.secondConsumerGuides(command, motion, depth, motionArrival,
+                                                                   depthArrival, jitterX, jitterY, scaleX, scaleY,
+                                                                   outMotion, outDepth);
+        if (served)
+            r.tracked.add(command);
+        return served;
     }
     catch (...)
     {

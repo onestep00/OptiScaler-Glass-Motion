@@ -14,6 +14,11 @@ namespace
 // unresolved), never correctness.
 constexpr unsigned Capacity = 256;
 GlassArrayMappingEntry entries[Capacity] {};
+// Round-robin eviction cursor. Evicting a fixed slot kept whichever proxies
+// filled the table first for the whole session; a scene whose live arrays
+// were published later then missed every lookup (2026-09-23, hits=0 with
+// 1,259 evictions per 1,801 publishes).
+unsigned evictionCursor = 0;
 std::mutex mutex;
 std::atomic<std::uint64_t> published { 0 }, replaced { 0 }, lookups { 0 }, hits { 0 }, misses { 0 }, outOfRange { 0 },
     evictions { 0 }, rangeHits { 0 }, rangeAmbiguous { 0 };
@@ -143,8 +148,11 @@ void PublishArrayMapping(const GlassArrayMappingEntry& source) noexcept
             return;
         }
     }
-    // Table full: replace the oldest proxy slot (first entry).
-    entries[0] = entry;
+    // Table full: replace the slot under the round-robin cursor, so every
+    // resident proxy is evicted in turn and the live scene's arrays become
+    // resident within one cycle of the table.
+    entries[evictionCursor] = entry;
+    evictionCursor = (evictionCursor + 1) % Capacity;
     ++evictions;
     ++replaced;
     publishGeneration.fetch_add(1, std::memory_order_release);

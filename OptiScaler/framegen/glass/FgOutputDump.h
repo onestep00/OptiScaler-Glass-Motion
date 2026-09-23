@@ -42,6 +42,10 @@ void NoteFgOutputDumpSubmit(ID3D12CommandQueue* queue, unsigned count, ID3D12Com
 // Queue observer, after a command-list reset: a recorded copy whose list was
 // reset without being submitted never executes.
 void NoteFgOutputDumpReset(ID3D12GraphicsCommandList* command) noexcept;
+// Lock-free: true while a batch can hold a copy recorded into a list that is
+// still open (armed or draining), i.e. while NoteFgOutputDumpReset has to see
+// the Reset of every list.
+bool FgOutputDumpTracksResets() noexcept;
 // Health thread: readback allocation, completion check, file write and release.
 void ServiceFgOutputDump(FgDumpLog log) noexcept;
 // Frame generation feature released or host stopped: no further phase is
