@@ -99,7 +99,6 @@ std::size_t ReadCyberpunkShapeSamples(CyberpunkShapeSample* out, std::size_t cap
 struct CyberpunkMotionHistory
 {
     std::uint64_t record = 0;    // proxy+0x130: 52-byte history record, 0 = none
-    std::uint32_t stamp = 0;     // proxy+0x90: render tick of the last bounds change
     std::uint8_t state = 0xff;   // record byte 0; 0xff without a record
     std::uint8_t weight = 0;     // proxy+0x9e: MotionMatrix weight x 255
     std::uint8_t flags = 0;      // proxy+0x9c: bit 0 = motion flag
@@ -115,8 +114,22 @@ struct CyberpunkMotionHistory
     // of its previous bones.
     bool cameraOnly() const noexcept { return !(record && state == 1) && !(flags & 1); }
 };
-// Any thread. False when the proxy header or its record is unreadable.
+// Any thread. False when the proxy header or its record is unreadable, or when
+// the startup admission below failed.
 bool ReadCyberpunkMotionHistory(std::uint64_t proxy, CyberpunkMotionHistory& out) noexcept;
+// Startup admission of the fields ReadCyberpunkMotionHistory reads: the RVAs of
+// the velocity collector, the MotionMatrix supplier and its history reader that
+// matched their audited profiles (CyberpunkLayoutProfile.h collectorProfile and
+// historyReader, CyberpunkDeclarationProfile.h supplierProfile), 0 for a failed
+// match. checked is false when the draw hooks never inspected the image.
+// Without admission the reader returns false and the stale MotionMatrix rule
+// keeps the root graft.
+struct CyberpunkMotionHistoryAdmission
+{
+    std::uint32_t collector = 0, supplier = 0, reader = 0;
+    bool checked = false, admitted = false;
+};
+CyberpunkMotionHistoryAdmission ReadCyberpunkMotionHistoryAdmission() noexcept;
 // Motion probe (motionprobe=<hex>) sample of the draw being recorded, only
 // inside the admitted engine draw callback. Each transform is the 48-byte packed
 // 3x4 layout: three rows of three floats, word 3 of each row the integer world

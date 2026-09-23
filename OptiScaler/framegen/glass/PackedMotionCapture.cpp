@@ -929,13 +929,13 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::snprintf(line, sizeof(line),
                           "MOTION_PROBE frame=%u vs=%016llx ps=%016llx pipeline=%llu chunk=%u instances=%u spans=%zu "
                           "proxy=%llx variant=%s rows=%s inst=%s record=%d state=%s weight=%u flags=0x%02x "
-                          "stamp=%u own=%d supplied=%d earlier=%d dt_mm=%.3f,%.3f,%.3f dr=%.3g\n",
+                          "own=%d supplied=%d earlier=%d dt_mm=%.3f,%.3f,%.3f dr=%.3g\n",
                           sample.frame, static_cast<unsigned long long>(pipeline.vertexHash),
                           static_cast<unsigned long long>(pipeline.pixelHash),
                           static_cast<unsigned long long>(pipeline.identity), draw.chunk, args.instances,
                           draw.objects.size(), static_cast<unsigned long long>(proxy), variant, rows, instance,
                           sample.historyRead ? (sample.history.record ? 1 : 0) : -1, state,
-                          unsigned(sample.history.weight), unsigned(sample.history.flags), sample.history.stamp,
+                          unsigned(sample.history.weight), unsigned(sample.history.flags),
                           int(sample.ownHistory), sample.historyRead && sample.history.supplied() ? 1 : 0, earlier,
                           dt[0], dt[1], dt[2], compared ? dr : -1.0);
             std::fputs(line, log);
@@ -2153,6 +2153,18 @@ bool InitializePackedMotionCapture(ID3D12Device* device, std::uint32_t width, st
         {
             std::fprintf(log, "PACKED_CAPTURE ready=1 width=%u height=%u frames=%u mapping=%u history_vertices=%u\n",
                          width, height, FrameCount, MappingCapacity, HistoryCapacity);
+            // Admission of the proxy history fields the stale MotionMatrix rule
+            // and the motion probe read (CyberpunkDraws.h), once per process.
+            // admitted=0 keeps every root draw on the root graft.
+            static std::atomic<bool> admissionLogged { false };
+            if (!admissionLogged.exchange(true, std::memory_order_relaxed))
+            {
+                const auto admission = ReadCyberpunkMotionHistoryAdmission();
+                std::fprintf(log,
+                             "STALE_MOTION_ADMISSION checked=%d admitted=%d collector=0x%x supplier=0x%x reader=0x%x\n",
+                             admission.checked ? 1 : 0, admission.admitted ? 1 : 0, admission.collector,
+                             admission.supplier, admission.reader);
+            }
             std::fflush(log);
         }
         return true;

@@ -2,6 +2,7 @@
 #include "CyberpunkDraws.h"
 #include "CyberpunkObjects.h"
 #include "CyberpunkLayout.h"
+#include "CyberpunkDeclarationProfile.h"
 #include "CyberpunkInstanceSelection.h"
 #include "DetourThreads.h"
 #include "GlassControls.h"
@@ -64,6 +65,8 @@ struct EngineDrawState
     // Motion probe only (modifierBlock): return addresses of the audited flush's
     // Rigid and Skinned calls, 0 when the flush is not the audited body.
     std::uint64_t rigidReturn = 0, skinnedReturn = 0;
+    // Startup admission of the proxy history fields (admitMotionHistory).
+    CyberpunkMotionHistoryAdmission historyAdmission;
     std::array<Batch, 16> pool;
     std::atomic<std::uint32_t> occupied = 0;
     // Every engine append and draw used to bump one shared cache line from
@@ -760,6 +763,27 @@ void resolveProbeFrames(EngineDrawState& state, const RelocatableCode& image, co
     state.rigidReturn = reinterpret_cast<std::uint64_t>(base + flush + 0xbe);
     state.skinnedReturn = reinterpret_cast<std::uint64_t>(base + flush + inspected);
 }
+// Admission of the proxy history fields ReadCyberpunkMotionHistory reads. The
+// velocity collector must match its audited profile (record +0x130, its state
+// byte, the motion flag +0x9c), the MotionMatrix supplier its profile (weight
+// +0x9e, transform +0x18, history getter +0x130) and the supplier's history
+// reader its exact bytes (state <= 1, pose at +4). Startup only.
+CyberpunkMotionHistoryAdmission admitMotionHistory(const RelocatableCode& image, const unsigned char* base) noexcept
+{
+    constexpr auto readerBytes = static_cast<std::uint32_t>(sizeof(CyberpunkProfile::historyReader));
+    CyberpunkMotionHistoryAdmission result;
+    result.checked = true;
+    result.collector = image.unique(CyberpunkProfile::collectorProfile);
+    result.supplier = image.unique(CyberpunkDeclarations::supplierProfile);
+    // The supplier's fourth reference is its call of the history reader.
+    const auto reader =
+        result.supplier ? image.referenced(result.supplier, CyberpunkDeclarations::supplierReferences[3]) : 0;
+    if (reader && image.contains(reader, readerBytes, RelocatableCode::Target::Code) &&
+        !std::memcmp(base + reader, CyberpunkProfile::historyReader, readerBytes))
+        result.reader = reader;
+    result.admitted = result.collector && result.supplier && result.reader;
+    return result;
+}
 
 void run(void* a, void* b, void* c)
 {
@@ -1307,13 +1331,17 @@ bool InitializeCyberpunkDraws(HMODULE executable) noexcept
         state->tick = reinterpret_cast<const volatile std::uint32_t*>(base + layout->tick);
         state->rendererGlobal = base + layout->rendererGlobal;
         state->drawReturn = base + layout->drawReturn;
-        // Code inspection bounds for the probe frames: the mapped image of the
-        // executable, as the layout resolution reads it.
+        // Code inspection bounds for the probe frames and the motion history
+        // admission: the mapped image of the executable, as the layout
+        // resolution reads it.
         MODULEINFO info {};
         RelocatableCode image;
         if (K32GetModuleInformation(GetCurrentProcess(), executable, &info, sizeof(info)) &&
             info.lpBaseOfDll == executable && image.initialize({ base, info.SizeOfImage }))
+        {
             resolveProbeFrames(*state, image, base, *layout);
+            state->historyAdmission = admitMotionHistory(image, base);
+        }
         HMODULE resident = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                                 reinterpret_cast<LPCWSTR>(&InitializeCyberpunkDraws), &resident))
@@ -1451,20 +1479,28 @@ std::size_t ReadCyberpunkShapeSamples(CyberpunkShapeSample* out, std::size_t cap
     }
     return count;
 }
+CyberpunkMotionHistoryAdmission ReadCyberpunkMotionHistoryAdmission() noexcept
+{
+    const auto* state = activeDrawState.load(std::memory_order_acquire);
+    return state ? state->historyAdmission : CyberpunkMotionHistoryAdmission {};
+}
 bool ReadCyberpunkMotionHistory(std::uint64_t proxy, CyberpunkMotionHistory& out) noexcept
 {
-    // One guard for the header fields the supplier and the velocity gate read
-    // (+0x90 stamp, +0x9c flags, +0x9e weight, +0x130 record) and the record's
-    // state byte. The gate reads +0x130 of the proxy itself (0x1e92b1); the
+    // One guard for the header fields the supplier and the velocity collector
+    // read (+0x9c flags, +0x9e weight, +0x130 record) and the record's state
+    // byte. The collector reads +0x130 of the proxy itself (0x1e92b1); the
     // supplier reaches it through the proxy's virtual +0x130, which returns the
     // proxy for mesh proxies (0x540500; see CyberpunkMotionSample::ownHistory).
+    // Nothing is read unless the startup admission matched both functions.
     out = {};
+    const auto* state = activeDrawState.load(std::memory_order_acquire);
+    if (!state || !state->historyAdmission.admitted)
+        return false;
     __try
     {
-        if (!readable(proxy + 0x90, 0xa8))
+        if (!readable(proxy + 0x9c, 0x138 - 0x9c))
             return false;
         const auto* header = reinterpret_cast<const unsigned char*>(proxy);
-        std::memcpy(&out.stamp, header + 0x90, sizeof(out.stamp));
         out.flags = header[0x9c];
         out.weight = header[0x9e];
         std::memcpy(&out.record, header + 0x130, sizeof(out.record));

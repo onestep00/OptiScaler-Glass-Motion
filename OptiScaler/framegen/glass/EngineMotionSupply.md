@@ -989,14 +989,27 @@ actually used, read from the engine's own modifier block on the CPU. The
 module's Rigid/Skinned hooks find that block in the batch run's frame: the flush
 saves the run's rbp, which is the block, in its home slot, and the hook checks
 both the flush return address and that saved value before it trusts the address
-(`CyberpunkDraws.cpp` `modifierBlock`, `resolveProbeFrames`). It also logs the
+(`CyberpunkDraws.cpp` `modifierBlock`, `resolveProbeFrames`). The startup check
+reads only bytes it has first placed inside the executable's code sections, so
+another build leaves the rows unavailable instead of faulting. It also logs the
 draw's INSTANCE_TRANSFORM (the flush's upload source, or the global transform
 table for a global flush), the owner proxy's +0x18, its history record, state,
-weight, flags and bounds stamp, and the rows compared with the transform the
-proxy was drawn with one frame earlier. The first 8 probed draws of every two
-seconds print `MOTION_PROBE` and `MOTION_PROBE_M`; every window starts with a
+weight and flags, and the rows compared with the transform the proxy was drawn
+with one frame earlier. The first 8 probed draws of every two seconds print
+`MOTION_PROBE` and `MOTION_PROBE_M`; every window starts with a
 `MOTION_PROBE_SUM` of all probed draws since arming. Line format:
 [README.md](README.md#live-channel-counters-and-dumps).
+
+Admission. The history fields (+0x130 record and its state byte, +0x9c flags,
++0x9e weight) are read only after three startup matches in the running image:
+the collector against its audited profile (`CyberpunkLayoutProfile.h`
+`collectorProfile`, 1,071 bytes, 23 masked address operands; unique in
+`a7de8294`), the supplier against `CyberpunkDeclarationProfile.h`
+`supplierProfile`, and the supplier's history reader against its exact 33
+bytes. Without all three `ReadCyberpunkMotionHistory` returns false, the rule
+keeps every root graft and the probe prints `record=-1`. The result is logged
+once as `STALE_MOTION_ADMISSION checked= admitted= collector= supplier= reader=`
+and shown as `motion_history=` in the status response.
 
 Rule (`stalemotion=camera`, default; `stalemotion=off` for A/B). A
 single-instance root-graft draw takes the camera-only variant when the
@@ -1018,6 +1031,6 @@ Expected probe readings. A proxy at rest: `rows=cur inst=cur`, `record=0` (or
 `record=1 state=2` in the two frames after its last move), `supplied=0`,
 `earlier=1`, `dt_mm=0.000,0.000,0.000 dr=0`, `variant=stale` (camera) or
 `root` (off). A proxy re-transformed every frame: `rows=prev inst=cur record=1
-state=1 supplied=1 earlier=1`, `stamp` equal to or one below `frame`, `dt_mm`
+state=1 supplied=1 earlier=1`, `dt_mm`
 its per-frame displacement, `variant=root`. (B): `inst=other`. (C):
 `rows=other`, or `rows=prev` with `earlier=0`. Not yet run in game.

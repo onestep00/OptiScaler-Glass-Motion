@@ -85,6 +85,7 @@ void writeStatus(std::ofstream& file)
          << " opaqueprobe=" << (OpaqueProbeEnabled() ? 1 : 0)
          << " stripes=" << (StripeProbeEnabled() ? 1 : 0)
          << " stalemotion=" << (StaleMotionCameraEnabled() ? "camera" : "off")
+         << " motion_history=" << (ReadCyberpunkMotionHistoryAdmission().admitted ? 1 : 0)
          << " motionprobe=" << motionProbeText()
          << " hookstages=" << (HookStageTiming() ? 1 : 0)
          << " gate=" << (GateArmed() ? 1 : 0) << "\n";

@@ -98,4 +98,27 @@ inline constexpr RelocatableCode::Profile functions[] {
     { 730, 0xe2422d46ca6696feull, groupedUpdateReferences },
     { 176, 0xb576d0760bd1f7e5ull, groupAppendReferences },
 };
+// Velocity collector (0x1e9228 in executable a7de8294). It reads the proxy's
+// history record (+0x130), the record's state
+// byte, the motion flag (+0x9c bit 0), the special-input flag (+0x7c) and the
+// instance header (+0x108, +0x114) before it adds the velocity technique (0x20).
+// Those offsets stay in the hash; the stale MotionMatrix rule mirrors this
+// function (CyberpunkMotionHistory::cameraOnly). Not part of the layout.
+inline constexpr Reference collectorReferences[] {
+    { 111, 115, Target::Writable }, { 116, 120, Target::Code },     { 232, 236, Target::Code },
+    { 245, 249, Target::Code },     { 262, 266, Target::Code },     { 343, 347, Target::Code },
+    { 379, 383, Target::Code },     { 397, 401, Target::Writable }, { 405, 409, Target::Code },
+    { 455, 459, Target::Code },     { 474, 478, Target::Code },     { 501, 505, Target::Writable },
+    { 509, 513, Target::Code },     { 595, 599, Target::ReadOnly }, { 730, 734, Target::ReadOnly },
+    { 756, 760, Target::ReadOnly }, { 796, 800, Target::Writable }, { 835, 839, Target::Writable },
+    { 866, 870, Target::Code },     { 909, 913, Target::Writable }, { 917, 921, Target::Code },
+    { 924, 928, Target::Writable }, { 1030, 1034, Target::Code },
+};
+inline constexpr RelocatableCode::Profile collectorProfile { 1071, 0x44570239c2235fb1ull, collectorReferences };
+// History reader the MotionMatrix supplier calls (0x56c408 in a7de8294): record
+// state <= 1, then the pose rows at +4, +0x14 and +0x24. A leaf function without
+// unwind data, compared byte for byte at the supplier's call destination.
+inline constexpr unsigned char historyReader[] { 0xb0, 0x01, 0x38, 0x01, 0x77, 0x18, 0x0f, 0x10, 0x41, 0x04, 0x0f,
+                                                 0x11, 0x02, 0x0f, 0x10, 0x49, 0x14, 0x0f, 0x11, 0x4a, 0x10, 0x0f,
+                                                 0x10, 0x41, 0x24, 0x0f, 0x11, 0x42, 0x20, 0xc3, 0x32, 0xc0, 0xc3 };
 } // namespace GlassFg::CyberpunkProfile

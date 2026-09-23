@@ -96,6 +96,7 @@ bool ReadCyberpunkMotionHistory(std::uint64_t proxy, CyberpunkMotionHistory& out
     out = {};
     return false;
 }
+CyberpunkMotionHistoryAdmission ReadCyberpunkMotionHistoryAdmission() noexcept { return {}; }
 bool ReadCyberpunkMotionSample(std::uint64_t, std::uint32_t, CyberpunkMotionSample& out) noexcept
 {
     out = {};
