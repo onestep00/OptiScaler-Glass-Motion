@@ -636,6 +636,13 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 graftDraw = false;
             }
         }
+        // Graft variants (root or camera) read no GlassHistory and write no
+        // GlassNext: their VS tests only the mapping generation and exports the
+        // map index. Their elements take identity-only mappings (mapping slot
+        // and boundary ID, no arena block), so the arena capacity and a full
+        // arena bound only the vertex-history path. Fixed for the whole draw:
+        // the element loop can only move a root graft to the camera graft.
+        const bool historyFree = graftDraw || graftArrayDraw;
         const auto* raster = ReadGeometryRasterState(command);
         const auto shape = ReadCyberpunkMeshShape(draw);
         if (!raster || !raster->usable())
@@ -644,15 +651,15 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             ++counters.topologyRejected; ++counters.rasterRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
-        if (!shape || !shape.vertices || shape.vertices > HistoryCapacity)
+        if (!shape || !shape.vertices || (!historyFree && shape.vertices > HistoryCapacity))
         {
             if (gate) GateNote(GatePrepareShape);
             ++counters.topologyRejected; ++counters.shapeRejected; noteChunk(topologyChunks, draw.chunk);
             return false;
         }
-        // The engine reports the vertex count as 64 bits; every draw that passes
-        // the capacity check above is known to fit, so the narrowing is exact.
-        const auto vertices = std::uint32_t(shape.vertices);
+        // Sizes the arena block on the vertex-history path; a graft draw skipped
+        // the capacity check and uses the count for diagnostics only.
+        const auto vertices = shape.vertices;
         if (!std::isfinite(raster->viewport.TopLeftX) || !std::isfinite(raster->viewport.TopLeftY) ||
             !std::isfinite(raster->viewport.Width) || !std::isfinite(raster->viewport.Height) ||
             raster->viewport.Width <= 0 || raster->viewport.Height <= 0 || raster->viewport.TopLeftX < 0 ||
@@ -741,7 +748,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     graftDraw = false;
                     graftArrayDraw = true;
                 }
-                const auto allocation = objectMappings.acquire(key, vertices, frameNumber);
+                // A graft element fails only when the frame-local boundary table
+                // has no ID left for it; the arena is never asked.
+                const auto allocation = historyFree ? objectMappings.acquireIdentity(key, frameNumber)
+                                                    : objectMappings.acquire(key, vertices, frameNumber);
                 if (!allocation)
                 {
                     if (gate)
@@ -751,9 +761,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                         {
                             ++gateDetailLines;
                             std::fprintf(log,
-                                         "GATE_DETAIL reason=history chunk=%u mesh=%u verts=%u vp=%.0f,%.0f,%.0f,%.0f "
+                                         "GATE_DETAIL reason=%s chunk=%u mesh=%u verts=%u vp=%.0f,%.0f,%.0f,%.0f "
                                          "frame=%u\n",
-                                         draw.chunk, std::uint32_t(key.object.mesh), vertices,
+                                         historyFree ? "identity" : "history", draw.chunk,
+                                         std::uint32_t(key.object.mesh), vertices,
                                          raster->viewport.TopLeftX, raster->viewport.TopLeftY,
                                          raster->viewport.Width, raster->viewport.Height, frameNumber);
                             std::fflush(log);
@@ -841,10 +852,11 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             std::fprintf(log, "TRACE_REPLAY frame=%u chunk=%u\n", frameNumber, draw.chunk);
             std::fflush(log);
         }
-        if (graftDraw || graftArrayDraw)
+        if (historyFree)
         {
             NoteGeometryGraft(graftDraw ? GraftDraws : GraftArrayDraws);
             ++frameSlot->graftDraws;
+            ++counters.historyBypassed;
         }
         return true;
     }

@@ -54,6 +54,10 @@ struct PackedMotionCaptureStatus
     // raster, so they have no compose pixel counter either.
     std::uint64_t deltaMissingDraws = 0;
     std::uint64_t mappingOverflow = 0, historyOverflow = 0, slotBusy = 0, orderingRejected = 0;
+    // Graft draws admitted through identity-only mappings: the graft VS reads
+    // no GlassHistory and writes no GlassNext, so such a draw takes a mapping
+    // slot and a boundary ID but no arena block and never counts in arena_full.
+    std::uint64_t historyBypassed = 0;
     // Slots whose recorded/consumed command list disappeared without a reset and
     // that the capture reclaimed after both fences completed. Diagnostics only;
     // a growing value means the engine keeps replacing command lists.
@@ -115,7 +119,8 @@ struct PackedMotionCaptureStatus
     std::uint64_t spanFamilyEvictions = 0;
     // Elements the capture admitted in the frame the family table describes.
     std::uint64_t frameSpanCount = 0;
-    // Chunks whose elements resolved an identity but found no arena block.
+    // Chunks whose elements resolved an identity but got no mapping: no
+    // boundary ID, or on the vertex-history path no arena block.
     std::array<ChunkCount, 16> overflowChunks {};
 };
 

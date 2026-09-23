@@ -31,8 +31,22 @@ int main()
         const auto reused = maps.acquire(object,8,14);
         require(reused && reused.history.generation != a.history.generation);
         require(!maps.acquire(object,8,13) && !maps.beginFrame(13,11));
+        // A graft VS reads no GlassHistory and writes no GlassNext. Its identity-
+        // only mapping must survive a full arena, keep the object's boundary ID,
+        // carry zero history with a live generation and leave the arena alone.
+        PackedMotionMappings<1, 8, 16, 4> full;
+        require(full.beginFrame(20, 0));
+        const auto whole = full.acquire(object, 64, 20);
+        require(whole && !full.acquire(chunk, 1, 20) && full.historyStats().arenaFull == 1);
+        const auto graft = full.acquireIdentity(chunk, 20), graftElement = full.acquireIdentity(element, 20);
+        require(graft && !graft.history.base && !graft.history.vertices && graft.history.generation);
+        require(graft.boundaryId == whole.boundaryId && graftElement && graftElement.boundaryId != whole.boundaryId);
+        require(full.historyStats().arenaFull == 1 && full.liveHistories() == 1 && full.reservedVertices() == 64);
+        auto noView = chunk; noView.view = 0;
+        require(!full.acquireIdentity(noView, 20) && !full.acquireIdentity(chunk, 21));
         std::puts("PASS chunk_history_separate=1 shared_object_boundary=1 array_elements_separate=1 "
-                  "reorder_stable=1 retired_storage_reclaimed=1 reused_gpu_generation_changed=1 gpu_work=0");
+                  "reorder_stable=1 retired_storage_reclaimed=1 reused_gpu_generation_changed=1 "
+                  "identity_only_full_arena=1 gpu_work=0");
     }
     catch (const std::exception& error) { std::fprintf(stderr,"%s\n",error.what()); return 1; }
 }

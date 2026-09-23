@@ -74,6 +74,21 @@ class PackedMotionMappings
         const auto history = histories.acquire(key, vertices, frame);
         return history ? PackedMotionAllocation {history, boundary} : PackedMotionAllocation {};
     }
+    // Identity-only mapping for variants whose vertex stage reads no
+    // GlassHistory and writes no GlassNext (native graft): the frame-local
+    // boundary ID every draw of this object shares, and no arena block, so a
+    // full arena cannot reject it. base/vertices/capacity stay zero. The
+    // generation is the object's registration generation (nonzero for a valid
+    // key, as coverage mappings carry it); the mapped vertex stage only tests
+    // it for liveness, and zero vertices make a history reader reject the entry
+    // before any history access. Nothing outlives the frame.
+    PackedMotionAllocation acquireIdentity(const VertexHistoryKey& key, std::uint32_t frame)
+    {
+        if (!frame || frame != current) return {};
+        const auto boundary = boundaries.acquire(key);
+        return boundary ? PackedMotionAllocation {{0, 0, 0, key.object.generation}, boundary}
+                        : PackedMotionAllocation {};
+    }
     std::uint32_t frame() const { return current; }
     unsigned reservedVertices() const { return histories.reservedVertices(); }
     unsigned arenaPages() const { return histories.capacityPages(); }
