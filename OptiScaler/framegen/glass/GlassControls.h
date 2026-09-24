@@ -298,10 +298,11 @@ inline std::atomic<unsigned>& GraftClassMaskValue() noexcept
 {
     // Root-only by default. Class 2 (skinning) was tried as the default on
     // 2026-09-23 (build 0c5bb34e): hair/glasses delivered ~77 px where the
-    // engine had ~3.5 px. Measured 2026-09-24 (009904f8): on hair draws the
-    // MotionMatrix supplier leaves rows 24..26 unwritten (the same bytes for
-    // every proxy in a frame), while the previous bones are right; see
-    // research/ACTIVE.md "스키닝 A/B".
+    // engine had ~3.5 px. Cause (2026-09-24): the hair_basecolor_blend VS/PS
+    // pairs had no MotionMatrix declaration, so rows 24..26 stayed unwritten.
+    // With those pairs declared (5ca2eaba) hair measured 0.1 px and walkers
+    // read their previous pose; the default stays 1 until the user decides
+    // (research/ACTIVE.md "hair 선언 쌍 게임 검증").
     static std::atomic<unsigned> value { GraftClassRootOnly };
     return value;
 }
