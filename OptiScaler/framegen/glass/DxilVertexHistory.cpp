@@ -1290,10 +1290,10 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             }
         metadata.append(
             resources[2],
-            // 80 bytes for the packed path: it reads the opacity-threshold row
-            // at byte offset 64, and a 64-byte declaration makes the validator
-            // reject that load as out of bounds. The bound resource is the
-            // module's 256-byte-aligned constant slot, so the extra row exists.
+            // 80 bytes for the packed path: it reads row 4 (opacity threshold,
+            // emission scale) at byte offset 64, and a 64-byte declaration makes
+            // the validator reject that load as out of bounds. The bound resource
+            // is the module's 256-byte-aligned constant slot, so the extra row exists.
             metadata.add("i32 " + std::to_string(constantId) +
                          ", %Glass.PixelConstants* undef, !\"GlassPixelConstants\", i32 31, i32 1, i32 1, i32 " +
                          std::to_string(packedMotion ? 80 : (retainColor ? 64 : 32)) + ", null"));
@@ -1437,6 +1437,9 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         }
         if (coverageOnly || packedCoverageOnly)
             code << "  %glass.hasall = icmp eq i32 0, 0\n";
+        // Colour each channel adds (F of C = F + T * B), kept for the packed
+        // record opacity below.
+        std::array<std::string, 3> contributions;
         for (unsigned c = 0; c < ((coverageOnly || packedCoverageOnly) ? 0u : 3u); ++c)
         {
             std::string transmission;
@@ -1475,14 +1478,18 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             code << "  %glass.fhas" << c << " = fcmp one float " << contribution << ", 0.000000e+00\n"
                  << "  %glass.thas" << c << " = fcmp one float " << transmission << ", 1.000000e+00\n"
                  << "  %glass.has" << c << " = or i1 %glass.fhas" << c << ", %glass.thas" << c << "\n";
+            contributions[c] = contribution;
         }
+        // Coverage-only capture analyses no colour: its record opacity is 0, so
+        // the interior keeps the engine's value and only the boundary is taken.
         if (packedCoverageOnly)
-            code << R"(  %glass.alpha = fadd float 0.000000e+00, 0.000000e+00
+            code << R"(  %glass.opacity = fadd float 0.000000e+00, 0.000000e+00
   %glass.finite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv0)
   %glass.finite1 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv1)
   %glass.finite = and i1 %glass.finite0, %glass.finite1
 )";
         else if (!coverageOnly)
+        {
             code << R"(  %glass.has01 = or i1 %glass.has0, %glass.has1
   %glass.hasall = or i1 %glass.has01, %glass.has2
   %glass.empty = xor i1 %glass.hasall, true
@@ -1491,18 +1498,47 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   %glass.sum = fadd float %glass.sum01, %glass.t2
   %glass.mean = fdiv float %glass.sum, 3.000000e+00
   %glass.alpha = fsub float 1.000000e+00, %glass.mean
-  %glass.finite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv0)
+)";
+            if (packedMotion)
+            {
+                // Packed record opacity d = max(alpha, saturate(luma(F) * emissionScale)), emissionScale from row
+                // 4 .y. The background can change at most 1 - d of the displayed pixel: for alpha blending d is the
+                // opacity, for light the draw adds its displayed brightness, since the display clips at white. The
+                // Rec. 709 luma weights are exact float values because LLVM IR rejects decimals that round.
+                static constexpr const char* lumaWeight[] { "2.125999927520751953125e-01",
+                                                            "7.15200006961822509765625e-01",
+                                                            "7.2200000286102294921875e-02" };
+                for (unsigned c = 0; c < 3; ++c)
+                    code << "  %glass.luma" << c << " = fmul float " << contributions[c] << ", " << lumaWeight[c]
+                         << "\n";
+                code << R"(  %glass.luma01 = fadd float %glass.luma0, %glass.luma1
+  %glass.luma = fadd float %glass.luma01, %glass.luma2
+  %glass.emissionload = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %glass.cb, i32 4)
+  %glass.emissionscale = extractvalue %dx.types.CBufRet.f32 %glass.emissionload, 1
+  %glass.emissionraw = fmul float %glass.luma, %glass.emissionscale
+  %glass.emission = call float @dx.op.unary.f32(i32 7, float %glass.emissionraw)
+  %glass.emissionwins = fcmp ogt float %glass.emission, %glass.alpha
+  %glass.opacity = select i1 %glass.emissionwins, float %glass.emission, float %glass.alpha
+)";
+            }
+            // The finite check and the temporary colour store carry the value
+            // the record keeps.
+            const char* opacity = packedMotion ? "%glass.opacity" : "%glass.alpha";
+            code << R"(  %glass.finite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv0)
   %glass.finite1 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv1)
-  %glass.finite2 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.alpha)
+  %glass.finite2 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float )"
+                 << opacity << R"()
   %glass.finite01 = and i1 %glass.finite0, %glass.finite1
   %glass.finite = and i1 %glass.finite01, %glass.finite2
   %glass.nonfinite = xor i1 %glass.finite, true
   call void @dx.op.discard(i32 82, i1 %glass.nonfinite)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 0, float %glass.mv0)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 1, float %glass.mv1)
-  call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float %glass.alpha)
+  call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float )"
+                 << opacity << R"()
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %glass.s2)
   ret void)";
+        }
         body.replace(body.find("  ret void"), 10,
                      packedMotion ? Detail::CapturePackedMotion(code.str(), instanceMapId, captureUavId)
                      : retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly, auditCoverage)
@@ -1550,8 +1586,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  { { "dx.types.Handle", "{ i8* }" },
                    { "dx.types.CBufRet.f32", "{ float, float, float, float }" },
                    // 20 floats: MaterialCaptureConstants grew a fifth row for the
-                   // packed capture's opacity threshold. Readers outside the
-                   // packed path only touch rows 0..3.
+                   // packed capture's opacity threshold and emission scale. Readers
+                   // outside the packed path only touch rows 0..3.
                    { "Glass.PixelConstants", "{ [20 x float] }" } } })
             if (body.find(std::string("%") + name + " = type") == std::string::npos)
                 body.insert(body.find("define void "), std::string("%") + name + " = type " + fields + "\n\n");

@@ -237,15 +237,18 @@ void RenderSettings()
     changed |= ImGui::SliderInt("Inside opacity threshold", &opacityThreshold, 0, 100, "%d%%");
     value.opacityPercent = static_cast<unsigned>(opacityThreshold);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Pixels whose material opacity reaches this value take the exact glass\n"
-                          "motion and depth. Pixels below it keep the engine's motion, so the\n"
-                          "content seen through the glass stays on the background.\n"
+        ImGui::SetTooltip("Pixels whose opacity reaches this value take the exact glass\n"
+                          "motion and depth. Light a surface adds (holograms, rain, glows)\n"
+                          "counts by its displayed brightness: where it hides the background,\n"
+                          "it is treated like an opaque surface. Pixels below it keep the\n"
+                          "engine's motion, so the content seen through the glass stays on\n"
+                          "the background.\n"
                           "0%% gives every covered pixel the glass motion.\n"
-                          "100%% keeps all but the solid glass on the background.\n"
+                          "100%% keeps all but solid surfaces and full-white light on the background.\n"
                           "Border pixels always take the exact glass motion while correction is on.");
-    describe("Opacity above which a covered pixel takes the exact glass motion and depth. Below it the "
-             "engine's motion is kept unchanged. The border always follows the glass. "
-             "INI: InteriorOpacityPercent.");
+    describe("Opacity above which a covered pixel takes the exact glass motion and depth; light a surface "
+             "adds counts by its brightness. Below it the engine's motion is kept unchanged. The border "
+             "always follows the glass. INI: InteriorOpacityPercent.");
     int edgeWidth = static_cast<int>(value.edgeWidth);
     changed |= ImGui::SliderInt("Border width", &edgeWidth, 1, 4, "%d px");
     value.edgeWidth = static_cast<unsigned>(edgeWidth);

@@ -1433,10 +1433,14 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 0, 0, configuredWidth, configuredHeight,
                 0, configuredWidth, configuredWidth * configuredHeight, farCutoffBits,
                 // Coverage class boundary. The capture marks a record covered
-                // when its material opacity reaches this value, and the packed
+                // when its record opacity reaches this value, and the packed
                 // store keeps the nearest covered record ahead of any uncovered
                 // one.
-                controls.opacityThreshold(), 0.f, 0.f, 0.f
+                controls.opacityThreshold(),
+                // Brightness term of the record opacity: max(material opacity,
+                // saturate(luma(F) * scale)) for the colour F the draw adds
+                // (live emission=, default 1.0; 0 = material opacity alone).
+                EmissionScale(), 0.f, 0.f
             };
         }
         while (count)

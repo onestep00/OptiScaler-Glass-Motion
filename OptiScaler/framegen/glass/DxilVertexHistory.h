@@ -168,19 +168,25 @@ struct MaterialCaptureConstants
     std::uint32_t frame, reverseDepth;
     std::uint32_t left, top, width, height;
     std::uint32_t base, stride, capacity, reserved;
-    // Material opacity at or above which a packed record is classed as covered.
+    // Record opacity at or above which a packed record is classed as covered.
     // The packed store keeps the nearest covered record and keeps an uncovered
     // record only while no covered one exists, so an unlimited number of
     // overlapping transparent layers resolves to the nearest surface that the
     // visible-border/opacity rule keeps, with one 8-byte record per pixel.
     float opacityThreshold;
-    float reserved1, reserved2, reserved3;
+    // Display-referred brightness per unit of scene-colour luminance. The packed
+    // record opacity is max(material opacity, saturate(luma(F) * emissionScale))
+    // for the colour F the draw adds; 0 disables the brightness term, so the
+    // record keeps the material opacity alone (the opacity-only rule, for A/B).
+    float emissionScale;
+    float reserved2, reserved3;
     bool valid(std::uint64_t allocatedCapacity) const
     {
         return frame && width && height && stride >= width && capacity && capacity <= UINT32_MAX / 32 &&
                capacity <= allocatedCapacity && std::isfinite(viewportX) && std::isfinite(viewportY) &&
                std::isfinite(inverseWidth) && std::isfinite(inverseHeight) && inverseWidth > 0 && inverseHeight > 0 &&
                std::isfinite(jitterDeltaX) && std::isfinite(jitterDeltaY) && std::isfinite(opacityThreshold) &&
+               std::isfinite(emissionScale) && emissionScale >= 0 &&
                std::uint64_t(base) + std::uint64_t(height - 1) * stride + width <= capacity &&
                std::uint64_t(left) + width <= 32768 && std::uint64_t(top) + height <= 32768;
     }

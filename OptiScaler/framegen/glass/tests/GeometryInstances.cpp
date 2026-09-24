@@ -419,7 +419,7 @@ int wmain(int argc, wchar_t** argv)
             pd.RTVFormats[2] = texture.Format;
         pd.DSVFormat = depthDesc.Format;
         pd.SampleDesc.Count = 1;
-        ComPtr<ID3D12PipelineState> original, capturePso, streamPso;
+        ComPtr<ID3D12PipelineState> original, capturePso, streamPso, additivePso;
         check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&original)));
         std::shared_ptr<const GlassFg::GeometryPipelineEntry> lease;
         GlassFg::GeometryRoot directRoot;
@@ -464,6 +464,16 @@ int wmain(int argc, wchar_t** argv)
             std::string error;
             if (FAILED(compiler.createPackedMotion(g.d.Get(), root, pd, capturePso, error)))
                 throw std::runtime_error(error);
+            // Additive (ONE/ONE) variant of the same material for the emission
+            // check at frame 2: it leaves the background at full strength, so
+            // its material opacity is 0 and only the brightness term can cover it.
+            if (!packedMrt && !packedFallback)
+            {
+                auto additive = pd;
+                additive.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
+                if (FAILED(compiler.createPackedMotion(g.d.Get(), root, additive, additivePso, error)))
+                    throw std::runtime_error(error);
+            }
         }
         require(root.dwords == 22 && root.instanceSlot == 6, "Mapped root extension");
         D3D12_SO_DECLARATION_ENTRY so { 0, "SV_Position", 0, 0, 4, 0 };
@@ -528,7 +538,7 @@ int wmain(int argc, wchar_t** argv)
         std::array<std::vector<char>, 2> priorHistory;
         std::vector<char> priorCapture;
         UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0, auxiliaryWritten = 0;
-        UINT64 packedChecked = 0, packedWrites = 0;
+        UINT64 packedChecked = 0, packedWrites = 0, emissionChecked = 0;
         UINT maximumCoverageWords = 0;
         double maximum = 0;
         unsigned recorderSplitFrame = 5;
@@ -650,8 +660,9 @@ int wmain(int argc, wchar_t** argv)
             GlassFg::MaterialCaptureConstants pc { 0, 0, 1.f / W, 1.f / H, 0, 0, frame, 0,
                                                    0, 0, W, H, 0, W,
                                                    packedMotion ? W * H : CapturePixels, 0,
-                                                   // Opacity threshold 0: this fixture
-                                                   // keeps every record covered.
+                                                   // Opacity threshold 0 keeps every record
+                                                   // covered; emission scale 0 keeps the
+                                                   // weight at the material opacity.
                                                    0.f, 0.f, 0.f, 0.f };
             upload(pixelConstants.Get(), &pc, sizeof(pc));
             const float fc[] { frame * .31f, frame * .023f, frame * -.017f, 0 };
@@ -922,6 +933,93 @@ int wmain(int argc, wchar_t** argv)
                         require(!(actual & 0x7fff) || (actual & 0x7fff) <= 3,
                                 "Packed material emitted a foreign object ID");
                     }
+                // Emission rule on the additive variant of the frame-2 draw. Its
+                // material opacity is 0, so the record weight and the covered
+                // class come from saturate(luma(F) * scale) alone, luma with the
+                // Rec. 709 weights. Every fixture colour has luma(F) in [0.2477,
+                // 0.5323] (tint times 0.5325..0.9675), so at threshold 0.5 scale
+                // 2.2 covers every record, 0.9 keeps every one uncovered with a
+                // nonzero weight and 0 gives the opacity-only record: weight 0,
+                // uncovered. Each run has one class, so the nearest surface wins
+                // as in the draw above.
+                if (frame == 2 && additivePso)
+                {
+                    constexpr UINT64 recordBytes = UINT64(W) * H * sizeof(UINT64);
+                    auto emissionReadback =
+                        g.buffer(recordBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+                    for (const float scale : { 2.2f, .9f, 0.f })
+                    {
+                        auto emissionConstants = pc;
+                        emissionConstants.opacityThreshold = .5f;
+                        emissionConstants.emissionScale = scale;
+                        upload(pixelConstants.Get(), &emissionConstants, sizeof(emissionConstants));
+                        g.begin();
+                        g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                  D3D12_RESOURCE_STATE_COPY_DEST);
+                        g.c->CopyBufferRegion(capture.Get(), 0, zeros.Get(), 0, recordBytes);
+                        g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        g.c->RSSetViewports(1, &viewport);
+                        g.c->RSSetScissorRects(1, &scissor);
+                        g.c->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        g.c->IASetVertexBuffers(0, 2, views);
+                        g.c->IASetIndexBuffer(&indexView);
+                        g.c->SetGraphicsRootSignature(root.extended.Get());
+                        g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
+                        g.c->SetPipelineState(additivePso.Get());
+                        g.c->SetGraphicsRoot32BitConstants(root.constantsSlot, 8, &hc, 0);
+                        g.c->SetGraphicsRootShaderResourceView(root.previousSlot,
+                                                               history[previous]->GetGPUVirtualAddress());
+                        g.c->SetGraphicsRootUnorderedAccessView(root.currentSlot,
+                                                                history[current]->GetGPUVirtualAddress());
+                        g.c->SetGraphicsRootConstantBufferView(root.materialSlot,
+                                                               pixelConstants->GetGPUVirtualAddress());
+                        g.c->SetGraphicsRootUnorderedAccessView(root.captureSlot, capture->GetGPUVirtualAddress());
+                        g.c->SetGraphicsRootShaderResourceView(root.instanceSlot,
+                                                               mappingBuffer->GetGPUVirtualAddress());
+                        g.c->OMSetRenderTargets(1, &rtvs[1], FALSE, &dsv);
+                        g.c->DrawIndexedInstanced(6, 3, 0, 2, 7);
+                        g.barrier(history[current].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        g.c->CopyBufferRegion(emissionReadback.Get(), 0, capture.Get(), 0, recordBytes);
+                        g.barrier(capture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        g.finish();
+                        void* emissionData;
+                        const D3D12_RANGE emissionRange { 0, SIZE_T(recordBytes) };
+                        check(emissionReadback->Map(0, &emissionRange, &emissionData));
+                        const auto* records = static_cast<const UINT64*>(emissionData);
+                        for (UINT y = 0; y < H; ++y)
+                            for (UINT x = 0; x < W; ++x)
+                            {
+                                const auto base = packed[y * W + x], record = records[y * W + x];
+                                require((base != 0) == (record != 0),
+                                        "Additive packed variant changed the material coverage");
+                                if (!base)
+                                    continue;
+                                // F of the winning object: its original draw blends
+                                // ONE/INV_SRC_ALPHA over a cleared target.
+                                const UINT object = UINT(base & 0x7fff) - 1;
+                                const auto* color = reinterpret_cast<const float*>(
+                                    bytes + (object + 2) * imageBytes + y * footprint.Footprint.RowPitch + x * 16);
+                                const double luma = .2126 * color[0] + .7152 * color[1] + .0722 * color[2];
+                                const double opacity = std::min(luma * scale, 1.0);
+                                require(((record ^ base) & ((0x1ffffull << 46) | 0xffffull)) == 0,
+                                        "Additive packed variant chose another surface");
+                                require(((record >> 63) != 0) == (opacity >= .5),
+                                        "Emitted brightness did not decide the covered class");
+                                require(std::abs(int((record >> 16) & 0xff) - int(opacity * 255.0)) <= 1,
+                                        "Record weight is not saturate(luma * emission scale)");
+                                ++emissionChecked;
+                            }
+                        const D3D12_RANGE noWrite { 0, 0 };
+                        emissionReadback->Unmap(0, &noWrite);
+                    }
+                }
                 last = now;
                 priorHistory[current].assign(reinterpret_cast<const char*>(hist),
                                              reinterpret_cast<const char*>(hist) + HistoryBytes);
@@ -1050,9 +1148,11 @@ int wmain(int argc, wchar_t** argv)
         if (packedMotion)
         {
             require(packedChecked == UINT64(W) * H && packedWrites, "Packed material coverage was not verified");
+            require(!additivePso || emissionChecked, "Additive emission records were not verified");
             printf("PASS packed_material_gpu=1 original_material_preserved=1 nearest_layer_exact=1 "
                    "coverage_only_fallback=%u motion_quantization_step_px=0.125 pixels=%llu writes=%llu "
-                   "bytes_per_pixel=8\n", packedFallback, packedChecked, packedWrites);
+                   "bytes_per_pixel=8 emission_records=%llu\n", packedFallback, packedChecked, packedWrites,
+                   emissionChecked);
             return 0;
         }
         if (recorder)

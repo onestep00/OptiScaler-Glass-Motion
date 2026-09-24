@@ -67,6 +67,7 @@ void writeStatus(std::ofstream& file)
     const auto controls = ReadControls();
     const auto farCutoff = controls.farCutoffMeters();
     file << "controls enabled=" << controls.enabled << " opacity=" << controls.opacityPercent
+         << " emission=" << ReadEmissionPercent()
          << " edge=" << controls.edgeWidth << " packed_dispatch=" << controls.packedDispatch
          << " packed_rows=" << controls.packedRows << " packed_substitute=" << controls.packedSubstitute
          << " packed_compute=" << controls.packedCompute << " trace=" << controls.trace
@@ -478,6 +479,17 @@ void PollGlassDebugControl() noexcept
                 const auto mode = line.substr(12);
                 SetStaleMotionCamera(mode == "camera" || mode == "on" || mode == "1");
                 output << "stalemotion=" << (StaleMotionCameraEnabled() ? "camera" : "off") << "\n";
+                continue;
+            }
+            if (line.rfind("emission=", 0) == 0)
+            {
+                // Brightness term of the packed record opacity in percent
+                // (GlassControls.h, 0..400, default 100). 0 restores the
+                // opacity-only record for A/B. Applies to the next draw; live
+                // channel only, never persisted.
+                SetEmissionPercent(
+                    static_cast<unsigned>(std::clamp(std::strtoul(line.c_str() + 9, nullptr, 10), 0ul, 400ul)));
+                output << "emission=" << ReadEmissionPercent() << "\n";
                 continue;
             }
             auto value = ReadControls();

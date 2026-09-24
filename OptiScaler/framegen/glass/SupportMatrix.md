@@ -139,7 +139,8 @@ Remaining misses: in the session-7 reclassification (`9364be81`), 8 of 16 VS had
 
 - Motion beyond ±128 px per frame is not recorded (11-bit, 1/8 px). The pixel keeps the engine value. A fast 360° pan at 128 px/frame fell back for most substituted pixels (`research/ACTIVE.md:87`).
 - Camera-only records carry camera motion only: independently moving array elements, camera-facing rotation of billboards and particles, and icon anchor motion are not included. This is the engine's own convention for those draws (`research/ACTIVE.md:77`, `108`). Draws without an engine owner (`particles_generic`, rain) get the same camera component; their own particle or raindrop motion has no engine supply and stays uncorrected (`EngineMotionSupply.md` "Draws without an engine owner").
-- Coverage-only PS variants record opacity 0. Their interior keeps the engine value unless the threshold is 0; only the boundary takes the object's motion.
+- A material whose blend equation is analysed records the larger of its material opacity and its displayed brightness (`emission=`, default 100%; [README.md](README.md#3-capture-packed-records)). Additive and premultiplied-emissive surfaces (holograms, rain, `light_gradients`) have material opacity 0, so their interior is covered where its brightness reaches the interior threshold; dimmer interior pixels keep the engine value. No in-game result yet.
+- Coverage-only PS variants analyse no colour and still record opacity 0. Their interior keeps the engine value unless the threshold is 0; only the boundary takes the object's motion.
 - An opaque surface nearer than the record keeps the engine value (occlusion test).
 - `SkipFartherThanMeters` (default 0) and `ComposeRows` (default 240, must cover the render height) can exclude pixels by configuration.
 

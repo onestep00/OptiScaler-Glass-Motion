@@ -12,9 +12,10 @@ struct Controls
     // give the shipped behaviour, not a staging configuration.
     bool enabled = true;
     // Interior opacity threshold in percent. A covered pixel takes the object's
-    // own motion and depth when its material opacity reaches this value; below
-    // it the engine's motion and depth stay untouched. The visible boundary
-    // always takes the exact object motion.
+    // own motion and depth when its record opacity (the larger of its material
+    // opacity and its displayed brightness, EmissionPercentValue) reaches this
+    // value; below it the engine's motion and depth stay untouched. The visible
+    // boundary always takes the exact object motion.
     unsigned opacityPercent = 50;
     bool measureGpuTime = true;
     unsigned edgeWidth = 2;
@@ -195,6 +196,27 @@ struct Controls
 // UI and the native host share one atomic snapshot. No INI reads per FG call.
 Controls ReadControls();
 void WriteControls(Controls value);
+// Brightness term of the packed record opacity, live emission=<0..400> percent,
+// default 100. The capture records d = max(material opacity, saturate(luma(F) *
+// percent / 100)) for the colour F a draw adds: the background can change at
+// most 1 - d of the displayed pixel, and added light whose displayed brightness
+// reaches white hides it completely because the display clips at 1. 100 reads
+// the exposed scene colour as displayed brightness (the game passes
+// DLSS.Pre.Exposure 1.0 and no exposure texture); 0 restores the opacity-only
+// record for A/B. Applies to the next draw. Session value only: not persisted
+// and not part of the packed control word.
+inline std::atomic<unsigned>& EmissionPercentValue() noexcept
+{
+    static std::atomic<unsigned> value { 100u };
+    return value;
+}
+inline void SetEmissionPercent(unsigned percent) noexcept
+{
+    EmissionPercentValue().store(std::min(percent, 400u), std::memory_order_relaxed);
+}
+inline unsigned ReadEmissionPercent() noexcept { return EmissionPercentValue().load(std::memory_order_relaxed); }
+// MaterialCaptureConstants::emissionScale of the next packed draw.
+inline float EmissionScale() noexcept { return float(ReadEmissionPercent()) / 100.f; }
 // Session-only diagnostic, live channel only. Not persisted and not part of
 // the packed control word. When on, the compose substitutes the object's own
 // motion but leaves the depth the engine wrote under the pixel. The
