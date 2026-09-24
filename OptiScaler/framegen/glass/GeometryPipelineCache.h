@@ -65,6 +65,11 @@ struct GeometryPipelineEntry
     // %016llx therefore prints the 16-hex-digit prefix of the native catalog's
     // programs[].sha256 (all-cache-techniques.json). Zero when hashing failed.
     std::uint64_t vertexHash = 0, pixelHash = 0;
+    // The original PS is a light-pass PS (NativeGraftCatalog.h
+    // IsLightPixelShader): the record opacity of the entry's packed variants
+    // includes the displayed brightness of the colour the draw adds, except in
+    // a coverage-only variant. Written with pixelHash; reported as light=.
+    bool lightTarget = false;
     GeometryGraftKind graftKind = GeometryGraftKind::Pending;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
@@ -168,6 +173,8 @@ struct GeometryPipelineCoverage
     // A vertex-history variant exists: `packed` itself when no graft is
     // usable, `packedHistory` for the array draws of a graft entry.
     bool history = false;
+    // GeometryPipelineEntry::lightTarget.
+    bool light = false;
 };
 
 // Process-wide publish of the diagnostic opaque probe counters. The control

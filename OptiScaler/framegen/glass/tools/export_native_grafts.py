@@ -59,6 +59,26 @@ required engine motion rows [] instead of [24, 25, 26]; its supply class must be
 2. Vehicle targets keep the MotionMatrix previous world there too. All other
 records follow the rules above.
 
+Light pixel shaders: <out>/grafts/light-ps.bin lists every pixel shader all of
+whose technique passes in the shader-cache census <workspace>/
+all-cache-techniques.json (techniques[].pass; programs[] of kind "ps" by
+sha256) are light passes. The packed capture adds the brightness term of its
+record opacity, saturate(luma(F) * scale) for the colour F the draw adds, only
+for these (RewriteMaterialMotion lightTarget); every other PS records its
+material opacity alone. Light passes are renderstage_ plus
+  transparent, transparent_notxaa, transparent_back_face,
+  transparent_depth_write, transparent_background,
+  transparent_notxaa_background, unlit, screenspace_vfx
+These write lit or emitted colour into the scene colour the display shows.
+The other passes of blended draws do not: distortion writes refraction offsets,
+and the mark_rt, hologram_depth, hair_alpha_accum, highlights, wireframe,
+gbuffer, cascade, overdraw and water-depth passes write marks, depth, hair
+coverage, highlight masks, G-buffer or shadow values or debug colour. A PS
+that also appears in any other pass is not listed (8 PS of screenspace_vfx and
+vision in the 2026-09 census): the module knows a pipeline's PS, not its pass.
+light-ps.bin is "GGLTPS01", u32 count, u32 reserved (0), then count sorted,
+unique 32-byte SHA-256 digests of the PS DXBC containers.
+
 The output contains extracted game shader code. Write it to an ignored local
 directory;
 never commit or publish it. GlassFg.props copies <repo>/artifacts/glass-grafts/
@@ -84,6 +104,10 @@ REFUSED_VEHICLE = 1  # refused.bin reason: vehicle object motion without engine 
 SKINNING_INPUTS = {'BLENDINDICES', 'BLENDWEIGHT', 'INSTANCE_SKINNING_DATA', 'BONEINDEX'}
 SRV, CBV = 0, 2
 CLASS_NAMES = {1: 'root-only', 2: 'skinning', 4: 'preskinned', 6: 'skinning+preskinned'}
+# Technique passes whose pixel shaders draw light into the scene colour (docstring).
+LIGHT_PASSES = frozenset('renderstage_' + name for name in (
+    'transparent', 'transparent_notxaa', 'transparent_back_face', 'transparent_depth_write',
+    'transparent_background', 'transparent_notxaa_background', 'unlit', 'screenspace_vfx'))
 
 
 def supply_class(entry):
@@ -114,6 +138,21 @@ def camera_outputs(shader, verified, source, refused):
     return current, previous, source
 
 
+def light_pixel_shaders(census):
+    """Sorted digests of the PS whose census passes are all light passes, and the
+    number of PS left out because they also appear in another pass."""
+    passes = {}
+    for technique in census['techniques']:
+        for program in technique['programs']:
+            if program['kind'] == 'ps':
+                passes.setdefault(bytes.fromhex(program['sha256']), set()).add(technique['pass'])
+    if any(len(digest) != 32 for digest in passes):
+        raise ValueError('census pixel shader sha256 is not 32 bytes')
+    light = sorted(digest for digest, names in passes.items() if names <= LIGHT_PASSES)
+    mixed = sum(1 for names in passes.values() if names & LIGHT_PASSES and not names <= LIGHT_PASSES)
+    return light, mixed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--workspace', type=Path, required=True)
@@ -131,6 +170,8 @@ def main():
     generic_verification = {row['sha256']: row for row in checked.get('generic_results', [])}
     union = {row['sha256']: row for row in
              json.loads((workspace / 'native-previous-supply-union.json').read_text(encoding='utf-8'))['shaders']}
+    census = json.loads((workspace / 'all-cache-techniques.json').read_text(encoding='utf-8'))
+    light, mixed = light_pixel_shaders(census)
 
     def root_outputs(shader):
         """(current, previous, supply class, dxil path) of an exportable root graft, else None."""
@@ -220,6 +261,8 @@ def main():
     refused_blob = struct.pack('<8sII', b'GGREFS01', len(refusals), 0) + b''.join(
         struct.pack('<32sI', digest, REFUSED_VEHICLE) for digest, *_ in refusals)
     (out / 'refused.bin').write_bytes(refused_blob)
+    light_blob = struct.pack('<8sII', b'GGLTPS01', len(light), 0) + b''.join(light)
+    (out / 'light-ps.bin').write_bytes(light_blob)
 
     histogram = Counter(record[3] for record in records)
     print(f'grafts={len(records)} index_bytes={len(blob)} out={out}')
@@ -239,6 +282,8 @@ def main():
           + f') refused_sha256={hashlib.sha256(refused_blob).hexdigest()}')
     for evidence, count in sorted(Counter(evidence for *_, evidence in refusals).items()):
         print(f'refused evidence {" + ".join(evidence)}: {count}')
+    print(f'light_ps={len(light)} (left out, also in another pass: {mixed}) census={census["cache_sha256"][:16]} '
+          f'light_sha256={hashlib.sha256(light_blob).hexdigest()}')
 
 
 if __name__ == '__main__':

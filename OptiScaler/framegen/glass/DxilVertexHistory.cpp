@@ -1000,7 +1000,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                                           MaterialDestination destinationFactor, MaterialMotionTarget target,
                                           unsigned firstHistoryRegister, GeometryLayout layout,
                                           const NativeClipInputs* nativeInputs, bool preserveOriginalUavs,
-                                          bool captureDelta)
+                                          bool captureDelta, bool lightTarget)
 {
     VertexHistoryShader result;
     try
@@ -1018,6 +1018,10 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         need(!preserveOriginalUavs || packedMotion,
              "Original UAV preservation requires in-place packed instrumentation");
         const bool packedCoverageOnly = packedMotion && destinationFactor == MaterialDestination::CoverageOnly;
+        // The brightness term of the record opacity belongs to a PS whose pass
+        // adds light to the displayed image, and needs an analysed equation.
+        need(!lightTarget || packedMotion, "Brightness term requires packed motion");
+        const bool emission = lightTarget && !packedCoverageOnly;
         const bool depthCoverage = target == MaterialMotionTarget::OriginalColorAndDepthCoverageAudit;
         const bool auditCoverage = target == MaterialMotionTarget::OriginalColorAndCoverageAudit || depthCoverage;
         const bool coverageOnly = target == MaterialMotionTarget::OriginalColorAndCoverage || auditCoverage;
@@ -1437,8 +1441,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
         }
         if (coverageOnly || packedCoverageOnly)
             code << "  %glass.hasall = icmp eq i32 0, 0\n";
-        // Colour each channel adds (F of C = F + T * B), kept for the packed
-        // record opacity below.
+        // Colour each channel adds (F of C = F + T * B), kept for the
+        // brightness term of a light-pass PS below.
         std::array<std::string, 3> contributions;
         for (unsigned c = 0; c < ((coverageOnly || packedCoverageOnly) ? 0u : 3u); ++c)
         {
@@ -1480,8 +1484,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                  << "  %glass.has" << c << " = or i1 %glass.fhas" << c << ", %glass.thas" << c << "\n";
             contributions[c] = contribution;
         }
-        // Coverage-only capture analyses no colour: its record opacity is 0, so
-        // the interior keeps the engine's value and only the boundary is taken.
+        // Record opacity the packed store keeps: 0 for coverage-only capture,
+        // which analyses no colour, so the interior keeps the engine's value and
+        // only the boundary is taken; the brightness maximum for a light-pass
+        // PS; otherwise the material opacity %glass.alpha itself.
+        const char* opacity = packedCoverageOnly || emission ? "%glass.opacity" : "%glass.alpha";
         if (packedCoverageOnly)
             code << R"(  %glass.opacity = fadd float 0.000000e+00, 0.000000e+00
   %glass.finite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv0)
@@ -1499,12 +1506,14 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   %glass.mean = fdiv float %glass.sum, 3.000000e+00
   %glass.alpha = fsub float 1.000000e+00, %glass.mean
 )";
-            if (packedMotion)
+            if (emission)
             {
-                // Packed record opacity d = max(alpha, saturate(luma(F) * emissionScale)), emissionScale from row
-                // 4 .y. The background can change at most 1 - d of the displayed pixel: for alpha blending d is the
-                // opacity, for light the draw adds its displayed brightness, since the display clips at white. The
-                // Rec. 709 luma weights are exact float values because LLVM IR rejects decimals that round.
+                // Light-pass PS: d = max(alpha, saturate(luma(F) * emissionScale)), emissionScale from row 4 .y.
+                // The background can change at most 1 - d of the displayed pixel: for alpha blending d is the
+                // opacity, for the light the draw adds its displayed brightness, since the display clips at
+                // white. What any other pass writes (refraction offsets, decals, marks) is not light on screen,
+                // so its record keeps alpha. The Rec. 709 luma weights are exact float values because LLVM IR
+                // rejects decimals that round.
                 static constexpr const char* lumaWeight[] { "2.125999927520751953125e-01",
                                                             "7.15200006961822509765625e-01",
                                                             "7.2200000286102294921875e-02" };
@@ -1523,7 +1532,6 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
             }
             // The finite check and the temporary colour store carry the value
             // the record keeps.
-            const char* opacity = packedMotion ? "%glass.opacity" : "%glass.alpha";
             code << R"(  %glass.finite0 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv0)
   %glass.finite1 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float %glass.mv1)
   %glass.finite2 = call i1 @dx.op.isSpecialFloat.f32(i32 10, float )"
@@ -1540,7 +1548,7 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
   ret void)";
         }
         body.replace(body.find("  ret void"), 10,
-                     packedMotion ? Detail::CapturePackedMotion(code.str(), instanceMapId, captureUavId)
+                     packedMotion ? Detail::CapturePackedMotion(code.str(), instanceMapId, captureUavId, opacity)
                      : retainColor ? Detail::CaptureOriginalColor(code.str(), mapped, instanceMapId, coverageOnly, auditCoverage)
                                    : code.str());
         if (mapped)

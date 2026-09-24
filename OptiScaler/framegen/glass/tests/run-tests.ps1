@@ -119,6 +119,16 @@ if ($LASTEXITCODE -ne 0) { throw 'Native graft camera-only packed rewrite contra
 & $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
     (Join-Path $graftWorkspace 'all-transparent-vs\296676c3819d551b094c916e23edacbf20c0f10cdc7d4cce1f0dcf4fcde2c974.dxbc') refused
 if ($LASTEXITCODE -ne 0) { throw 'Native graft vehicle refusal contract failed' }
+# Light-pass pixel shaders (light-ps.bin): the parallaxscreen_transparent PS
+# draws in renderstage_transparent, so its packed record counts the displayed
+# brightness of what it adds; the vehicle_glass distortion PS writes refraction
+# offsets in renderstage_distortion and records its material opacity alone.
+& $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
+    (Join-Path $graftWorkspace 'all-transparent-ps\f17cc532e9e9b0a89281dcd972c0680dc04fa8bfb17e043758d0b95d91ddac16.dxbc') light
+if ($LASTEXITCODE -ne 0) { throw 'Light-pass pixel shader contract failed' }
+& $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
+    (Join-Path $graftWorkspace 'all-transparent-ps\9f45ee255f8434166e0c77eda15e46a262f3e132eb6d3a73eea701c6ee758955.dxbc') nonlight
+if ($LASTEXITCODE -ne 0) { throw 'Distortion pixel shader contract failed' }
 
 $imgui = Join-Path $optiDirectory 'include\imgui'
 $sources = @((Join-Path $PSScriptRoot 'Settings.cpp'),

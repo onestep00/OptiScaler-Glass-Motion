@@ -298,14 +298,18 @@ struct GeometryPipelineCache::Impl
                     {
                         auto& entry = *work.entry;
                         bool packedPairMissing = false;
-                        // Coverage identity (report only). The PS container is
-                        // hashed once per job. The VS hash comes from the graft
-                        // lookup below, or from the same helper on the
-                        // vertex-only path, which runs only the refusal lookup.
+                        // The PS container is hashed once per job: the coverage
+                        // identity (report only) and the light-pass lookup, which
+                        // decides whether the packed variants below count the
+                        // displayed brightness of the colour the draw adds. The
+                        // VS hash comes from the graft lookup below, or from the
+                        // same helper on the vertex-only path, which runs only
+                        // the refusal lookup.
                         std::array<std::uint8_t, 32> pixelHash {};
-                        HashShaderSha256(entry.description.PS.pShaderBytecode, entry.description.PS.BytecodeLength,
-                                         pixelHash);
+                        const bool pixelHashed = HashShaderSha256(entry.description.PS.pShaderBytecode,
+                                                                  entry.description.PS.BytecodeLength, pixelHash);
                         entry.pixelHash = hashWord(pixelHash);
+                        entry.lightTarget = pixelHashed && IsLightPixelShader(pixelHash);
                         if (entry.vertexOnlyCapture)
                         {
                             std::array<std::uint8_t, 32> vertexHash {};
@@ -379,7 +383,8 @@ struct GeometryPipelineCache::Impl
                                                            nullptr, 0, 0, 0 };
                                 packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,
                                                                            entry.description, entry.packed,
-                                                                           packedError, nullptr, nullptr, &camera);
+                                                                           packedError, nullptr, nullptr, &camera,
+                                                                           entry.lightTarget);
                                 graftReady = SUCCEEDED(packedStatus);
                                 NoteGeometryGraft(graftReady ? GraftCameraOnly : GraftRejected);
                                 graftKind = graftReady ? GeometryGraftKind::CameraOnly : GeometryGraftKind::Rejected;
@@ -396,7 +401,8 @@ struct GeometryPipelineCache::Impl
                             {
                                 packedStatus = compiler.createPackedMotion(device.Get(), *work.root->result,
                                                                            entry.description, entry.packed,
-                                                                           packedError, nullptr, nullptr, &*graft);
+                                                                           packedError, nullptr, nullptr, &*graft,
+                                                                           entry.lightTarget);
                                 graftReady = SUCCEEDED(packedStatus);
                                 NoteGeometryGraft(graftReady ? GraftReady : GraftRejected);
                                 graftKind = graftReady ? GeometryGraftKind::RootNoArray : GeometryGraftKind::Rejected;
@@ -417,7 +423,7 @@ struct GeometryPipelineCache::Impl
                                     std::string arrayError;
                                     const bool arrayReady = SUCCEEDED(compiler.createPackedMotion(
                                         device.Get(), *work.root->result, entry.description, entry.packedArray,
-                                        arrayError, nullptr, nullptr, &camera));
+                                        arrayError, nullptr, nullptr, &camera, entry.lightTarget));
                                     if (!arrayReady)
                                         entry.packedArray.Reset();
                                     NoteGeometryGraft(arrayReady ? GraftArrayReady : GraftArrayMissing);
@@ -453,7 +459,7 @@ struct GeometryPipelineCache::Impl
                                 auto& historyTarget = graftReady ? entry.packedHistory : entry.packed;
                                 const auto historyStatus = compiler.createPackedMotion(
                                     device.Get(), *work.root->result, entry.description, historyTarget, historyError,
-                                    &packedCameraCapture, &packedPairMissing);
+                                    &packedCameraCapture, &packedPairMissing, nullptr, entry.lightTarget);
                                 // F-01: without the audited constant pair the history
                                 // variant adds a zero delta, so its motion is the raw
                                 // jittered difference. Withhold it; the draw keeps the
@@ -863,6 +869,7 @@ void GeometryPipelineCache::readCoverage(std::vector<GeometryPipelineCoverage>& 
             value.pixelHash = entry.pixelHash;
             value.kind = entry.graftKind;
             value.history = (entry.nativeGraft ? entry.packedHistory : entry.packed).Get() != nullptr;
+            value.light = entry.lightTarget;
             value.draws = counts.draws.load(std::memory_order_relaxed);
             value.captures = counts.captures.load(std::memory_order_relaxed);
             value.graft = counts.graft.load(std::memory_order_relaxed);

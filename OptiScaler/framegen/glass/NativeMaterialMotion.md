@@ -2,7 +2,7 @@
 
 - Created: 2026-09-12
 - Updated: 2026-09-23
-- Status: independent GPU validation passed. Since 2026-09-23 the packed graft path uses this option: the rewritten material PS reads the grafted VS's current and previous clip outputs through `NativeClipInputs` with `material = true` and linked varyings (`GeometryPipeline.cpp:526-529`, `DxilVertexHistory.h:87-101`). The live evidence below predates that path.
+- Status: independent GPU validation passed. Since 2026-09-23 the packed graft path uses this option: the rewritten material PS reads the grafted VS's current and previous clip outputs through `NativeClipInputs` with `material = true` and linked varyings (`GeometryPipeline.cpp:529-532`, `DxilVertexHistory.h:87-101`). The live evidence below predates that path.
 - Applied: product packed capture from commit `f1b91138e`; see [README.md](README.md)
 - Deprecated: no. Kept for the standalone `tests/build_native_material.ps1` contract and the 2026-09-12 live evidence
 - Scope: explicit current/previous clip inputs with supported read-only transparent material draws; no automatic engine-input admission

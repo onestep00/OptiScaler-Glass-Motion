@@ -9,9 +9,9 @@ constexpr uint32_t PixelCount = 5;
 
 // Matches the capture's key layout: 17 bits of depth plus a covered/uncovered
 // class bit at the top of the 18-bit high key. A record is covered when its
-// stored record opacity (the larger of the material opacity and the emitted
-// brightness) reaches the configured threshold; the fixtures below use
-// 128/255, the same boundary the live default uses.
+// stored record opacity (the material opacity, for a light-pass PS the larger
+// of it and the emitted brightness) reaches the configured threshold; the
+// fixtures below use 128/255, the same boundary the live default uses.
 uint64_t pack(uint32_t depth, int32_t motionX, int32_t motionY, uint32_t weight, uint32_t objectId)
 {
     const uint64_t key = uint64_t(depth & 0x1ffff) | (weight >= 128u ? 0x20000ull : 0ull);
@@ -45,16 +45,18 @@ int wmain(int argc, wchar_t** argv)
         // Overlap resolution is structural: the packed store is an unsigned max
         // on a depth-ordered key, so the nearest surface keeps the record even
         // when a farther surface is drawn later.
-        const auto packedBody = GlassFg::Detail::CapturePackedMotion("", 3, 7);
+        const auto packedBody = GlassFg::Detail::CapturePackedMotion("", 3, 7, "%glass.alpha");
         require(packedBody.find("dx.op.atomicBinOp.i64") != std::string::npos,
                 "Packed store is not an atomic operation");
         require(packedBody.find(", i32 7, i32 %glass.byteaddress") != std::string::npos,
                 "Packed store is not unsigned max on the depth-ordered key");
         require(packedBody.find("shl i64 %glass.depth64, 46") != std::string::npos,
                 "Packed depth is not the high-order key");
-        // One value, the record opacity the material instrumentation leaves in
-        // %glass.opacity, sets both the 8-bit weight and the covered class.
-        require(packedBody.find("%glass.alower = select i1 %glass.alow, float 0.000000e+00, float %glass.opacity") !=
+        // One value, the record opacity the material instrumentation names
+        // (here the material opacity of a PS outside the light passes), sets
+        // both the 8-bit weight and the covered class.
+        require(packedBody.find("%glass.alow = fcmp olt float %glass.alpha, 0.000000e+00") != std::string::npos &&
+                    packedBody.find("%glass.alower = select i1 %glass.alow, float 0.000000e+00, float %glass.alpha") !=
                         std::string::npos &&
                     packedBody.find("%glass.ascaled = fmul float %glass.aclamped, 2.550000e+02") !=
                         std::string::npos &&

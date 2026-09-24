@@ -12,10 +12,10 @@ struct Controls
     // give the shipped behaviour, not a staging configuration.
     bool enabled = true;
     // Interior opacity threshold in percent. A covered pixel takes the object's
-    // own motion and depth when its record opacity (the larger of its material
-    // opacity and its displayed brightness, EmissionPercentValue) reaches this
-    // value; below it the engine's motion and depth stay untouched. The visible
-    // boundary always takes the exact object motion.
+    // own motion and depth when its record opacity (its material opacity, or for
+    // a light-pass PS the larger of that and its displayed brightness,
+    // EmissionPercentValue) reaches this value; below it the engine's motion and
+    // depth stay untouched. The visible boundary always takes the exact object motion.
     unsigned opacityPercent = 50;
     bool measureGpuTime = true;
     unsigned edgeWidth = 2;
@@ -197,14 +197,14 @@ struct Controls
 Controls ReadControls();
 void WriteControls(Controls value);
 // Brightness term of the packed record opacity, live emission=<0..400> percent,
-// default 100. The capture records d = max(material opacity, saturate(luma(F) *
-// percent / 100)) for the colour F a draw adds: the background can change at
-// most 1 - d of the displayed pixel, and added light whose displayed brightness
-// reaches white hides it completely because the display clips at 1. 100 reads
-// the exposed scene colour as displayed brightness (the game passes
-// DLSS.Pre.Exposure 1.0 and no exposure texture); 0 restores the opacity-only
-// record for A/B. Applies to the next draw. Session value only: not persisted
-// and not part of the packed control word.
+// default 100. For a light-pass PS (NativeGraftCatalog.h IsLightPixelShader) the
+// capture records d = max(material opacity, saturate(luma(F) * percent / 100)) for
+// the colour F the draw adds: the background can change at most 1 - d of the displayed
+// pixel, and added light whose displayed brightness reaches white hides it completely
+// because the display clips at 1. Any other PS records its material opacity. 100 reads
+// the exposed scene colour as displayed brightness (DLSS.Pre.Exposure 1.0, no exposure
+// texture); 0 restores the opacity-only record for A/B. Applies to the next draw.
+// Session value only: not persisted and not part of the packed control word.
 inline std::atomic<unsigned>& EmissionPercentValue() noexcept
 {
     static std::atomic<unsigned> value { 100u };

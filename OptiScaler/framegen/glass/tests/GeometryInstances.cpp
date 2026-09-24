@@ -419,7 +419,7 @@ int wmain(int argc, wchar_t** argv)
             pd.RTVFormats[2] = texture.Format;
         pd.DSVFormat = depthDesc.Format;
         pd.SampleDesc.Count = 1;
-        ComPtr<ID3D12PipelineState> original, capturePso, streamPso, additivePso;
+        ComPtr<ID3D12PipelineState> original, capturePso, streamPso, additivePso, nonLightAdditivePso;
         check(g.d->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&original)));
         std::shared_ptr<const GlassFg::GeometryPipelineEntry> lease;
         GlassFg::GeometryRoot directRoot;
@@ -466,12 +466,16 @@ int wmain(int argc, wchar_t** argv)
                 throw std::runtime_error(error);
             // Additive (ONE/ONE) variant of the same material for the emission
             // check at frame 2: it leaves the background at full strength, so
-            // its material opacity is 0 and only the brightness term can cover it.
+            // its material opacity is 0 and only the brightness term can cover
+            // it. It is compiled as the PS of a light pass; the same variant
+            // compiled for a PS outside the light passes has no brightness term.
             if (!packedMrt && !packedFallback)
             {
                 auto additive = pd;
                 additive.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
-                if (FAILED(compiler.createPackedMotion(g.d.Get(), root, additive, additivePso, error)))
+                if (FAILED(compiler.createPackedMotion(g.d.Get(), root, additive, additivePso, error, nullptr, nullptr,
+                                                       nullptr, true)) ||
+                    FAILED(compiler.createPackedMotion(g.d.Get(), root, additive, nonLightAdditivePso, error)))
                     throw std::runtime_error(error);
             }
         }
@@ -538,7 +542,7 @@ int wmain(int argc, wchar_t** argv)
         std::array<std::vector<char>, 2> priorHistory;
         std::vector<char> priorCapture;
         UINT64 checked = 0, overlaps = 0, exact = 0, recovered = 0, auxiliaryWritten = 0;
-        UINT64 packedChecked = 0, packedWrites = 0, emissionChecked = 0;
+        UINT64 packedChecked = 0, packedWrites = 0, emissionChecked = 0, nonLightChecked = 0;
         UINT maximumCoverageWords = 0;
         double maximum = 0;
         unsigned recorderSplitFrame = 5;
@@ -940,18 +944,30 @@ int wmain(int argc, wchar_t** argv)
                 // 0.5323] (tint times 0.5325..0.9675), so at threshold 0.5 scale
                 // 2.2 covers every record, 0.9 keeps every one uncovered with a
                 // nonzero weight and 0 gives the opacity-only record: weight 0,
-                // uncovered. Each run has one class, so the nearest surface wins
-                // as in the draw above.
+                // uncovered. The variant compiled for a PS outside the light
+                // passes ignores the scale: at 2.2 it records exactly the
+                // material opacity 0, uncovered, as before the brightness term.
+                // Each run has one class, so the nearest surface wins as in the
+                // draw above.
                 if (frame == 2 && additivePso)
                 {
                     constexpr UINT64 recordBytes = UINT64(W) * H * sizeof(UINT64);
                     auto emissionReadback =
                         g.buffer(recordBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-                    for (const float scale : { 2.2f, .9f, 0.f })
+                    struct EmissionRun
+                    {
+                        ID3D12PipelineState* pipeline;
+                        float scale;
+                        bool light;
+                    };
+                    for (const auto& run : { EmissionRun { additivePso.Get(), 2.2f, true },
+                                             EmissionRun { additivePso.Get(), .9f, true },
+                                             EmissionRun { additivePso.Get(), 0.f, true },
+                                             EmissionRun { nonLightAdditivePso.Get(), 2.2f, false } })
                     {
                         auto emissionConstants = pc;
                         emissionConstants.opacityThreshold = .5f;
-                        emissionConstants.emissionScale = scale;
+                        emissionConstants.emissionScale = run.scale;
                         upload(pixelConstants.Get(), &emissionConstants, sizeof(emissionConstants));
                         g.begin();
                         g.barrier(capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -968,7 +984,7 @@ int wmain(int argc, wchar_t** argv)
                         g.c->IASetIndexBuffer(&indexView);
                         g.c->SetGraphicsRootSignature(root.extended.Get());
                         g.c->SetGraphicsRoot32BitConstants(0, 4, fc, 0);
-                        g.c->SetPipelineState(additivePso.Get());
+                        g.c->SetPipelineState(run.pipeline);
                         g.c->SetGraphicsRoot32BitConstants(root.constantsSlot, 8, &hc, 0);
                         g.c->SetGraphicsRootShaderResourceView(root.previousSlot,
                                                                history[previous]->GetGPUVirtualAddress());
@@ -1001,15 +1017,23 @@ int wmain(int argc, wchar_t** argv)
                                         "Additive packed variant changed the material coverage");
                                 if (!base)
                                     continue;
+                                require(((record ^ base) & ((0x1ffffull << 46) | 0xffffull)) == 0,
+                                        "Additive packed variant chose another surface");
+                                if (!run.light)
+                                {
+                                    // 1 - mean(saturate(1)) is exactly 0.
+                                    require(!(record >> 63) && !((record >> 16) & 0xff),
+                                            "Packed PS outside the light passes recorded a brightness term");
+                                    ++nonLightChecked;
+                                    continue;
+                                }
                                 // F of the winning object: its original draw blends
                                 // ONE/INV_SRC_ALPHA over a cleared target.
                                 const UINT object = UINT(base & 0x7fff) - 1;
                                 const auto* color = reinterpret_cast<const float*>(
                                     bytes + (object + 2) * imageBytes + y * footprint.Footprint.RowPitch + x * 16);
                                 const double luma = .2126 * color[0] + .7152 * color[1] + .0722 * color[2];
-                                const double opacity = std::min(luma * scale, 1.0);
-                                require(((record ^ base) & ((0x1ffffull << 46) | 0xffffull)) == 0,
-                                        "Additive packed variant chose another surface");
+                                const double opacity = std::min(luma * run.scale, 1.0);
                                 require(((record >> 63) != 0) == (opacity >= .5),
                                         "Emitted brightness did not decide the covered class");
                                 require(std::abs(int((record >> 16) & 0xff) - int(opacity * 255.0)) <= 1,
@@ -1148,11 +1172,12 @@ int wmain(int argc, wchar_t** argv)
         if (packedMotion)
         {
             require(packedChecked == UINT64(W) * H && packedWrites, "Packed material coverage was not verified");
-            require(!additivePso || emissionChecked, "Additive emission records were not verified");
+            require(!additivePso || (emissionChecked && nonLightChecked),
+                    "Additive emission records were not verified");
             printf("PASS packed_material_gpu=1 original_material_preserved=1 nearest_layer_exact=1 "
                    "coverage_only_fallback=%u motion_quantization_step_px=0.125 pixels=%llu writes=%llu "
-                   "bytes_per_pixel=8 emission_records=%llu\n", packedFallback, packedChecked, packedWrites,
-                   emissionChecked);
+                   "bytes_per_pixel=8 emission_records=%llu nonlight_records=%llu\n", packedFallback, packedChecked,
+                   packedWrites, emissionChecked, nonLightChecked);
             return 0;
         }
         if (recorder)

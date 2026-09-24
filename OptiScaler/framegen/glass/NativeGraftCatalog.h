@@ -64,4 +64,24 @@ enum class NativeGraftRefusal : std::uint32_t
 NativeGraftRefusal FindNativeGraftRefusal(const std::array<std::uint8_t, 32>& hash) noexcept;
 // Refusals in the loaded refused.bin; 0 when absent or malformed.
 std::size_t NativeGraftRefusalCount() noexcept;
+// Pixel shaders all of whose engine technique passes draw light into the scene
+// colour the display shows (<module>/Glass/grafts/light-ps.bin, "GGLTPS01",
+// written by tools/export_native_grafts.py from the shader-cache census:
+// transparent, unlit and screen-space VFX passes). Only for such a PS does the
+// packed record opacity include the displayed brightness of the colour the
+// draw adds (RewriteMaterialMotion lightTarget): what a distortion, decal,
+// mark, depth or highlight pass writes is not light on screen. False for every
+// PS when light-ps.bin is absent or malformed. Same threading rule as
+// FindNativeGraft.
+bool IsLightPixelShader(const std::array<std::uint8_t, 32>& sha256) noexcept;
+// Load outcome of light-ps.bin for the module log: Pending until the first
+// catalog lookup loads the files. count is 0 unless Loaded.
+enum class LightPixelShaderList : std::uint32_t
+{
+    Pending,
+    Loaded,
+    Missing,
+    Malformed,
+};
+LightPixelShaderList ReadLightPixelShaderList(std::size_t& count) noexcept;
 } // namespace GlassFg

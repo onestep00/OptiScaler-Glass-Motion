@@ -3,11 +3,15 @@
 // Usage: NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous
 //        camera-current camera-previous
 //        NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc refused
+//        NativeGraftPacked dxcompiler.dll module-dir ps.dxbc light|nonlight
 // module-dir must contain Glass/grafts written by tools/export_native_grafts.py.
 // current and previous are "none" for a camera-only record (a VS without a
 // native current-position twin): no root graft, only the camera variant.
 // "refused": the VS has no record and refused.bin lists it (vehicle object
 // motion without engine supply).
+// "light"/"nonlight": the expected light-ps.bin classification of the PS and
+// the packed PS rewrite it selects. Every packed PS rewrite here takes its
+// lightTarget from the loaded catalog, as the pipeline cache does.
 #include "pch.h"
 #include <dxcapi.h>
 #include <wrl/client.h>
@@ -17,6 +21,7 @@
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "../DxilVertexHistory.h"
 #include "../NativeGraftCatalog.h"
@@ -106,6 +111,50 @@ SignatureElement signatureElement(const std::string& assembly, const std::string
     value.index = std::stoi(list[1].str());
     return value;
 }
+// DXC from dxcompiler.dll for disassembly and the production assemble/validate
+// sequence.
+Dxc loadDxc(const wchar_t* path)
+{
+    const auto dll = LoadLibraryExW(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    require(dll != nullptr, "Cannot load dxcompiler");
+    const auto create = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(dll, "DxcCreateInstance"));
+    require(create != nullptr, "No DxcCreateInstance");
+    Dxc dxc;
+    require(SUCCEEDED(create(CLSID_DxcLibrary, IID_PPV_ARGS(&dxc.library))) &&
+                SUCCEEDED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc.compiler))) &&
+                SUCCEEDED(create(CLSID_DxcAssembler, IID_PPV_ARGS(&dxc.assembler))) &&
+                SUCCEEDED(create(CLSID_DxcValidator, IID_PPV_ARGS(&dxc.validator))),
+            "DXC instances unavailable");
+    return dxc;
+}
+// Light-pass classification of an original PS from the loaded light-ps.bin, the
+// way the pipeline cache computes GeometryPipelineEntry::lightTarget.
+bool lightPixelShader(const std::vector<char>& pixel)
+{
+    std::array<std::uint8_t, 32> hash {};
+    require(GlassFg::HashShaderSha256(pixel.data(), pixel.size(), hash), "Pixel shader hash failed");
+    return GlassFg::IsLightPixelShader(hash);
+}
+// Record opacity of a packed PS rewrite. Only a light-pass PS computes the
+// brightness term (%glass.emission) and records %glass.opacity; any other
+// analysed PS records its material opacity %glass.alpha itself, with no
+// %glass.opacity at all. Coverage-only capture records its constant 0 as
+// %glass.opacity.
+void requireRecordOpacity(const std::string& ps, bool light, bool coverage)
+{
+    const auto records = [&](const char* operand) {
+        return ps.find(std::string("%glass.alower = select i1 %glass.alow, float 0.000000e+00, float ") + operand) !=
+               std::string::npos;
+    };
+    const bool emission = ps.find("%glass.emission") != std::string::npos;
+    if (coverage)
+        require(!emission && records("%glass.opacity"), "Coverage-only packed PS does not record opacity 0");
+    else if (light)
+        require(emission && records("%glass.opacity"), "Light-pass packed PS does not record the brightness maximum");
+    else
+        require(!emission && ps.find("%glass.opacity") == std::string::npos && records("%glass.alpha"),
+                "Packed PS outside the light passes does not record its material opacity");
+}
 } // namespace
 
 namespace Util
@@ -117,11 +166,13 @@ int wmain(int argc, wchar_t** argv)
 {
     try
     {
-        require(argc == 9 || (argc == 5 && std::wstring(argv[4]) == L"refused"),
+        const std::wstring mode = argc == 5 ? argv[4] : L"";
+        require(argc == 9 || (argc == 5 && (mode == L"refused" || mode == L"light" || mode == L"nonlight")),
                 "NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc ps.dxbc current previous "
-                "camera-current camera-previous | NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc refused");
+                "camera-current camera-previous | NativeGraftPacked dxcompiler.dll module-dir original-vs.dxbc refused"
+                " | NativeGraftPacked dxcompiler.dll module-dir ps.dxbc light|nonlight");
         moduleDirectory = argv[2];
-        if (argc == 5)
+        if (mode == L"refused")
         {
             // Catalog refusal: no record, and the listed reason.
             const auto vehicleVs = readFile(argv[3]);
@@ -134,21 +185,34 @@ int wmain(int argc, wchar_t** argv)
                         GlassFg::NativeGraftRefusalCount());
             return 0;
         }
+        auto dxc = loadDxc(argv[1]);
+        if (argc == 5)
+        {
+            // Light-pass classification of one original PS and the packed
+            // rewrite of its analysed blend equation that it selects.
+            const auto pixel = readFile(argv[3]);
+            const bool light = lightPixelShader(pixel);
+            std::size_t lightCount = 0;
+            require(GlassFg::ReadLightPixelShaderList(lightCount) == GlassFg::LightPixelShaderList::Loaded &&
+                        lightCount,
+                    "light-ps.bin was not loaded");
+            require(light == (mode == L"light"),
+                    light ? "PS outside the light passes is listed as light" : "Light-pass PS is not listed as light");
+            const auto material = GlassFg::RewriteMaterialMotion(
+                dxc.disassemble(pixel.data(), pixel.size()), GlassFg::MaterialSource::Alpha,
+                GlassFg::MaterialDestination::OneMinusAlpha, GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion,
+                UINT32_MAX, GlassFg::GeometryLayout::PerInstance, nullptr, true, false, light);
+            require(bool(material), "Pixel rewrite failed: " + material.error);
+            requireRecordOpacity(material.assembly, light, false);
+            dxc.assembleAndValidate(material.assembly, "pixel");
+            std::printf("catalog light_ps=%zu: PS light=%u, packed rewrite records %s\n", lightCount, light ? 1u : 0u,
+                        light ? "max(material opacity, brightness)" : "the material opacity");
+            return 0;
+        }
         const bool cameraOnly = std::wstring(argv[5]) == L"none" && std::wstring(argv[6]) == L"none";
         const unsigned expectedCurrent = cameraOnly ? 0 : std::stoul(argv[5]);
         const unsigned expectedPrevious = cameraOnly ? 0 : std::stoul(argv[6]);
         const unsigned expectedCameraCurrent = std::stoul(argv[7]), expectedCameraPrevious = std::stoul(argv[8]);
-        const auto dll = LoadLibraryExW(argv[1], nullptr,
-                                        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        require(dll != nullptr, "Cannot load dxcompiler");
-        const auto create = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(dll, "DxcCreateInstance"));
-        require(create != nullptr, "No DxcCreateInstance");
-        Dxc dxc;
-        require(SUCCEEDED(create(CLSID_DxcLibrary, IID_PPV_ARGS(&dxc.library))) &&
-                    SUCCEEDED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc.compiler))) &&
-                    SUCCEEDED(create(CLSID_DxcAssembler, IID_PPV_ARGS(&dxc.assembler))) &&
-                    SUCCEEDED(create(CLSID_DxcValidator, IID_PPV_ARGS(&dxc.validator))),
-                "DXC instances unavailable");
 
         // Catalog: the original VS container hash selects the graft; the pixel
         // shader bytes are a miss.
@@ -192,7 +256,10 @@ int wmain(int argc, wchar_t** argv)
         };
         // Packed rewrite of one grafted VS and the paired PS: native-previous VS
         // mode, linked graft rows, DXC assembly and validation of both stages.
+        // The PS rewrite takes its brightness term from the catalog's
+        // light-pass classification of the PS, as the pipeline cache does.
         const auto pixelText = dxc.disassemble(pixel.data(), pixel.size());
+        const bool light = lightPixelShader(pixel);
         auto rewritePacked = [&](const char* label, const void* bytes, std::size_t size, unsigned current,
                                  unsigned previous) {
             const GlassFg::VertexClipPair outputs { current, previous };
@@ -219,7 +286,7 @@ int wmain(int argc, wchar_t** argv)
             auto material = GlassFg::RewriteMaterialMotion(
                 pixelText, GlassFg::MaterialSource::Alpha, GlassFg::MaterialDestination::OneMinusAlpha,
                 GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion, vertex.previousRegister,
-                GlassFg::GeometryLayout::PerInstance, &inputs, true, false);
+                GlassFg::GeometryLayout::PerInstance, &inputs, true, false, light);
             const char* variant = "alpha";
             if (!material)
             {
@@ -228,7 +295,7 @@ int wmain(int argc, wchar_t** argv)
                 material = GlassFg::RewriteMaterialMotion(
                     pixelText, GlassFg::MaterialSource::Zero, GlassFg::MaterialDestination::CoverageOnly,
                     GlassFg::MaterialMotionTarget::OriginalColorAndPackedMotion, vertex.previousRegister,
-                    GlassFg::GeometryLayout::PerInstance, &inputs, true, false);
+                    GlassFg::GeometryLayout::PerInstance, &inputs, true, false, light);
                 variant = "coverage";
             }
             require(bool(material), std::string(label) + " pixel rewrite failed: " + material.error);
@@ -236,6 +303,7 @@ int wmain(int argc, wchar_t** argv)
             require(ps.find("%glass.j") == std::string::npos && ps.find("%glass.captureDelta") == std::string::npos,
                     "Packed native PS adds a jitter or capture-delta term");
             require(ps.find("GLASS_PREVIOUS") == std::string::npos, "Packed native PS declares GLASS_PREVIOUS");
+            requireRecordOpacity(ps, light, variant == std::string_view("coverage"));
             // Linkage: every varying the rewrite introduced sits at the same row
             // and semantic in both stages.
             auto name = [](const std::string& quoted) { return quoted.substr(2, quoted.size() - 3); };
@@ -257,8 +325,8 @@ int wmain(int argc, wchar_t** argv)
                         "Clip varying semantic index differs from the graft output");
             }
             dxc.assembleAndValidate(ps, (std::string(label) + " pixel").c_str());
-            std::printf("%s graft packed rewrite passed (%s variant, missing_row=%u)\n", label, variant,
-                        vertex.missingRegister);
+            std::printf("%s graft packed rewrite passed (%s variant, missing_row=%u, light=%u)\n", label, variant,
+                        vertex.missingRegister, light ? 1u : 0u);
         };
 
         // Root graft: previous clip reads the relocated MotionMatrix rows b7[24..26].

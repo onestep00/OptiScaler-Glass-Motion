@@ -34,6 +34,12 @@ constexpr std::uintmax_t MaxGraftBytes = 2 * 1024 * 1024;
 // NativeGraftRefusal. A VS is either indexed or refused.
 constexpr char RefusalMagic[8] = { 'G', 'G', 'R', 'E', 'F', 'S', '0', '1' };
 constexpr std::size_t RefusalRecordBytes = 36;
+// light-ps.bin: "GGLTPS01", u32 count, u32 reserved (0), then count sorted,
+// unique u8 sha256[32] of pixel shader containers (IsLightPixelShader).
+constexpr char LightMagic[8] = { 'G', 'G', 'L', 'T', 'P', 'S', '0', '1' };
+// The census lists 3,005 distinct pixel shaders in a cache of 19,037 shader
+// records; the bound keeps a corrupt count from sizing an allocation.
+constexpr std::uint32_t MaxLightShaders = 32768;
 
 struct Graft
 {
@@ -58,9 +64,12 @@ struct Catalog
     std::mutex loadMutex;
     std::vector<Graft> grafts;     // Sorted by sha; immutable after indexOnce.
     std::vector<Refusal> refusals; // Sorted by sha; immutable after indexOnce.
+    // Sorted, unique; immutable after indexOnce.
+    std::vector<std::array<std::uint8_t, 32>> lightShaders;
     BCRYPT_ALG_HANDLE sha256 = nullptr;
     std::filesystem::path directory;
     std::atomic<std::size_t> count { 0 }, refusalCount { 0 };
+    std::atomic<LightPixelShaderList> lightList { LightPixelShaderList::Pending };
 };
 Catalog catalog;
 
@@ -110,6 +119,52 @@ void loadRefusals() noexcept
     }
 }
 
+// The digests of light-ps.bin; false for any format defect.
+bool readLightShaders(std::ifstream& file, std::vector<std::array<std::uint8_t, 32>>& shaders)
+{
+    char header[IndexHeaderBytes] {};
+    if (!file.read(header, sizeof(header)) || std::memcmp(header, LightMagic, sizeof(LightMagic)) != 0)
+        return false;
+    std::uint32_t count = 0, reserved = 0;
+    std::memcpy(&count, header + 8, 4);
+    std::memcpy(&reserved, header + 12, 4);
+    if (count > MaxLightShaders || reserved)
+        return false;
+    shaders.resize(count);
+    for (auto& sha : shaders)
+        if (!file.read(reinterpret_cast<char*>(sha.data()), sha.size()))
+            return false;
+    // Exact size, sorted and unique as written; anything else is a different
+    // format.
+    return file.peek() == std::char_traits<char>::eof() &&
+           std::adjacent_find(shaders.begin(), shaders.end(),
+                              [](const auto& a, const auto& b) { return !(a < b); }) == shaders.end();
+}
+
+// A missing or malformed list leaves every PS without the brightness term; the
+// state tells the module log which (GEOMETRY_LIGHT_PS).
+void loadLightShaders() noexcept
+{
+    auto state = LightPixelShaderList::Missing;
+    try
+    {
+        std::ifstream file(catalog.directory / L"light-ps.bin", std::ios::binary);
+        if (file)
+        {
+            std::vector<std::array<std::uint8_t, 32>> shaders;
+            state = readLightShaders(file, shaders) ? LightPixelShaderList::Loaded : LightPixelShaderList::Malformed;
+            if (state == LightPixelShaderList::Loaded)
+                catalog.lightShaders = std::move(shaders);
+        }
+    }
+    catch (...)
+    {
+        catalog.lightShaders.clear();
+        state = LightPixelShaderList::Malformed;
+    }
+    catalog.lightList.store(state, std::memory_order_release);
+}
+
 void loadIndex() noexcept
 {
     try
@@ -121,6 +176,7 @@ void loadIndex() noexcept
         }
         catalog.directory = Util::DllPath().parent_path() / L"Glass" / L"grafts";
         loadRefusals();
+        loadLightShaders();
         std::ifstream file(catalog.directory / L"index.bin", std::ios::binary);
         if (!file)
             return;
@@ -302,4 +358,19 @@ NativeGraftRefusal FindNativeGraftRefusal(const std::array<std::uint8_t, 32>& ha
 }
 
 std::size_t NativeGraftRefusalCount() noexcept { return catalog.refusalCount.load(std::memory_order_acquire); }
+
+bool IsLightPixelShader(const std::array<std::uint8_t, 32>& sha256) noexcept
+{
+    std::call_once(catalog.indexOnce, loadIndex);
+    return std::binary_search(catalog.lightShaders.begin(), catalog.lightShaders.end(), sha256);
+}
+
+LightPixelShaderList ReadLightPixelShaderList(std::size_t& count) noexcept
+{
+    // The list is written before the release store of its state and never
+    // changes afterwards.
+    const auto state = catalog.lightList.load(std::memory_order_acquire);
+    count = state == LightPixelShaderList::Loaded ? catalog.lightShaders.size() : 0;
+    return state;
+}
 } // namespace GlassFg

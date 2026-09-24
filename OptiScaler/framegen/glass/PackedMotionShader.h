@@ -1,13 +1,17 @@
 #pragma once
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace GlassFg::Detail
 {
 // Append one global packed-layer write after the original material body. The
 // original color exports and discard stay intact. Missing history, inactive
 // mapping, empty contribution and invalid values skip only this extra write.
-inline std::string CapturePackedMotion(std::string instrumentation, unsigned instanceMapId, unsigned captureUavId = 0)
+// opacity names the instrumentation's record opacity value: %glass.alpha, or
+// %glass.opacity for a light-pass PS and for coverage-only capture.
+inline std::string CapturePackedMotion(std::string instrumentation, unsigned instanceMapId, unsigned captureUavId,
+                                       std::string_view opacity)
 {
     for (const auto* condition : {"bad", "empty", "nonfinite"})
     {
@@ -92,12 +96,13 @@ glass.packedquantize:
   %glass.myi = fptosi float %glass.myscaled to i32
   %glass.mxbits = and i32 %glass.mxi, 2047
   %glass.mybits = and i32 %glass.myi, 2047
-  ; %glass.opacity is the record opacity d = max(material opacity, displayed
-  ; brightness of the light the draw adds): the background can change at most
-  ; 1 - d of the displayed pixel. The 8-bit weight and the covered class below
-  ; both come from this one value.
-  %glass.alow = fcmp olt float %glass.opacity, 0.000000e+00
-  %glass.alower = select i1 %glass.alow, float 0.000000e+00, float %glass.opacity
+  ; The record opacity d: the background can change at most 1 - d of the
+  ; displayed pixel. The 8-bit weight and the covered class below both come
+  ; from this one value.
+  %glass.alow = fcmp olt float )" +
+           std::string(opacity) + R"(, 0.000000e+00
+  %glass.alower = select i1 %glass.alow, float 0.000000e+00, float )" +
+           std::string(opacity) + R"(
   %glass.ahigh = fcmp ogt float %glass.alower, 1.000000e+00
   %glass.aclamped = select i1 %glass.ahigh, float 1.000000e+00, float %glass.alower
   %glass.ascaled = fmul float %glass.aclamped, 2.550000e+02

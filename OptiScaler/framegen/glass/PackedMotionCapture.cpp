@@ -1437,8 +1437,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                 // store keeps the nearest covered record ahead of any uncovered
                 // one.
                 controls.opacityThreshold(),
-                // Brightness term of the record opacity: max(material opacity,
-                // saturate(luma(F) * scale)) for the colour F the draw adds
+                // Brightness term of a light-pass PS's record opacity: max(material
+                // opacity, saturate(luma(F) * scale)) for the colour F the draw adds
                 // (live emission=, default 1.0; 0 = material opacity alone).
                 EmissionScale(), 0.f, 0.f
             };

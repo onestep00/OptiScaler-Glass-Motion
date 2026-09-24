@@ -175,9 +175,11 @@ struct MaterialCaptureConstants
     // visible-border/opacity rule keeps, with one 8-byte record per pixel.
     float opacityThreshold;
     // Display-referred brightness per unit of scene-colour luminance. The packed
-    // record opacity is max(material opacity, saturate(luma(F) * emissionScale))
+    // record opacity of a light-pass pixel shader (RewriteMaterialMotion
+    // lightTarget) is max(material opacity, saturate(luma(F) * emissionScale))
     // for the colour F the draw adds; 0 disables the brightness term, so the
     // record keeps the material opacity alone (the opacity-only rule, for A/B).
+    // Other packed variants do not read it.
     float emissionScale;
     float reserved2, reserved3;
     bool valid(std::uint64_t allocatedCapacity) const
@@ -205,7 +207,8 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
                                           GeometryLayout layout = GeometryLayout::Contiguous,
                                           const NativeClipInputs* nativeInputs = nullptr,
                                           bool preserveOriginalUavs = false,
-                                          bool captureDelta = false);
+                                          bool captureDelta = false,
+                                          bool lightTarget = false);
 // preserveOriginalUavs is an explicit in-place packed instrumentation contract.
 // Never enable it for an additional/replayed draw: original UAV writes must run
 // exactly once with the unchanged original bindings. Runtime admission is separate.
@@ -226,4 +229,11 @@ VertexHistoryShader RewriteMaterialMotion(std::string_view disassembly, Material
 // expects GLASS_HISTORY_MISSING/GLASS_OBJECT_INDEX at firstHistoryRegister
 // (the VS previousRegister of native-previous mode) and records
 // (previous UV - current UV) with no jitter term and no capture delta.
+// lightTarget (packed motion only): the PS draws in an engine pass that adds
+// light to the displayed scene colour (NativeGraftCatalog.h
+// IsLightPixelShader). Its record opacity is then %glass.opacity = max(material
+// opacity, saturate(luma(F) * emissionScale)). Any other packed variant records
+// the material opacity %glass.alpha itself, because the colour of a distortion,
+// decal, mark or depth pass is not light on screen; coverage-only capture
+// records 0 either way.
 } // namespace GlassFg

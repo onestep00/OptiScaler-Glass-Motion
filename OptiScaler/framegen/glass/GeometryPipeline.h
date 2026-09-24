@@ -79,11 +79,17 @@ class GeometryCompiler
     // failed graft rewrite is returned as the failure (no pair-less retry). The
     // cache passes the camera-only variant (NativeGraft::cameraBytes and its
     // outputs) the same way to build the array/multi-instance pipeline.
+    //
+    // lightTarget: the original PS draws in an engine pass that adds light to
+    // the displayed scene colour (NativeGraftCatalog.h IsLightPixelShader). Only
+    // then does the record opacity include the displayed brightness of the
+    // colour the draw adds; otherwise it is the material opacity alone
+    // (RewriteMaterialMotion lightTarget).
     HRESULT createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
                                const VertexConstantPair* capture = nullptr, bool* pairMissing = nullptr,
-                               const NativeGraft* graft = nullptr);
+                               const NativeGraft* graft = nullptr, bool lightTarget = false);
     HRESULT createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
@@ -115,6 +121,6 @@ class GeometryCompiler
                          const VertexClipPair* clipPair = nullptr,
                          const NativeClipInputs* nativeInputs = nullptr,
                          const VertexInputPair* inputPair = nullptr,
-                         const NativeGraft* graft = nullptr);
+                         const NativeGraft* graft = nullptr, bool lightTarget = false);
 };
 } // namespace GlassFg

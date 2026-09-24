@@ -275,7 +275,7 @@ struct GeometryCompiler::Impl
                     const VertexClipPair* clipPair = nullptr, const NativeClipInputs* nativeInputs = nullptr,
                     const VertexInputPair* inputPair = nullptr, bool captureDelta = false,
                     bool markMissingDelta = false, const VertexClipPair* nativePrevious = nullptr,
-                    std::array<NativeClipVarying, 2>* nativeVaryings = nullptr)
+                    std::array<NativeClipVarying, 2>* nativeVaryings = nullptr, bool lightTarget = false)
     {
         if (!input.pShaderBytecode || !input.BytecodeLength || input.BytecodeLength > 2 * 1024 * 1024)
             return reject(error, "Missing or oversized shader");
@@ -290,7 +290,8 @@ struct GeometryCompiler::Impl
             vertex ? RewriteVertexHistory(text, layout, capture, clipPair, inputPair, captureDelta, markMissingDelta,
                                           nativePrevious)
                    : RewriteMaterialMotion(text, source, destination, target, historyRegister, layout, nativeInputs,
-                                           target == MaterialMotionTarget::OriginalColorAndPackedMotion, captureDelta);
+                                           target == MaterialMotionTarget::OriginalColorAndPackedMotion, captureDelta,
+                                           lightTarget);
         if (!rewritten)
         {
             error = rewritten.error;
@@ -334,7 +335,7 @@ HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const Geometr
                                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                              ComPtr<ID3D12PipelineState>& output, std::string& error,
                                              const VertexConstantPair* capture, bool* pairMissing,
-                                             const NativeGraft* graft)
+                                             const NativeGraft* graft, bool lightTarget)
 {
     if (pairMissing)
         *pairMissing = false;
@@ -348,12 +349,13 @@ HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const Geometr
             return reject(error, "Native graft excludes the capture constant pair");
         return createTarget(device, root, original, output, error,
                             MaterialMotionTarget::OriginalColorAndPackedMotion, false, nullptr, nullptr, nullptr,
-                            nullptr, graft);
+                            nullptr, graft, lightTarget);
     }
     if (capture)
     {
         const auto status = createTarget(device, root, original, output, error,
-                                         MaterialMotionTarget::OriginalColorAndPackedMotion, false, capture);
+                                         MaterialMotionTarget::OriginalColorAndPackedMotion, false, capture, nullptr,
+                                         nullptr, nullptr, nullptr, lightTarget);
         if (SUCCEEDED(status))
             return status;
         // R6: the audited constant block is not present in every transparent
@@ -369,7 +371,8 @@ HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const Geometr
         error.clear();
     }
     return createTarget(device, root, original, output, error,
-                        MaterialMotionTarget::OriginalColorAndPackedMotion);
+                        MaterialMotionTarget::OriginalColorAndPackedMotion, false, nullptr, nullptr, nullptr, nullptr,
+                        nullptr, lightTarget);
 }
 HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
@@ -403,7 +406,7 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
                                        MaterialMotionTarget target, bool vertexOnly, const VertexConstantPair* capture,
                                        const VertexClipPair* clipPair, const NativeClipInputs* nativeInputs,
-                                       const VertexInputPair* inputPair, const NativeGraft* graft)
+                                       const VertexInputPair* inputPair, const NativeGraft* graft, bool lightTarget)
 {
     error.clear();
     if (FAILED(implementation->status))
@@ -535,7 +538,8 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     if (!vertexOnly)
     {
         hr = implementation->rewrite(original.PS, false, source, destination, ps, error, historyRegister,
-                                     root.layout, target, nullptr, nullptr, pixelNative, nullptr, captureDelta);
+                                     root.layout, target, nullptr, nullptr, pixelNative, nullptr, captureDelta,
+                                     false, nullptr, nullptr, lightTarget);
         if (FAILED(hr) && packedMotion && destination != MaterialDestination::CoverageOnly)
         {
             // The material equation needs colour exports this pixel shader does
@@ -545,7 +549,8 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
             // the interior keeps the engine's own motion. The original exports,
             // discard and blend state stay untouched. Extra MRT slots above
             // zero are not a rejection reason; they are skipped and the
-            // material pass keeps them.
+            // material pass keeps them. No colour is analysed, so there is no
+            // brightness term either.
             ps.Reset();
             error.clear();
             hr = implementation->rewrite(original.PS, false, MaterialSource::Zero,

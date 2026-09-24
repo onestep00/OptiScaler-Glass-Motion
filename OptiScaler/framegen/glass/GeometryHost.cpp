@@ -17,6 +17,7 @@
 #include "GlassControls.h"
 #include "GlassHookProbe.h"
 #include "NativeHost.h"
+#include "NativeGraftCatalog.h"
 #include "GlassHostTiming.h"
 #include <Util.h>
 #include <State.h>
@@ -231,6 +232,20 @@ void ReportGeometryHost(FILE* log) noexcept
                 commands.indirectUnknown);
         if (!creation.cache.lastError.empty())
             fprintf(log, "GEOMETRY_COMPILER last_error=%s\n", creation.cache.lastError.c_str());
+        // Light pixel-shader list of the graft catalog, once, after the
+        // compiler worker's first lookup loaded it. missing or malformed: no
+        // packed variant counts the displayed brightness of what a draw adds.
+        {
+            static std::atomic<bool> lightReported { false };
+            std::size_t lightCount = 0;
+            const auto light = ReadLightPixelShaderList(lightCount);
+            if (light != LightPixelShaderList::Pending && !lightReported.exchange(true, std::memory_order_relaxed))
+                fprintf(log, "GEOMETRY_LIGHT_PS state=%s count=%zu file=Glass/grafts/light-ps.bin\n",
+                        light == LightPixelShaderList::Loaded    ? "loaded"
+                        : light == LightPixelShaderList::Missing ? "missing"
+                                                                 : "malformed",
+                        lightCount);
+        }
         const auto packed = ReadPackedMotionCaptureStatus();
         PublishGeometryMotionDegraded(packed.historyArenaPages != 0 &&
                                       packed.historyArenaUsedPages >= packed.historyArenaPages &&
@@ -405,6 +420,9 @@ void ReportGeometryHost(FILE* log) noexcept
             // column of the dump id table (dump-<serial>-pipelines.txt) and of
             // the GATE_DETAIL lines. gates= lists the admission gates that refused
             // the entry's draws or elements, non-zero only ("-" when none).
+            // light=1: the PS is a light-pass PS, so the record opacity of the
+            // entry's packed variants counts the displayed brightness of the
+            // colour the draw adds (GeometryPipelineEntry::lightTarget).
             {
                 static std::atomic<std::uint64_t> reportedDraws { UINT64_MAX };
                 std::vector<GeometryPipelineCoverage> pipelines;
@@ -444,14 +462,14 @@ void ReportGeometryHost(FILE* log) noexcept
                     }
                     fprintf(log,
                             "GEOMETRY_PIPELINE id=%llu vs=%016llx ps=%016llx kind=%s history=%u draws=%llu "
-                            "captures=%llu graft=%llu array=%llu array_rejected=%llu gates=%s\n",
+                            "captures=%llu graft=%llu array=%llu array_rejected=%llu gates=%s light=%u\n",
                             static_cast<unsigned long long>(item.identity),
                             static_cast<unsigned long long>(item.vertexHash),
                             static_cast<unsigned long long>(item.pixelHash), GeometryGraftKindName(item.kind),
                             item.history ? 1u : 0u, static_cast<unsigned long long>(item.draws),
                             static_cast<unsigned long long>(item.captures),
                             static_cast<unsigned long long>(item.graft), static_cast<unsigned long long>(item.array),
-                            static_cast<unsigned long long>(item.arrayRejected), gates);
+                            static_cast<unsigned long long>(item.arrayRejected), gates, item.light ? 1u : 0u);
                 }
             }
         }
