@@ -7,11 +7,18 @@ Only Cyberpunk 2077 is supported; the module reads the game's own engine data.
 
 ## Before / after
 
-Left: stock DLSS FG. Right: with Glass. Same camera path, same place, generated frames included.
+Left: stock DLSS FG. Right: with Glass. Same camera path, same place, default settings
+(`InteriorOpacityPercent=10`, `GraftClassMask=3`, `NrMotion=true`). The captures are 4K desktop
+recordings, so they contain a mix of rendered and generated frames; the doubled text on the left
+is what the generated frames look like without the module.
 
-| Kabuki hologram, strafing | Kabuki hologram, panning | Cherry Blossom Data Term, strafing |
+| Kabuki hologram, strafing | Kabuki hologram, strafing + panning | Kabuki hologram, panning |
 | --- | --- | --- |
-| ![hologram strafe](docs/glass/hologram-strafe.webp) | ![hologram pan](docs/glass/hologram-pan.webp) | ![data term strafe](docs/glass/dataterm-strafe.webp) |
+| ![hologram strafe](docs/glass/hologram-strafe.webp) | ![hologram strafe pan](docs/glass/hologram-strafe-pan.webp) | ![hologram pan](docs/glass/hologram-pan.webp) |
+
+| Cherry Blossom Data Term, strafing + panning | Cherry Blossom Data Term, panning |
+| --- | --- |
+| ![data term strafe pan](docs/glass/dataterm-strafe-pan.webp) | ![data term pan](docs/glass/dataterm-pan.webp) |
 
 ## The problem
 
