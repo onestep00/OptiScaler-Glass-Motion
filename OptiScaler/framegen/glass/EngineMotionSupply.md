@@ -829,14 +829,16 @@ a vertex factory (commits `680525741`, `2bef442ff`). The 14 refused targets
 camera-only records. Raising the default `GraftClassMask` to 3 (commit
 `592de369b`) was tried on DLL `0c5bb34e` and withdrawn. In all six still frames
 the NPC head region (hair and glasses, skinned class 2) delivered about 77 px
-where the engine had about 3.5 px. [INFERENCE, `research/ACTIVE.md:128`] The
-transparent pass does not keep the velocity pass's previous skinning supply
-(previous `INSTANCE_SKINNING_DATA` offset, previous t10 bones). With the default
-1 (DLL `580b24ad`) the rerun no longer showed that region
-(`class_disabled=348~367`).
+where the engine had about 3.5 px. With the default 1 (DLL `580b24ad`) the rerun
+no longer showed that region (`class_disabled=348~367`). The inference recorded
+then (`research/ACTIVE.md:128`: the transparent pass lacks the velocity pass's
+previous skinning supply) was wrong. On 2026-09-24 the previous bones matched,
+and the hair draws (`hair_basecolor_blend`) had no declared VS/PS pair, so the
+engine never wrote rows 24..26 for them (`research/ACTIVE.md` "스키닝 A/B"). With
+the pairs declared (`5ca2eaba`) hair measured 0.1 px, and 3 is the default since
+2026-09-24 (`research/ACTIVE.md` "hair 선언 쌍 게임 검증").
 
-Remaining proof for this supply: a previous skinning supply for skinned
-transparent draws (class 2), a dedicated recheck of the 6 px glasses error, a
+Remaining proof for this supply: a dedicated recheck of the 6 px glasses error, a
 preskinned (t9/b3) previous supply, the 54 unsupported VS, and opaque-probe
 equivalence (`research/native-supply-integration-plan.md:90`).
 

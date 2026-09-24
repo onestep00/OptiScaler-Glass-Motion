@@ -286,7 +286,7 @@ inline bool VertexHistoryFallbackEnabled() noexcept
     return VertexHistoryFallbackFlag().load(std::memory_order_relaxed);
 }
 // Graft supply classes admitted at pipeline compile time (INI
-// GlassFG/GraftClassMask, live graftclass=<n>, default 1). Bit 0: the previous
+// GlassFG/GraftClassMask, live graftclass=<n>, default 3). Bit 0: the previous
 // graph reads only the MotionMatrix and camera rows (root transform). Bit 1: it
 // also reads skinning inputs / the t10 bone buffer. Bit 2: it reads t9/b3
 // preskinned previous vertices. A graft is admitted when every bit of its class
@@ -294,16 +294,17 @@ inline bool VertexHistoryFallbackEnabled() noexcept
 // treated as a graft miss. Applies to pipelines compiled afterwards.
 inline constexpr unsigned GraftClassRootOnly = 1u, GraftClassSkinning = 2u, GraftClassPreskinned = 4u,
                           GraftClassAll = 7u;
+// Root-only and skinning. Skinning was withdrawn as the default on 2026-09-23
+// (build 0c5bb34e: hair/glasses delivered ~77 px where the engine had
+// ~3.5 px). The cause was the hair_basecolor_blend VS/PS pairs without a
+// MotionMatrix declaration, so rows 24..26 stayed unwritten. With the pairs
+// declared (5ca2eaba) hair measured 0.1 px and walkers read their previous
+// pose; on by default since 2026-09-24 (research/ACTIVE.md "hair 선언 쌍 게임
+// 검증").
+inline constexpr unsigned GraftClassDefault = GraftClassRootOnly | GraftClassSkinning;
 inline std::atomic<unsigned>& GraftClassMaskValue() noexcept
 {
-    // Root-only by default. Class 2 (skinning) was tried as the default on
-    // 2026-09-23 (build 0c5bb34e): hair/glasses delivered ~77 px where the
-    // engine had ~3.5 px. Cause (2026-09-24): the hair_basecolor_blend VS/PS
-    // pairs had no MotionMatrix declaration, so rows 24..26 stayed unwritten.
-    // With those pairs declared (5ca2eaba) hair measured 0.1 px and walkers
-    // read their previous pose; the default stays 1 until the user decides
-    // (research/ACTIVE.md "hair 선언 쌍 게임 검증").
-    static std::atomic<unsigned> value { GraftClassRootOnly };
+    static std::atomic<unsigned> value { GraftClassDefault };
     return value;
 }
 inline void SetGraftClassMask(unsigned mask) noexcept

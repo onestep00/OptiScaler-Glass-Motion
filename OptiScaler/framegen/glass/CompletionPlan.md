@@ -210,7 +210,7 @@ TDR 원인은 새 GPU 작업과 FG 입력 교체를 분리해서 판정한다. `
    - 정점 이력은 `VertexHistoryFallback` 기본 off 진단 폴백이다.
 2. 1단계 배열 질문의 답(29행 "배열 원소별 원본 MV"). 엔진은 일반 배열 원소에 원소별 이전 변환을 갖지 않는다. 원소 MV는 카메라 전용 velocity-init 패스에서 온다. root graft를 배열에 적용하면 정지 장면에서 81px 오차가 났다(`research/ACTIVE.md:77`). 따라서 camera-only가 엔진 규약이다.
 3. 전달 규칙. 경계와 임계값 이상 내부만 물체 MV·depth로 덮어쓰고, 겹치면 최근접 표면을 쓴다(64비트 UMax 레코드). 엔진 depth가 더 가까우면 엔진 값을 유지한다(`32e3ad691`, `c6b772b3e`). jitter는 모드 0, 게인 100으로 고정했다. 구세대 표면·영역 보정과 강도 혼합 경로는 삭제했다(`db4945922`).
-4. 정점 팩토리 규칙. skinned 팩토리 대상은 다른 팩토리의 root 전용 트윈에서 root graft를 받지 않는다(`680525741`, `2bef442ff`). 오프라인 결과는 root 226, `factory_mismatch` 14, 미지원 10이다(`glass-native-material-v1/native-grafted/index.json`). `GraftClassMask` 기본값 3은 시험 후 철회했다. `0c5bb34e`에서 NPC 머리카락·안경(skinned class 2)이 전달 약 77px 대 엔진 약 3.5px였고, 기본값 1(`580b24ad`) 재실행에서 그 영역이 사라졌다(`research/ACTIVE.md:128`).
+4. 정점 팩토리 규칙. skinned 팩토리 대상은 다른 팩토리의 root 전용 트윈에서 root graft를 받지 않는다(`680525741`, `2bef442ff`). 오프라인 결과는 root 226, `factory_mismatch` 14, 미지원 10이다(`glass-native-material-v1/native-grafted/index.json`). `GraftClassMask` 기본값 3은 처음에 시험 후 철회했다. `0c5bb34e`에서 NPC 머리카락·안경(skinned class 2)이 전달 약 77px 대 엔진 약 3.5px였고, 기본값 1(`580b24ad`) 재실행에서 그 영역이 사라졌다(`research/ACTIVE.md:128`). 원인은 hair `hair_basecolor_blend` 쌍의 MotionMatrix 선언 누락이었다. `5ca2eaba`에서 선언을 넣은 뒤 hair 0.1px를 확인했고, 2026-09-24부터 기본값은 3이다.
 5. 아레나 분리. graft draw는 정점 이력 아레나 블록 없이 identity-only 매핑을 쓴다(`a6712d09b`).
 6. 게임 검증(4단계 일부, `research/ACTIVE.md`):
    - 정지·이동·송소미 천장 고속 회전(50-51행)
