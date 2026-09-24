@@ -1034,3 +1034,48 @@ Expected probe readings. A proxy at rest: `rows=cur inst=cur`, `record=0` (or
 state=1 supplied=1 earlier=1`, `dt_mm`
 its per-frame displacement, `variant=root`. (B): `inst=other`. (C):
 `rows=other`, or `rows=prev` with `earlier=0`. Not yet run in game.
+
+## Draws without an engine owner, 2026-09-24
+
+Observation. With per-pipeline gates (DLL `2ac5ea9f`, pid 86940, workspace
+`artifacts/glass-log-pid86940.txt`), `particles_generic` (VS `1ddcba6f…`, PS
+`2ca72763…`, root record with a camera variant) was refused on every draw: club
+pipeline 1028, 5,123 draws, `span_owner:5906,noelement:5123`; street pipelines
+1028 and 1538, 3,969 and 2,067 draws
+(`glass-live-tools/scene-20260924b-club/coverage.txt:19`,
+`scene-20260924b-street/coverage.txt:31`, `:40`). The draws carry one or two
+instances, chunk 0, and spans with neither an identity nor a parent
+(`GATE_DETAIL reason=array pipeline=1028 chunk=0 instances=2 spans=2 …
+[first=0 count=1 id=0 parent=0] [first=1 count=1 id=0 parent=0]`, log lines
+1817–1822). Such a span makes the draw an array draw, so it took the camera
+variant, and the element loop then dropped every span for want of an owner.
+The same VS with PS `3d2ddd0c` (`particles_hologram`) was captured (club
+pipeline 872, 568 of 571 draws). The rain VS `5241cee6…` (camera-only record)
+had `captures=0` for the whole of pid 83472, a log without the per-pipeline
+gate split.
+
+Convention. A span without identity or parent names no engine proxy. The
+velocity collector gives object velocity only to a proxy (item 4 of "Proxy
+history convention"), and the transparent VS has no previous-position output
+(its catalog record adds one), so the engine MV at these pixels belongs to the
+surface behind them. No engine supply of particle or rain simulation motion has
+been found (the particle inputs listed as outstanding above). For a surface
+without object-motion supply the engine's convention is the camera-only
+velocity initialization, which is what the camera variant computes.
+
+Rule (`PackedMotionCapture.cpp` prepare, `PackedMotionMappings.h`
+`acquireDrawLocal`). Only when the draw's variant is the camera-only graft (a
+camera-only record, or the camera variant of a root graft), each ownerless span
+takes a draw-local identity: a boundary ID unique in the frame, counted down
+from 32767 and never entered in the object ID table, shared by the span's
+elements, and a nonzero mapping generation. There is no object key, arena block
+or history. The vertex-history variant, a vertex-history pipeline and a root
+graft without a camera variant keep the refusal. Counters: `GRAFT
+ownerless_camera`, the per-pipeline gate `ownerless_camera` (captured draws,
+not a refusal), dump variant `ownerless`.
+
+Limits. The delivered motion is the camera component only; the particles' and
+raindrops' own motion is not supplied and stays uncorrected. [INFERENCE] An
+emitter mesh that follows the camera would receive camera motion it does not
+have. Whether the `particles_generic` meshes are world-anchored is not
+established. Not yet run in game.

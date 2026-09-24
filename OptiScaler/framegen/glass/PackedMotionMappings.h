@@ -5,6 +5,9 @@ namespace GlassFg
 {
 // Boundary identity excludes chunk/pipeline/topology: pieces of one object must
 // not create false interior contours. The caller supplies proven source keys.
+// Object IDs count up from 1. Draw-local IDs (acquireLocal) count down from
+// 32767 and are never stored, so no object key can map to one; both stop where
+// the two ranges meet.
 template<unsigned Sets = 4096, unsigned Ways = 4> class MotionBoundaryIds
 {
     static_assert(std::has_single_bit(Sets) && Ways);
@@ -15,7 +18,7 @@ template<unsigned Sets = 4096, unsigned Ways = 4> class MotionBoundaryIds
         std::uint32_t arrayGeneration = 0, sourceIndex = 0, frame = 0, id = 0;
     };
     std::array<Entry, Sets * Ways> entries {};
-    std::uint32_t frame = 0, next = 1;
+    std::uint32_t frame = 0, next = 1, local = 32767;
     static bool same(const Entry& a, const VertexHistoryKey& b)
     {
         return a.object.proxy == b.object.proxy && a.object.mesh == b.object.mesh &&
@@ -24,7 +27,7 @@ template<unsigned Sets = 4096, unsigned Ways = 4> class MotionBoundaryIds
     }
   public:
     bool beginFrame(std::uint32_t value)
-    { if (!value || value <= frame) return false; frame = value; next = 1; return true; }
+    { if (!value || value <= frame) return false; frame = value; next = 1; local = 32767; return true; }
     std::uint32_t acquire(const VertexHistoryKey& key)
     {
         if (!frame || !key) return 0;
@@ -40,9 +43,14 @@ template<unsigned Sets = 4096, unsigned Ways = 4> class MotionBoundaryIds
             if (entry.frame == frame) { if (same(entry, key)) return entry.id; }
             else if (!available) available = &entry;
         }
-        if (!available || next > 32767) return 0;
+        if (!available || next > local) return 0;
         *available = {key.object, key.view, key.arrayGeneration, key.sourceIndex, frame, next++};
         return available->id;
+    }
+    std::uint32_t acquireLocal()
+    {
+        if (!frame || next > local) return 0;
+        return local--;
     }
 };
 
@@ -88,6 +96,19 @@ class PackedMotionMappings
         const auto boundary = boundaries.acquire(key);
         return boundary ? PackedMotionAllocation {{0, 0, 0, key.object.generation}, boundary}
                         : PackedMotionAllocation {};
+    }
+    // Draw-local mapping for an element without an engine owner (no span
+    // identity and no parent). Only the camera-only graft variant may use it:
+    // that variant reads no GlassHistory, writes no GlassNext and reads no
+    // MotionMatrix, so the element needs no object key. It takes a boundary ID
+    // unique in the frame and a nonzero generation, which the mapped vertex
+    // stage tests for liveness only. The object ID table and the history arena
+    // are not touched, and nothing outlives the frame.
+    PackedMotionAllocation acquireDrawLocal(std::uint32_t frame)
+    {
+        if (!frame || frame != current) return {};
+        const auto boundary = boundaries.acquireLocal();
+        return boundary ? PackedMotionAllocation {{0, 0, 0, 1}, boundary} : PackedMotionAllocation {};
     }
     std::uint32_t frame() const { return current; }
     unsigned reservedVertices() const { return histories.reservedVertices(); }

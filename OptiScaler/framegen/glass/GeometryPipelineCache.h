@@ -72,9 +72,13 @@ struct GeometryPipelineEntry
     // Admission gates of the packed capture (PackedMotionCapture.cpp prepare)
     // that refused a draw of this entry. span_* and history count refused
     // elements, like prepare_span and prepare_history of GEOMETRY_GATE; the
-    // others count draws. partial is no refusal: a captured draw whose
-    // admission stopped between two element batches because the next frame
-    // began. The report prints the non-zero ones as `gates=name:count,...`
+    // others count draws. partial and ownerless_camera are no refusals: partial
+    // is a captured draw whose admission stopped between two element batches
+    // because the next frame began; ownerless_camera is a captured draw that
+    // admitted elements without an engine owner (no span identity, no parent)
+    // through a draw-local identity on the camera-only variant, a camera-only
+    // correction of a surface whose own motion the engine does not supply.
+    // The report prints the non-zero ones as `gates=name:count,...`
     // (GeometryHost.cpp).
     enum CoverageGate : unsigned
     {
@@ -97,12 +101,13 @@ struct GeometryPipelineEntry
         GateHistory,
         GateNoElement,
         GatePartial,
+        GateOwnerlessCamera,
         CoverageGateCount
     };
     static constexpr const char* coverageGateNames[CoverageGateCount] {
         "notpacked",  "root",         "mapping",       "raster",     "shape",      "viewport", "frameslot", "ordering",
         "span_owner", "span_resolve", "span_mismatch", "span_field", "span_array", "history",  "noelement",
-        "partial" };
+        "partial",    "ownerless_camera" };
     // Per-pipeline coverage for the GEOMETRY_PIPELINES report. The packed
     // capture adds to these with relaxed atomics, and only while the gate trace
     // is armed (GateArmed). gate=on and gate=reset zero them. No render path

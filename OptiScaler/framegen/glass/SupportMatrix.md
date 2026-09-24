@@ -14,8 +14,8 @@ The route is decided per pipeline from the SHA-256 of its original VS, and per d
 | Route | Previous clip | When |
 | --- | --- | --- |
 | Root graft | engine MotionMatrix (b7 rows 24..26), filled by the engine for declared materials | VS has a validated root graft, single-instance draw, supply class admitted by `GraftClassMask` |
-| Camera variant of a root graft | native previous view-projection × the VS's current world position | the same pipeline drawn as an array, grouped span or multi-instance draw |
-| Camera-only record | same camera-only form | VS without a native twin, a twin refused by the factory rule, or a twin whose root graft did not validate; never a vehicle VS |
+| Camera variant of a root graft | native previous view-projection × the VS's current world position | the same pipeline drawn as an array, grouped span or multi-instance draw, or with a span without an engine owner (no identity, no parent: `particles_generic`), which takes a draw-local identity (`GRAFT ownerless_camera`, [README.md](README.md#2-capture-the-graft-catalog)) |
+| Camera-only record | same camera-only form | VS without a native twin, a twin refused by the factory rule, or a twin whose root graft did not validate; never a vehicle VS. Spans without an engine owner take a draw-local identity as above |
 | Refused vehicle VS | none: engine MV and depth kept | vehicle VS (`VEHICLE_DMG_POS` input, `MatMod_VehicleGridCorners`/`MatMod_VehicleMeshPivotInGridSpace` modifiers, or vehicle vertex factories only) without a root graft: the vehicle moves with its own transform, whose engine supply (MotionMatrix) this VS does not receive (`GRAFT refused`, `refused.bin`; `EngineMotionSupply.md` "Vehicle object motion") |
 | Not covered | engine MV and depth kept | no record (`GRAFT missing`), class not admitted (`class_disabled`), or packed rewrite rejected (`rejected`) |
 
@@ -131,7 +131,7 @@ Remaining misses: in the session-7 reclassification (`9364be81`), 8 of 16 VS had
 ## Runtime limits that apply to every family
 
 - Motion beyond ±128 px per frame is not recorded (11-bit, 1/8 px). The pixel keeps the engine value. A fast 360° pan at 128 px/frame fell back for most substituted pixels (`research/ACTIVE.md:87`).
-- Camera-only records carry camera motion only: independently moving array elements, camera-facing rotation of billboards and particles, and icon anchor motion are not included. This is the engine's own convention for those draws (`research/ACTIVE.md:77`, `108`).
+- Camera-only records carry camera motion only: independently moving array elements, camera-facing rotation of billboards and particles, and icon anchor motion are not included. This is the engine's own convention for those draws (`research/ACTIVE.md:77`, `108`). Draws without an engine owner (`particles_generic`, rain) get the same camera component; their own particle or raindrop motion has no engine supply and stays uncorrected (`EngineMotionSupply.md` "Draws without an engine owner").
 - Coverage-only PS variants record opacity 0. Their interior keeps the engine value unless the threshold is 0; only the boundary takes the object's motion.
 - An opaque surface nearer than the record keeps the engine value (occlusion test).
 - `SkipFartherThanMeters` (default 0) and `ComposeRows` (default 240, must cover the render height) can exclude pixels by configuration.

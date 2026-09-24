@@ -221,6 +221,12 @@ enum GeometryGraftCounter : unsigned
     // object velocity (stalemotion=camera, GlassControls.h): the engine's own
     // convention for such a proxy. Not included in GraftArrayDraws or GraftDraws.
     GraftStaleCameraDraws,
+    // Draws of a graft pipeline drawn with the camera-only variant that
+    // admitted elements without an engine owner (no span identity, no parent)
+    // through a draw-local identity (PackedMotionCapture.cpp prepare). The
+    // engine supplies no motion of their own (particles, rain), so this is the
+    // camera component only. Not included in GraftArrayDraws or GraftDraws.
+    GraftOwnerlessCameraDraws,
     GraftDraws,
     NativePreviousEvaluations,
     // Native declaration hook (NativeMotionDeclarations.cpp), the engine side

@@ -7,7 +7,13 @@
 #include <barrier>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <map>
+#include <set>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -188,6 +194,102 @@ GeometryBatchSpan single(std::uint64_t proxy, std::uint32_t slot)
     return span;
 }
 
+// Reads upload memory by GPU virtual address: a compute copy through a root
+// SRV into a readback buffer. These are the words the grafted shaders read
+// from the capture's mapping and material constant buffers.
+class UploadReader
+{
+    static constexpr UINT MaxWords = 256;
+    ComPtr<ID3D12RootSignature> root;
+    ComPtr<ID3D12PipelineState> copy;
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Resource> target, readback;
+    ComPtr<ID3D12Fence> fence;
+    std::uint64_t submitted = 0;
+
+  public:
+    explicit UploadReader(ID3D12Device* device)
+    {
+        D3D12_ROOT_PARAMETER parameters[3] {};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[2].Constants = { 0, 0, 1 };
+        for (auto& parameter : parameters)
+            parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        const D3D12_ROOT_SIGNATURE_DESC desc { 3, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+        ComPtr<ID3DBlob> serialized, errors, code;
+        hr(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors), "reader root blob");
+        hr(device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                       IID_PPV_ARGS(&root)),
+           "reader root signature");
+        static constexpr char shader[] = R"(
+ByteAddressBuffer Source : register(t0);
+RWByteAddressBuffer Target : register(u0);
+cbuffer Constants : register(b0) { uint Words; };
+[numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < Words)
+        Target.Store(id.x * 4, Source.Load(id.x * 4));
+})";
+        hr(D3DCompile(shader, sizeof(shader) - 1, "reader.hlsl", nullptr, nullptr, "main", "cs_5_0", 0, 0, &code,
+                      &errors),
+           "reader shader");
+        D3D12_COMPUTE_PIPELINE_STATE_DESC state {};
+        state.pRootSignature = root.Get();
+        state.CS = { code->GetBufferPointer(), code->GetBufferSize() };
+        hr(device->CreateComputePipelineState(&state, IID_PPV_ARGS(&copy)), "reader pipeline");
+        D3D12_COMMAND_QUEUE_DESC queueDesc {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        hr(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue)), "reader queue");
+        hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)),
+           "reader allocator");
+        hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                     IID_PPV_ARGS(&list)),
+           "reader list");
+        hr(list->Close(), "reader list close");
+        target = buffer(device, MaxWords * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        readback = buffer(device, MaxWords * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+                          D3D12_RESOURCE_STATE_COPY_DEST);
+        hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "reader fence");
+    }
+    std::vector<std::uint32_t> read(D3D12_GPU_VIRTUAL_ADDRESS address, UINT words)
+    {
+        require(address && words && words <= MaxWords, "Upload read range");
+        hr(allocator->Reset(), "reader allocator reset");
+        hr(list->Reset(allocator.Get(), copy.Get()), "reader list reset");
+        list->SetComputeRootSignature(root.Get());
+        list->SetComputeRootShaderResourceView(0, address);
+        list->SetComputeRootUnorderedAccessView(1, target->GetGPUVirtualAddress());
+        list->SetComputeRoot32BitConstant(2, words, 0);
+        list->Dispatch((words + 63) / 64, 1, 1);
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = { target.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE };
+        list->ResourceBarrier(1, &barrier);
+        list->CopyBufferRegion(readback.Get(), 0, target.Get(), 0, UINT64(words) * 4);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+        hr(list->Close(), "reader list close");
+        ID3D12CommandList* lists[] { list.Get() };
+        queue->ExecuteCommandLists(1, lists);
+        hr(queue->Signal(fence.Get(), ++submitted), "reader signal");
+        hr(fence->SetEventOnCompletion(submitted, nullptr), "reader wait");
+        void* bytes = nullptr;
+        const D3D12_RANGE range { 0, SIZE_T(words) * 4 };
+        hr(readback->Map(0, &range, &bytes), "reader map");
+        std::vector<std::uint32_t> result(words);
+        std::memcpy(result.data(), bytes, result.size() * 4);
+        const D3D12_RANGE unchanged {};
+        readback->Unmap(0, &unchanged);
+        return result;
+    }
+};
+
 void packedCaptureContract()
 {
     ComPtr<ID3D12Device> device;
@@ -222,9 +324,13 @@ void packedCaptureContract()
             value->packedArray = pso;
         return value;
     };
-    // Root graft pipeline drawn by both threads, a graft pipeline whose draws
-    // carry an ownerless span, and a vertex-history pipeline for the large draw.
+    // Root graft pipeline drawn by both threads, a graft pipeline whose array
+    // variant is the vertex history (VertexHistoryFallback), so the ownerless
+    // spans its draws carry stay refused, and a vertex-history pipeline for the
+    // large draw.
     const auto captured = entry(0x11, true), refused = entry(0x22, true), history = entry(0x33, false);
+    refused->packedArray = nullptr;
+    refused->packedHistory = pso;
 
     require(InitializePackedMotionCapture(device.Get(), FixtureWidth, FixtureHeight, nullptr,
                                           { nullptr, fixtureResolve, fixtureFlush }),
@@ -319,7 +425,8 @@ void packedCaptureContract()
     // pipeline carries no gate at all.
     const auto& capturedCoverage = captured->coverage;
     const auto& refusedCoverage = refused->coverage;
-    require(refusedCaptured == 0 && refusedRefused == refusedDraws, "Ownerless span admitted");
+    require(refusedCaptured == 0 && refusedRefused == refusedDraws,
+            "Ownerless span admitted on the vertex-history variant");
     require(capturedCoverage.draws.load() == capturedDraws && capturedCoverage.captures.load() == capturedDraws &&
                 capturedCoverage.graft.load() == capturedDraws,
             "Captured pipeline coverage");
@@ -427,12 +534,183 @@ void packedCaptureContract()
                 stale->coverage.array.load() == cameraDraws,
             "Stale-rule pipeline coverage split");
 
+    // Spans without an engine owner (no identity, no parent), the shape of the
+    // particles_generic draws in the 2026-09-24 gate logs. On the camera-only
+    // variant each such span takes one draw-local identity: its mapping
+    // records are live for the grafted VS and carry a frame-unique object ID
+    // for the packed PS, with no history block, and the draw gets the material
+    // constants (opacity threshold) of any other draw. A draw whose variant
+    // would read history keeps the span_owner refusal; a root graft without a
+    // camera variant keeps the array refusal.
+    for (auto* command : commands)
+        owner.discarded(command);
+    const auto ownerlessFrame = large + 1;
+    ComPtr<ID3D12PipelineState> historyPso;
+    hr(device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&historyPso)), "fixture history pipeline");
+    const auto rootCamera = entry(0x55, true), cameraRecord = entry(0x66, true), rootHistory = entry(0x77, true),
+               rootOnly = entry(0x88, true), historyOnly = entry(0x99, false);
+    rootCamera->packedArray = cameraPso;
+    cameraRecord->packed = cameraRecord->packedArray = cameraPso;
+    rootHistory->packedArray = nullptr;
+    rootHistory->packedHistory = historyPso;
+    rootOnly->packedArray = nullptr;
+    const auto select = packedMotionDumpSelect.load();
+    const auto write = packedMotionDumpWrite.load();
+    require(select && write && !select(ownerlessFrame), "Dump id table was not armed");
+    const auto ownerlessBefore = ReadGeometryGraft(GraftOwnerlessCameraDraws);
+    const auto arrayBefore = ReadGeometryGraft(GraftArrayDraws);
+    const auto prepareDraw = [&](std::span<const GeometryBatchSpan> spans, std::uint32_t instances,
+                                 const std::shared_ptr<const GeometryPipelineEntry>& pipeline,
+                                 GeometryPreparedDraw& prepared)
+    {
+        static const GraphicsRootBindings bindings;
+        const GeometryDrawView draw { spans, 0x7000, ownerlessFrame, 0, 48, 0, instances };
+        const GeometryIndexedArguments args { 36, instances, 0, 0, 0 };
+        prepared = {};
+        if (!owner.prepare(commands[0], draw, args, pipeline, bindings, prepared))
+            return false;
+        owner.finish(commands[0], true);
+        return true;
+    };
+    GeometryBatchSpan none;
+    none.count = 1;
+    GeometryBatchSpan pair[] { none, none }, three = none, mixed[] { single(0xc0000, 51), none };
+    pair[1].first = mixed[1].first = 1;
+    three.count = 3;
+    const GeometryBatchSpan objectA[] { single(0xb0000, 50) }, objectB[] { single(0xc0000, 51) };
+    GeometryPreparedDraw a, b, c, d, e, refusedDraw;
+    require(prepareDraw(objectA, 1, rootCamera, a) && a.pipeline == pso.Get(), "Owned draw left the root graft");
+    require(prepareDraw(pair, 2, rootCamera, b) && b.pipeline == cameraPso.Get(),
+            "Ownerless draw of a root graft was not captured with the camera variant");
+    require(prepareDraw(std::span(&three, 1), 3, cameraRecord, c) && c.pipeline == cameraPso.Get(),
+            "Ownerless draw of a camera-only record was not captured");
+    require(prepareDraw(mixed, 2, rootCamera, d) && d.pipeline == cameraPso.Get(),
+            "Draw with an owned and an ownerless span was not captured with the camera variant");
+    require(prepareDraw(objectB, 1, rootCamera, e) && e.pipeline == pso.Get(), "Owned draw left the root graft");
+    require(!prepareDraw(std::span(&none, 1), 1, rootHistory, refusedDraw),
+            "Ownerless span admitted on the vertex-history array variant");
+    require(!prepareDraw(std::span(&none, 1), 1, historyOnly, refusedDraw),
+            "Ownerless span admitted on a vertex-history pipeline");
+    require(!prepareDraw(std::span(&none, 1), 1, rootOnly, refusedDraw),
+            "Ownerless span admitted on a root graft without a camera variant");
+
+    UploadReader reader(device.Get());
+    const auto records = [&](const GeometryPreparedDraw& prepared)
+    {
+        const auto words =
+            reader.read(prepared.mapping + UINT64(prepared.history.mappingBase) * sizeof(GeometryInstance),
+                        prepared.history.instances * UINT(sizeof(GeometryInstance) / 4));
+        std::vector<GeometryInstance> result(prepared.history.instances);
+        std::memcpy(result.data(), words.data(), words.size() * 4);
+        return result;
+    };
+    const auto ra = records(a), rb = records(b), rc = records(c), rd = records(d), re = records(e);
+    // Live for the grafted VS (nonzero generation), no history block, an
+    // object ID inside the packed record's 15-bit field.
+    const auto live = [](const GeometryInstance& record)
+    {
+        return record.generation && !record.historyBase && !record.vertices && record.reserved[0] &&
+               record.reserved[0] <= 32767;
+    };
+    for (const auto* draw : { &rb, &rc, &rd })
+        for (const auto& record : *draw)
+            require(live(record), "Captured element mapping is not a live history-free record");
+    const auto id = [](const GeometryInstance& record) { return record.reserved[0]; };
+    require(id(rb[0]) != id(rb[1]) && id(rc[0]) == id(rc[1]) && id(rc[1]) == id(rc[2]),
+            "Draw-local identity is not one per ownerless span");
+    require(id(rd[0]) == id(re[0]) && id(ra[0]) != id(re[0]), "Object boundary IDs changed next to ownerless draws");
+    const std::uint32_t local[] { id(rb[0]), id(rb[1]), id(rc[0]), id(rd[1]) };
+    for (std::size_t i = 0; i < std::size(local); ++i)
+    {
+        require(local[i] != id(ra[0]) && local[i] != id(re[0]), "Draw-local ID equals an object ID");
+        for (std::size_t j = i + 1; j < std::size(local); ++j)
+            require(local[i] != local[j], "Two ownerless spans share an ID");
+    }
+    const auto constants = [&](const GeometryPreparedDraw& prepared)
+    {
+        MaterialCaptureConstants value {};
+        const auto words = reader.read(prepared.material, UINT(sizeof(value) / 4));
+        std::memcpy(&value, words.data(), sizeof(value));
+        return value;
+    };
+    const auto ownedConstants = constants(a), ownerlessConstants = constants(b);
+    require(std::memcmp(&ownedConstants, &ownerlessConstants, sizeof(ownedConstants)) == 0 &&
+                ownerlessConstants.opacityThreshold == ReadControls().opacityThreshold(),
+            "Ownerless draw material constants differ from an owned draw's");
+
+    require(ReadGeometryGraft(GraftOwnerlessCameraDraws) - ownerlessBefore == 3 &&
+                ReadGeometryGraft(GraftArrayDraws) == arrayBefore,
+            "GRAFT ownerless_camera count");
+    const auto gatesAre = [](const GeometryPipelineEntry& pipeline,
+                             std::initializer_list<std::pair<unsigned, std::uint64_t>> expected)
+    {
+        for (unsigned g = 0; g < GeometryPipelineEntry::CoverageGateCount; ++g)
+        {
+            std::uint64_t count = 0;
+            for (const auto& [gate, value] : expected)
+                if (gate == g)
+                    count = value;
+            if (pipeline.coverage.gates[g].load() != count)
+                return false;
+        }
+        return true;
+    };
+    require(rootCamera->coverage.captures.load() == 4 && rootCamera->coverage.graft.load() == 2 &&
+                rootCamera->coverage.array.load() == 2 &&
+                gatesAre(*rootCamera, { { GeometryPipelineEntry::GateOwnerlessCamera, 2 } }),
+            "Root graft pipeline ownerless coverage");
+    require(cameraRecord->coverage.captures.load() == 1 && cameraRecord->coverage.array.load() == 1 &&
+                gatesAre(*cameraRecord, { { GeometryPipelineEntry::GateOwnerlessCamera, 1 } }),
+            "Camera-only record ownerless coverage");
+    for (const auto* pipeline : { rootHistory.get(), historyOnly.get() })
+        require(pipeline->coverage.draws.load() == 1 && pipeline->coverage.captures.load() == 0 &&
+                    gatesAre(*pipeline, { { GeometryPipelineEntry::GateSpanOwner, 1 },
+                                          { GeometryPipelineEntry::GateNoElement, 1 } }),
+                "Vertex-history ownerless refusal split");
+    require(rootOnly->coverage.draws.load() == 1 && rootOnly->coverage.captures.load() == 0 &&
+                rootOnly->coverage.arrayRejected.load() == 1 && gatesAre(*rootOnly, {}),
+            "Root graft without a camera variant ownerless refusal");
+
+    // Dump id table rows, which the coverage report reads: an ownerless
+    // element is `ownerless`, the owned element of the same draw keeps the
+    // draw's variant.
+    require(select(ownerlessFrame), "Dump id table of the ownerless frame was not frozen");
+    const auto idsPath = std::filesystem::temp_directory_path() /
+                         (L"glass-ownerless-ids-" + std::to_wstring(GetCurrentProcessId()) + L".txt");
+    PackedMotionDumpIdSummary summary {};
+    require(write(idsPath.c_str(), 1, ownerlessFrame, &summary) && summary.complete, "Dump id table was not written");
+    std::map<std::uint32_t, std::set<std::string>> variants;
+    {
+        std::ifstream file(idsPath);
+        std::string line;
+        while (std::getline(file, line))
+        {
+            if (line.empty() || line[0] == '#' || line.rfind("PIPELINES", 0) == 0)
+                continue;
+            std::istringstream fields(line);
+            std::uint32_t row = 0;
+            std::uint64_t pipeline = 0;
+            std::string vertex, pixel, kind, variant;
+            fields >> row >> pipeline >> vertex >> pixel >> kind >> variant;
+            variants[row].insert(variant);
+        }
+    }
+    std::filesystem::remove(idsPath);
+    for (const auto value : local)
+        require(variants[value] == std::set<std::string> { "ownerless" }, "Ownerless element dump variant");
+    require(variants[id(ra[0])] == std::set<std::string> { "root" } &&
+                variants[id(re[0])] == std::set<std::string> { "array", "root" },
+            "Owned element dump variant");
+
     GateArm(false);
     require(ReleasePackedMotionCapture(), "Capture release");
     std::printf("PACKED_CAPTURE_LOCK_OK threads=%u draws=%llu refused_pipeline=%llu lock_waits=%llu "
                 "large_elements=100\n",
                 Threads, static_cast<unsigned long long>(capturedDraws), static_cast<unsigned long long>(refusedDraws),
                 static_cast<unsigned long long>(gate.stage[GatePrepareLockWait].load()));
+    std::printf("PACKED_OWNERLESS_OK captured=3 refused=3 local_ids=%u,%u,%u,%u object_ids=%u,%u threshold=%.2f\n",
+                local[0], local[1], local[2], local[3], id(ra[0]), id(re[0]),
+                double(ownerlessConstants.opacityThreshold));
 }
 } // namespace
 

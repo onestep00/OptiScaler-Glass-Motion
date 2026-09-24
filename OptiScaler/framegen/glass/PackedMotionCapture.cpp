@@ -150,18 +150,31 @@ class Capture final : public GeometryDrawCaptureOwner
 {
     struct Recording { ID3D12GraphicsCommandList* command = nullptr; std::uint64_t epoch = 0; };
     // Dump id table row (PackedMotionCapture.h): a boundary ID and the constant
-    // index of the draw that admitted the element.
+    // index of the draw that admitted the element. Boundary IDs have 15 bits;
+    // DumpIdOwnerless marks an element admitted through a draw-local identity.
     struct DumpId { std::uint16_t id, constant; };
-    // Draw variant of a dump id table row, by constant index. Stale: a
+    static constexpr std::uint16_t DumpIdOwnerless = 0x8000;
+    // Variant of a dump id table row. The draw's variant is kept by constant
+    // index; a row marked DumpIdOwnerless is `ownerless` instead, so the owned
+    // elements of the same draw keep the draw's variant. Stale: a
     // single-instance root draw that took the camera-only variant under the
-    // stale MotionMatrix rule (stalemotion=camera).
-    enum DumpVariant : std::uint8_t { DumpVariantHistory, DumpVariantRoot, DumpVariantArray, DumpVariantStale };
+    // stale MotionMatrix rule (stalemotion=camera). Ownerless: an element
+    // without an engine owner on the camera-only variant (prepare).
+    enum DumpVariant : std::uint8_t
+    {
+        DumpVariantHistory,
+        DumpVariantRoot,
+        DumpVariantArray,
+        DumpVariantStale,
+        DumpVariantOwnerless
+    };
     static const char* dumpVariantName(std::uint8_t variant) noexcept
     {
-        return variant == DumpVariantRoot    ? "root"
-               : variant == DumpVariantArray ? "array"
-               : variant == DumpVariantStale ? "stale"
-                                             : "history";
+        return variant == DumpVariantRoot        ? "root"
+               : variant == DumpVariantArray     ? "array"
+               : variant == DumpVariantStale     ? "stale"
+               : variant == DumpVariantOwnerless ? "ownerless"
+                                                 : "history";
     }
     struct Frame
     {
@@ -748,13 +761,18 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
     }
 
   private:
+    static constexpr std::uint32_t OwnedElement = UINT32_MAX;
     // One element of a draw. prepare resolves it outside the capture mutex and
     // admits it under the mutex.
     struct Element
     {
+        // Empty for an element without an engine owner.
         VertexHistoryKey key;
         // Mapping slot in the draw's range: span.first + ordinal.
         std::uint32_t index;
+        // Span index of an element without an engine owner, which takes the
+        // span's draw-local identity; OwnedElement for an element with a key.
+        std::uint32_t ownerlessSpan = OwnedElement;
         // Set under the mutex; empty unless the element was admitted.
         PackedMotionAllocation allocation;
     };
@@ -1171,9 +1189,11 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         // Graft variants (root or camera) read no GlassHistory and write no
         // GlassNext: their VS tests only the mapping generation and exports the
         // map index. Their elements take identity-only mappings (mapping slot
-        // and boundary ID, no arena block), so the arena capacity and a full
-        // arena bound only the vertex-history path. Fixed for the whole draw:
-        // the element loop can only move a root graft to the camera graft.
+        // and boundary ID, no arena block), or draw-local ones for elements
+        // without an engine owner on the camera variant, so the arena capacity
+        // and a full arena bound only the vertex-history path. Fixed for the
+        // whole draw: the element loop can only move a root graft to the camera
+        // graft.
         const bool historyFree = graftDraw || graftArrayDraw;
         const auto* raster = ReadGeometryRasterState(command);
         const auto shape = ReadCyberpunkMeshShape(draw);
@@ -1217,6 +1237,17 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         // Resolution cursor: the next element is `ordinal` of span `spanIndex`.
         unsigned spanIndex = 0;
         std::uint32_t ordinal = 0;
+        // A span without an engine owner, with neither identity nor parent,
+        // made this an array draw at the graft gate above, so the draw's
+        // variant is final before the element loop. Its elements are admitted
+        // only when that variant is the camera-only graft (a camera-only record
+        // or the camera variant of a root graft): it reads no GlassHistory and
+        // no MotionMatrix, which is the engine's convention for a surface
+        // without object-motion supply, and it needs no object key. Each such
+        // span takes one draw-local identity under the mutex. The
+        // vertex-history variant, and a draw with neither variant, keep the
+        // span_owner refusal.
+        const bool ownerlessCamera = graftArrayDraw;
         const auto resolveBatch = [&]() noexcept -> unsigned
         {
             unsigned count = 0;
@@ -1224,7 +1255,8 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             {
                 const auto& span = draw.objects[spanIndex];
                 const auto& owner = span.parent ? span.parent : span.identity;
-                if (!ordinal && (!owner || !span.count || std::uint64_t(span.first) + span.count > args.instances))
+                if (!ordinal && ((!owner && !ownerlessCamera) || !span.count ||
+                                 std::uint64_t(span.first) + span.count > args.instances))
                 {
                     refused[SpanOwner] += span.count ? 1u : 0u;
                     ++spanIndex;
@@ -1238,6 +1270,13 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     ++spanIndex;
                 }
                 auto& item = *::new (storage + count * sizeof(Element)) Element;
+                if (!owner)
+                {
+                    item.index = span.first + elementOrdinal;
+                    item.ownerlessSpan = current;
+                    ++count;
+                    continue;
+                }
                 auto& key = item.key;
                 if (!identitySource.resolve(identitySource.context, identityScratch, command, draw, shape, *pipeline,
                                             current, elementOrdinal, key) ||
@@ -1291,6 +1330,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         unsigned refusal = GateStageCount;
         std::uint64_t historyMisses = 0, epoch = 0;
         bool traceWaits = false;
+        // Draw-local identity of the ownerless span the last batch ended in: a
+        // span split over two batches keeps one ID. ownerlessDraw: an element
+        // without an engine owner was admitted (GRAFT and coverage counters).
+        std::uint32_t localSpan = OwnedElement;
+        PackedMotionAllocation localAllocation;
+        bool ownerlessDraw = false;
         // Draw-wide inputs of the locked phase, read once the draw has an
         // element to admit.
         MaterialCaptureConstants constants {};
@@ -1387,8 +1432,21 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     auto& item = element(i);
                     // A graft element fails only when the frame-local boundary
                     // table has no ID left for it; the arena is never asked.
-                    item.allocation = historyFree ? objectMappings.acquireIdentity(item.key, frameNumber)
-                                                  : objectMappings.acquire(item.key, vertices, frameNumber);
+                    // The elements of one ownerless span share its draw-local
+                    // identity, and a failed one stays failed for the span.
+                    if (item.ownerlessSpan != OwnedElement)
+                    {
+                        if (item.ownerlessSpan != localSpan)
+                        {
+                            localSpan = item.ownerlessSpan;
+                            localAllocation = objectMappings.acquireDrawLocal(frameNumber);
+                        }
+                        item.allocation = localAllocation;
+                        ownerlessDraw = ownerlessDraw || bool(localAllocation);
+                    }
+                    else
+                        item.allocation = historyFree ? objectMappings.acquireIdentity(item.key, frameNumber)
+                                                      : objectMappings.acquire(item.key, vertices, frameNumber);
                     if (!item.allocation)
                     {
                         ++counters.historyOverflow;
@@ -1430,7 +1488,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     }
                 }
                 // Dump id table: one row per admitted element, keyed by the
-                // draw's constant index.
+                // draw's constant index; an ownerless element's row is marked.
                 if (reserved && frameSlot->idsRecording)
                 {
                     frameSlot->idVariants[constantIndex] = graftDraw        ? DumpVariantRoot
@@ -1441,8 +1499,10 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     {
                         const auto& item = element(i);
                         if (item.allocation && frameSlot->idCount < frameSlot->ids.size())
-                            frameSlot->ids[frameSlot->idCount++] = { std::uint16_t(item.allocation.boundaryId),
-                                                                     std::uint16_t(constantIndex) };
+                            frameSlot->ids[frameSlot->idCount++] = {
+                                std::uint16_t(item.allocation.boundaryId |
+                                              (item.ownerlessSpan != OwnedElement ? DumpIdOwnerless : 0u)),
+                                std::uint16_t(constantIndex) };
                     }
                 }
                 // Upload writes last. The mapping and constant buffers are
@@ -1506,8 +1566,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                     else if (gate && log && claimLine(gateAdmitLines, GateAdmitLimit))
                     {
                         std::fprintf(log,
-                                     "GATE_DETAIL reason=admit pipeline=%llu chunk=%u mesh=%u verts=%u "
+                                     "GATE_DETAIL reason=%s pipeline=%llu chunk=%u mesh=%u verts=%u "
                                      "vp=%.0f,%.0f,%.0f,%.0f frame=%u\n",
+                                     item.ownerlessSpan != OwnedElement ? "ownerless" : "admit",
                                      static_cast<unsigned long long>(pipeline->identity), draw.chunk,
                                      std::uint32_t(item.key.object.mesh), vertices, viewport.TopLeftX,
                                      viewport.TopLeftY, viewport.Width, viewport.Height, frameNumber);
@@ -1550,19 +1611,28 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         // report does not take off the eligible draws, never to `ordering`.
         if (refusal != GateStageCount && gate)
             pipeline->coverage.gates[GeometryPipelineEntry::GatePartial].fetch_add(1, std::memory_order_relaxed);
+        // An ownerless draw is a camera-only correction of a surface whose own
+        // motion the engine does not supply; GRAFT ownerless_camera counts it
+        // instead of array_draws.
         if (historyFree)
-            NoteGeometryGraft(graftDraw ? GraftDraws : staleCamera ? GraftStaleCameraDraws : GraftArrayDraws);
+            NoteGeometryGraft(graftDraw       ? GraftDraws
+                              : staleCamera   ? GraftStaleCameraDraws
+                              : ownerlessDraw ? GraftOwnerlessCameraDraws
+                                              : GraftArrayDraws);
         if (gate)
         {
             auto& coverage = pipeline->coverage;
             coverage.captures.fetch_add(1, std::memory_order_relaxed);
-            // A stale-rule draw used the camera-only variant, so it counts as
-            // `array` here; GRAFT stale_camera and the dump variant `stale`
-            // tell it apart.
+            // A stale-rule or ownerless draw used the camera-only variant, so
+            // it counts as `array` here; GRAFT stale_camera and
+            // ownerless_camera, the gate ownerless_camera and the dump variants
+            // `stale` and `ownerless` tell them apart.
             if (graftDraw)
                 coverage.graft.fetch_add(1, std::memory_order_relaxed);
             else if (graftArrayDraw)
                 coverage.array.fetch_add(1, std::memory_order_relaxed);
+            if (ownerlessDraw)
+                coverage.gates[GeometryPipelineEntry::GateOwnerlessCamera].fetch_add(1, std::memory_order_relaxed);
         }
         // Crash attribution for the replay path. Sparse on purpose: one line per
         // few hundred frames keeps the log bounded while still proving that the
@@ -2034,19 +2104,25 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         {
             std::uint32_t id;
             const DumpIdPipeline* pipeline;
+            std::uint8_t variant;
         };
         std::vector<Row> rows;
         rows.reserve(count);
         for (std::uint32_t i = 0; i < count; ++i)
             if (ids[i].constant < pipelines.size())
-                rows.push_back({ ids[i].id, &pipelines[ids[i].constant] });
+            {
+                const auto& pipeline = pipelines[ids[i].constant];
+                const bool ownerless = (ids[i].id & DumpIdOwnerless) != 0;
+                rows.push_back({ std::uint32_t(ids[i].id & ~DumpIdOwnerless), &pipeline,
+                                 ownerless ? std::uint8_t(DumpVariantOwnerless) : pipeline.variant });
+            }
         const auto before = [](const Row& a, const Row& b)
         {
             if (a.id != b.id)
                 return a.id < b.id;
             if (a.pipeline->identity != b.pipeline->identity)
                 return a.pipeline->identity < b.pipeline->identity;
-            return a.pipeline->variant < b.pipeline->variant;
+            return a.variant < b.variant;
         };
         std::sort(rows.begin(), rows.end(), before);
         rows.erase(std::unique(rows.begin(), rows.end(),
@@ -2066,7 +2142,7 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                          static_cast<unsigned long long>(row.pipeline->identity),
                          static_cast<unsigned long long>(row.pipeline->vertexHash),
                          static_cast<unsigned long long>(row.pipeline->pixelHash),
-                         GeometryGraftKindName(row.pipeline->kind), dumpVariantName(row.pipeline->variant));
+                         GeometryGraftKindName(row.pipeline->kind), dumpVariantName(row.variant));
         const bool written = !std::ferror(file);
         if (std::fclose(file) != 0 || !written)
             return false;
