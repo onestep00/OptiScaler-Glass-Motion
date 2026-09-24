@@ -36,10 +36,12 @@ constexpr char RefusalMagic[8] = { 'G', 'G', 'R', 'E', 'F', 'S', '0', '1' };
 constexpr std::size_t RefusalRecordBytes = 36;
 // light-ps.bin: "GGLTPS01", u32 count, u32 reserved (0), then count sorted,
 // unique u8 sha256[32] of pixel shader containers (IsLightPixelShader).
+// background-ps.bin: the same layout with "GGBGPS01" (IsBackgroundPixelShader).
 constexpr char LightMagic[8] = { 'G', 'G', 'L', 'T', 'P', 'S', '0', '1' };
+constexpr char BackgroundMagic[8] = { 'G', 'G', 'B', 'G', 'P', 'S', '0', '1' };
 // The census lists 3,005 distinct pixel shaders in a cache of 19,037 shader
 // records; the bound keeps a corrupt count from sizing an allocation.
-constexpr std::uint32_t MaxLightShaders = 32768;
+constexpr std::uint32_t MaxListedShaders = 32768;
 
 struct Graft
 {
@@ -65,11 +67,11 @@ struct Catalog
     std::vector<Graft> grafts;     // Sorted by sha; immutable after indexOnce.
     std::vector<Refusal> refusals; // Sorted by sha; immutable after indexOnce.
     // Sorted, unique; immutable after indexOnce.
-    std::vector<std::array<std::uint8_t, 32>> lightShaders;
+    std::vector<std::array<std::uint8_t, 32>> lightShaders, backgroundShaders;
     BCRYPT_ALG_HANDLE sha256 = nullptr;
     std::filesystem::path directory;
     std::atomic<std::size_t> count { 0 }, refusalCount { 0 };
-    std::atomic<LightPixelShaderList> lightList { LightPixelShaderList::Pending };
+    std::atomic<PixelShaderList> lightList { PixelShaderList::Pending }, backgroundList { PixelShaderList::Pending };
 };
 Catalog catalog;
 
@@ -119,16 +121,17 @@ void loadRefusals() noexcept
     }
 }
 
-// The digests of light-ps.bin; false for any format defect.
-bool readLightShaders(std::ifstream& file, std::vector<std::array<std::uint8_t, 32>>& shaders)
+// The digests of light-ps.bin or background-ps.bin (magic); false for any
+// format defect.
+bool readShaderList(std::ifstream& file, const char (&magic)[8], std::vector<std::array<std::uint8_t, 32>>& shaders)
 {
     char header[IndexHeaderBytes] {};
-    if (!file.read(header, sizeof(header)) || std::memcmp(header, LightMagic, sizeof(LightMagic)) != 0)
+    if (!file.read(header, sizeof(header)) || std::memcmp(header, magic, sizeof(magic)) != 0)
         return false;
     std::uint32_t count = 0, reserved = 0;
     std::memcpy(&count, header + 8, 4);
     std::memcpy(&reserved, header + 12, 4);
-    if (count > MaxLightShaders || reserved)
+    if (count > MaxListedShaders || reserved)
         return false;
     shaders.resize(count);
     for (auto& sha : shaders)
@@ -141,28 +144,41 @@ bool readLightShaders(std::ifstream& file, std::vector<std::array<std::uint8_t, 
                               [](const auto& a, const auto& b) { return !(a < b); }) == shaders.end();
 }
 
-// A missing or malformed list leaves every PS without the brightness term; the
-// state tells the module log which (GEOMETRY_LIGHT_PS).
-void loadLightShaders() noexcept
+// A missing or malformed list stays empty: no PS gets the brightness term
+// (light-ps.bin) or the coverage-only variant (background-ps.bin). The state
+// tells the module log which (GEOMETRY_LIGHT_PS, GEOMETRY_BACKGROUND_PS).
+void loadShaderList(const wchar_t* name, const char (&magic)[8], std::vector<std::array<std::uint8_t, 32>>& shaders,
+                    std::atomic<PixelShaderList>& list) noexcept
 {
-    auto state = LightPixelShaderList::Missing;
+    auto state = PixelShaderList::Missing;
     try
     {
-        std::ifstream file(catalog.directory / L"light-ps.bin", std::ios::binary);
+        std::ifstream file(catalog.directory / name, std::ios::binary);
         if (file)
         {
-            std::vector<std::array<std::uint8_t, 32>> shaders;
-            state = readLightShaders(file, shaders) ? LightPixelShaderList::Loaded : LightPixelShaderList::Malformed;
-            if (state == LightPixelShaderList::Loaded)
-                catalog.lightShaders = std::move(shaders);
+            std::vector<std::array<std::uint8_t, 32>> listed;
+            state = readShaderList(file, magic, listed) ? PixelShaderList::Loaded : PixelShaderList::Malformed;
+            if (state == PixelShaderList::Loaded)
+                shaders = std::move(listed);
         }
     }
     catch (...)
     {
-        catalog.lightShaders.clear();
-        state = LightPixelShaderList::Malformed;
+        shaders.clear();
+        state = PixelShaderList::Malformed;
     }
-    catalog.lightList.store(state, std::memory_order_release);
+    list.store(state, std::memory_order_release);
+}
+
+// The list is written before the release store of its state and never changes
+// afterwards.
+PixelShaderList readShaderListState(const std::atomic<PixelShaderList>& list,
+                                    const std::vector<std::array<std::uint8_t, 32>>& shaders,
+                                    std::size_t& count) noexcept
+{
+    const auto state = list.load(std::memory_order_acquire);
+    count = state == PixelShaderList::Loaded ? shaders.size() : 0;
+    return state;
 }
 
 void loadIndex() noexcept
@@ -176,7 +192,8 @@ void loadIndex() noexcept
         }
         catalog.directory = Util::DllPath().parent_path() / L"Glass" / L"grafts";
         loadRefusals();
-        loadLightShaders();
+        loadShaderList(L"light-ps.bin", LightMagic, catalog.lightShaders, catalog.lightList);
+        loadShaderList(L"background-ps.bin", BackgroundMagic, catalog.backgroundShaders, catalog.backgroundList);
         std::ifstream file(catalog.directory / L"index.bin", std::ios::binary);
         if (!file)
             return;
@@ -365,12 +382,19 @@ bool IsLightPixelShader(const std::array<std::uint8_t, 32>& sha256) noexcept
     return std::binary_search(catalog.lightShaders.begin(), catalog.lightShaders.end(), sha256);
 }
 
-LightPixelShaderList ReadLightPixelShaderList(std::size_t& count) noexcept
+bool IsBackgroundPixelShader(const std::array<std::uint8_t, 32>& sha256) noexcept
 {
-    // The list is written before the release store of its state and never
-    // changes afterwards.
-    const auto state = catalog.lightList.load(std::memory_order_acquire);
-    count = state == LightPixelShaderList::Loaded ? catalog.lightShaders.size() : 0;
-    return state;
+    std::call_once(catalog.indexOnce, loadIndex);
+    return std::binary_search(catalog.backgroundShaders.begin(), catalog.backgroundShaders.end(), sha256);
+}
+
+PixelShaderList ReadLightPixelShaderList(std::size_t& count) noexcept
+{
+    return readShaderListState(catalog.lightList, catalog.lightShaders, count);
+}
+
+PixelShaderList ReadBackgroundPixelShaderList(std::size_t& count) noexcept
+{
+    return readShaderListState(catalog.backgroundList, catalog.backgroundShaders, count);
 }
 } // namespace GlassFg

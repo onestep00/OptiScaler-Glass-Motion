@@ -79,6 +79,32 @@ vision in the 2026-09 census): the module knows a pipeline's PS, not its pass.
 light-ps.bin is "GGLTPS01", u32 count, u32 reserved (0), then count sorted,
 unique 32-byte SHA-256 digests of the PS DXBC containers.
 
+Background pixel shaders: <out>/grafts/background-ps.bin lists every pixel
+shader whose displayed pixel is background content rather than the surface it
+is drawn on (same census):
+  - every PS of a renderstage_distortion technique: it writes the screen-space
+    offset by which the engine later resamples the scene behind the surface;
+  - every PS of a renderstage_screenspace_vfx technique of a cloak* or
+    optical_camouflage* material: it samples the scene colour at SV_Position
+    plus a normal-map offset (8477c369);
+  - every PS of a global_water_patch or water_plane technique, any pass: the
+    transparent PS shows the bottom through a depth read at a refracted
+    offset and an environment map sampled by the reflected vector (231949c6).
+The surface's motion is wrong inside such a draw, so the module compiles its
+packed variants coverage-only (GeometryPipeline.cpp createTarget
+backgroundTarget): record opacity 0 and no brightness term, light-pass PS
+included; only the boundary band takes the object's motion. The distortion
+draws are blended and reach the packed capture (21 distortion PS in the
+2026-09-24 per-pipeline reports), so the blend-equation rejection does not keep
+them out and they are listed by pass. The 2026-09 census gives 152 PS: 129
+distortion, 12 cloak screen-space VFX and 15 water PS (4 of them distortion).
+One water PS (67645e0a, planar reflection and water depth) also draws the
+hologram_depth pass of two cloak materials; the module knows a pipeline's PS,
+not its material. light-ps.bin is unchanged: 16 listed PS (the 12 cloak
+screen-space VFX PS and the 4 water transparent PS) are also light-pass PS, and
+the coverage-only variant drops their brightness term.
+background-ps.bin has the layout of light-ps.bin with the magic "GGBGPS01".
+
 The output contains extracted game shader code. Write it to an ignored local
 directory;
 never commit or publish it. GlassFg.props copies <repo>/artifacts/glass-grafts/
@@ -108,6 +134,13 @@ CLASS_NAMES = {1: 'root-only', 2: 'skinning', 4: 'preskinned', 6: 'skinning+pres
 LIGHT_PASSES = frozenset('renderstage_' + name for name in (
     'transparent', 'transparent_notxaa', 'transparent_back_face', 'transparent_depth_write',
     'transparent_background', 'transparent_notxaa_background', 'unlit', 'screenspace_vfx'))
+# Techniques whose pixel shaders show background content (docstring), by rule.
+BACKGROUND_RULES = {
+    'distortion': lambda technique: technique['pass'] == 'renderstage_distortion',
+    'cloak screenspace_vfx': lambda technique: (technique['pass'] == 'renderstage_screenspace_vfx'
+                                                and technique['material'].startswith(('cloak', 'optical_camouflage'))),
+    'water': lambda technique: technique['material'] in ('global_water_patch', 'water_plane'),
+}
 
 
 def supply_class(entry):
@@ -153,6 +186,21 @@ def light_pixel_shaders(census):
     return light, mixed
 
 
+def background_pixel_shaders(census):
+    """Sorted digests of the PS of every technique a BACKGROUND_RULES rule selects,
+    and the number of PS each rule selects (a PS may match several)."""
+    selected = {rule: set() for rule in BACKGROUND_RULES}
+    for technique in census['techniques']:
+        for rule, matches in BACKGROUND_RULES.items():
+            if matches(technique):
+                selected[rule].update(bytes.fromhex(program['sha256'])
+                                      for program in technique['programs'] if program['kind'] == 'ps')
+    background = set().union(*selected.values())
+    if any(len(digest) != 32 for digest in background):
+        raise ValueError('census pixel shader sha256 is not 32 bytes')
+    return sorted(background), {rule: len(digests) for rule, digests in selected.items()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--workspace', type=Path, required=True)
@@ -172,6 +220,7 @@ def main():
              json.loads((workspace / 'native-previous-supply-union.json').read_text(encoding='utf-8'))['shaders']}
     census = json.loads((workspace / 'all-cache-techniques.json').read_text(encoding='utf-8'))
     light, mixed = light_pixel_shaders(census)
+    background, background_rules = background_pixel_shaders(census)
 
     def root_outputs(shader):
         """(current, previous, supply class, dxil path) of an exportable root graft, else None."""
@@ -263,6 +312,8 @@ def main():
     (out / 'refused.bin').write_bytes(refused_blob)
     light_blob = struct.pack('<8sII', b'GGLTPS01', len(light), 0) + b''.join(light)
     (out / 'light-ps.bin').write_bytes(light_blob)
+    background_blob = struct.pack('<8sII', b'GGBGPS01', len(background), 0) + b''.join(background)
+    (out / 'background-ps.bin').write_bytes(background_blob)
 
     histogram = Counter(record[3] for record in records)
     print(f'grafts={len(records)} index_bytes={len(blob)} out={out}')
@@ -284,6 +335,10 @@ def main():
         print(f'refused evidence {" + ".join(evidence)}: {count}')
     print(f'light_ps={len(light)} (left out, also in another pass: {mixed}) census={census["cache_sha256"][:16]} '
           f'light_sha256={hashlib.sha256(light_blob).hexdigest()}')
+    print(f'background_ps={len(background)} ('
+          + ', '.join(f'{rule}: {count}' for rule, count in background_rules.items())
+          + f'; also light: {len(set(background) & set(light))}) '
+          f'background_sha256={hashlib.sha256(background_blob).hexdigest()}')
 
 
 if __name__ == '__main__':

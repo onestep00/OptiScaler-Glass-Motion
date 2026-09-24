@@ -241,19 +241,27 @@ void ReportGeometryHost(FILE* log) noexcept
                 commands.indirectUnknown);
         if (!creation.cache.lastError.empty())
             fprintf(log, "GEOMETRY_COMPILER last_error=%s\n", creation.cache.lastError.c_str());
-        // Light pixel-shader list of the graft catalog, once, after the
-        // compiler worker's first lookup loaded it. missing or malformed: no
-        // packed variant counts the displayed brightness of what a draw adds.
+        // Pixel-shader lists of the graft catalog, once each, after the
+        // compiler worker's first lookup loaded them. light-ps.bin missing or
+        // malformed: no packed variant counts the displayed brightness of what
+        // a draw adds; background-ps.bin: no PS is forced to coverage-only.
         {
-            static std::atomic<bool> lightReported { false };
-            std::size_t lightCount = 0;
-            const auto light = ReadLightPixelShaderList(lightCount);
-            if (light != LightPixelShaderList::Pending && !lightReported.exchange(true, std::memory_order_relaxed))
-                fprintf(log, "GEOMETRY_LIGHT_PS state=%s count=%zu file=Glass/grafts/light-ps.bin\n",
-                        light == LightPixelShaderList::Loaded    ? "loaded"
-                        : light == LightPixelShaderList::Missing ? "missing"
-                                                                 : "malformed",
-                        lightCount);
+            static std::atomic<bool> lightReported { false }, backgroundReported { false };
+            const auto name = [](PixelShaderList state) {
+                return state == PixelShaderList::Loaded    ? "loaded"
+                       : state == PixelShaderList::Missing ? "missing"
+                                                           : "malformed";
+            };
+            std::size_t count = 0;
+            const auto light = ReadLightPixelShaderList(count);
+            if (light != PixelShaderList::Pending && !lightReported.exchange(true, std::memory_order_relaxed))
+                fprintf(log, "GEOMETRY_LIGHT_PS state=%s count=%zu file=Glass/grafts/light-ps.bin\n", name(light),
+                        count);
+            const auto background = ReadBackgroundPixelShaderList(count);
+            if (background != PixelShaderList::Pending &&
+                !backgroundReported.exchange(true, std::memory_order_relaxed))
+                fprintf(log, "GEOMETRY_BACKGROUND_PS state=%s count=%zu file=Glass/grafts/background-ps.bin\n",
+                        name(background), count);
         }
         const auto packed = ReadPackedMotionCaptureStatus();
         PublishGeometryMotionDegraded(packed.historyArenaPages != 0 &&
@@ -432,6 +440,9 @@ void ReportGeometryHost(FILE* log) noexcept
             // light=1: the PS is a light-pass PS, so the record opacity of the
             // entry's packed variants counts the displayed brightness of the
             // colour the draw adds (GeometryPipelineEntry::lightTarget).
+            // background=1: the PS shows background content, so every packed
+            // variant records coverage only (GeometryPipelineEntry::
+            // backgroundTarget), light=1 or not.
             {
                 static std::atomic<std::uint64_t> reportedDraws { UINT64_MAX };
                 std::vector<GeometryPipelineCoverage> pipelines;
@@ -471,14 +482,16 @@ void ReportGeometryHost(FILE* log) noexcept
                     }
                     fprintf(log,
                             "GEOMETRY_PIPELINE id=%llu vs=%016llx ps=%016llx kind=%s history=%u draws=%llu "
-                            "captures=%llu graft=%llu array=%llu array_rejected=%llu gates=%s light=%u\n",
+                            "captures=%llu graft=%llu array=%llu array_rejected=%llu gates=%s light=%u "
+                            "background=%u\n",
                             static_cast<unsigned long long>(item.identity),
                             static_cast<unsigned long long>(item.vertexHash),
                             static_cast<unsigned long long>(item.pixelHash), GeometryGraftKindName(item.kind),
                             item.history ? 1u : 0u, static_cast<unsigned long long>(item.draws),
                             static_cast<unsigned long long>(item.captures),
                             static_cast<unsigned long long>(item.graft), static_cast<unsigned long long>(item.array),
-                            static_cast<unsigned long long>(item.arrayRejected), gates, item.light ? 1u : 0u);
+                            static_cast<unsigned long long>(item.arrayRejected), gates, item.light ? 1u : 0u,
+                            item.background ? 1u : 0u);
                 }
             }
         }

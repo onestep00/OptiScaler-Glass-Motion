@@ -180,11 +180,12 @@ inline void PublishGeometryMotionDegraded(bool value)
 // Compile outcomes are counted once per pipeline job on the cache worker:
 // ready + camera only + missing + refused + rejected + class disabled =
 // pipelines that asked for a packed variant, plus the explicit vertex-only jobs
-// refused for a refused VS; array ready + array missing = ready. Draw outcomes
-// are counted by the packed capture's prepare, and
-// NativePreviousEvaluations by the FG host for a substituted evaluation whose
-// frame drew at least one graft variant while the vertex-history fallback was
-// off. Diagnostics only; no render path reads them.
+// refused for a refused VS; array ready + array missing = ready; background
+// counts the jobs among them that ended with a packed variant for a PS that
+// background-ps.bin lists. Draw outcomes are counted by the packed capture's
+// prepare, and NativePreviousEvaluations by the FG host for a substituted
+// evaluation whose frame drew at least one graft variant while the
+// vertex-history fallback was off. Diagnostics only; no render path reads them.
 enum GeometryGraftCounter : unsigned
 {
     GraftReady,
@@ -200,6 +201,12 @@ enum GeometryGraftCounter : unsigned
     // current-position twin) and whose camera variant compiled: it is both
     // `packed` and `packedArray`. A failed compile counts GraftRejected.
     GraftCameraOnly,
+    // Pipelines whose PS shows background content (background-ps.bin,
+    // NativeGraftCatalog.h IsBackgroundPixelShader) and that have a packed
+    // variant: every packed variant of such a pipeline records coverage only
+    // (opacity 0), so the interior keeps the engine's motion and only the
+    // boundary takes the object's.
+    GraftBackground,
     // Graft pipelines that also compiled the camera-only array variant
     // (packedArray), and those whose graft has no camera variant or whose
     // camera variant failed to compile.

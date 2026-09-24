@@ -335,7 +335,7 @@ HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const Geometr
                                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                              ComPtr<ID3D12PipelineState>& output, std::string& error,
                                              const VertexConstantPair* capture, bool* pairMissing,
-                                             const NativeGraft* graft, bool lightTarget)
+                                             const NativeGraft* graft, bool lightTarget, bool backgroundTarget)
 {
     if (pairMissing)
         *pairMissing = false;
@@ -349,13 +349,13 @@ HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const Geometr
             return reject(error, "Native graft excludes the capture constant pair");
         return createTarget(device, root, original, output, error,
                             MaterialMotionTarget::OriginalColorAndPackedMotion, false, nullptr, nullptr, nullptr,
-                            nullptr, graft, lightTarget);
+                            nullptr, graft, lightTarget, backgroundTarget);
     }
     if (capture)
     {
         const auto status = createTarget(device, root, original, output, error,
                                          MaterialMotionTarget::OriginalColorAndPackedMotion, false, capture, nullptr,
-                                         nullptr, nullptr, nullptr, lightTarget);
+                                         nullptr, nullptr, nullptr, lightTarget, backgroundTarget);
         if (SUCCEEDED(status))
             return status;
         // R6: the audited constant block is not present in every transparent
@@ -372,7 +372,7 @@ HRESULT GeometryCompiler::createPackedMotion(ID3D12Device* device, const Geometr
     }
     return createTarget(device, root, original, output, error,
                         MaterialMotionTarget::OriginalColorAndPackedMotion, false, nullptr, nullptr, nullptr, nullptr,
-                        nullptr, lightTarget);
+                        nullptr, lightTarget, backgroundTarget);
 }
 HRESULT GeometryCompiler::createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                               const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
@@ -406,7 +406,8 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
                                        ComPtr<ID3D12PipelineState>& output, std::string& error,
                                        MaterialMotionTarget target, bool vertexOnly, const VertexConstantPair* capture,
                                        const VertexClipPair* clipPair, const NativeClipInputs* nativeInputs,
-                                       const VertexInputPair* inputPair, const NativeGraft* graft, bool lightTarget)
+                                       const VertexInputPair* inputPair, const NativeGraft* graft, bool lightTarget,
+                                       bool backgroundTarget)
 {
     error.clear();
     if (FAILED(implementation->status))
@@ -470,9 +471,14 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     // For destination-dependent equations, retain exact shader coverage/object
     // motion but use zero interior weight; the compositor may still apply full
     // object motion to the visible boundary without dragging the background.
+    // A PS that shows background content (backgroundTarget) takes the same
+    // coverage-only capture whatever its equation, an unblended target under
+    // the opaque probe included: the surface's motion is wrong inside such a
+    // draw.
     const auto& primaryBlend = original.BlendState.RenderTarget[0];
-    const bool packedCoverageOnly = packedMotion && !knownMaterialBlend && primaryBlend.BlendEnable &&
-                                    !primaryBlend.LogicOpEnable && primaryBlend.RenderTargetWriteMask;
+    const bool packedCoverageOnly =
+        packedMotion && (backgroundTarget || (!knownMaterialBlend && primaryBlend.BlendEnable &&
+                                              !primaryBlend.LogicOpEnable && primaryBlend.RenderTargetWriteMask));
     if (material && !knownMaterialBlend && !packedCoverageOnly && !probeOpaque)
         return reject(error, "Unsupported material blend equation");
     // Vertex capture replaces the original draw once. Its unmodified PS and
@@ -501,13 +507,14 @@ HRESULT GeometryCompiler::createTarget(ID3D12Device* device, const GeometryRoot&
     const auto& blend = original.BlendState.RenderTarget[0];
     // An unblended target under the probe is a fully opaque surface: the source
     // colour is written directly, so the record carries transmission 0 and both
-    // the colour contribution and the coverage class are definite. The blend
-    // factors of an unblended description are ignored by the device, so they
-    // must not be read here.
-    const auto source = probeOpaque ? MaterialSource::One : packedCoverageOnly ? MaterialSource::Zero : depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
+    // the colour contribution and the coverage class are definite, unless its PS
+    // shows background content (coverage-only above). The blend factors of an
+    // unblended description are ignored by the device, so they must not be read
+    // here.
+    const auto source = packedCoverageOnly ? MaterialSource::Zero : probeOpaque ? MaterialSource::One : depthCoverage ? MaterialSource::One : nativeOpaque ? MaterialSource::Zero : blend.SrcBlend == D3D12_BLEND_ZERO  ? MaterialSource::Zero
                         : blend.SrcBlend == D3D12_BLEND_ONE ? MaterialSource::One
                                                             : MaterialSource::Alpha;
-    const auto destination = probeOpaque ? MaterialDestination::Zero : packedCoverageOnly ? MaterialDestination::CoverageOnly : (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
+    const auto destination = packedCoverageOnly ? MaterialDestination::CoverageOnly : probeOpaque ? MaterialDestination::Zero : (nativeOpaque || depthCoverage) ? MaterialDestination::Zero : blend.DestBlend == D3D12_BLEND_ZERO            ? MaterialDestination::Zero
                              : blend.DestBlend == D3D12_BLEND_ONE           ? MaterialDestination::One
                              : blend.DestBlend == D3D12_BLEND_SRC_ALPHA     ? MaterialDestination::Alpha
                              : blend.DestBlend == D3D12_BLEND_INV_SRC_ALPHA ? MaterialDestination::OneMinusAlpha

@@ -74,14 +74,27 @@ std::size_t NativeGraftRefusalCount() noexcept;
 // PS when light-ps.bin is absent or malformed. Same threading rule as
 // FindNativeGraft.
 bool IsLightPixelShader(const std::array<std::uint8_t, 32>& sha256) noexcept;
-// Load outcome of light-ps.bin for the module log: Pending until the first
-// catalog lookup loads the files. count is 0 unless Loaded.
-enum class LightPixelShaderList : std::uint32_t
+// Pixel shaders whose displayed pixel is background content rather than the
+// surface they are drawn on (<module>/Glass/grafts/background-ps.bin,
+// "GGBGPS01", written by tools/export_native_grafts.py from the shader-cache
+// census: every distortion-pass PS, the cloak screen-space VFX PS and every PS
+// of the water materials). The surface's motion is wrong inside such a draw,
+// so every packed variant of such a PS is coverage-only
+// (GeometryCompiler::createPackedMotion backgroundTarget): record opacity 0
+// and no brightness term, light-pass PS included; only the boundary takes the
+// object's motion. False for every PS when background-ps.bin is absent or
+// malformed. Same threading rule as FindNativeGraft.
+bool IsBackgroundPixelShader(const std::array<std::uint8_t, 32>& sha256) noexcept;
+// Load outcome of light-ps.bin or background-ps.bin for the module log:
+// Pending until the first catalog lookup loads the files. count is 0 unless
+// Loaded.
+enum class PixelShaderList : std::uint32_t
 {
     Pending,
     Loaded,
     Missing,
     Malformed,
 };
-LightPixelShaderList ReadLightPixelShaderList(std::size_t& count) noexcept;
+PixelShaderList ReadLightPixelShaderList(std::size_t& count) noexcept;
+PixelShaderList ReadBackgroundPixelShaderList(std::size_t& count) noexcept;
 } // namespace GlassFg

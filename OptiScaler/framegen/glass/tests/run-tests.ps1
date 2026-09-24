@@ -122,7 +122,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Native graft vehicle refusal contract failed' 
 # Light-pass pixel shaders (light-ps.bin): the parallaxscreen_transparent PS
 # draws in renderstage_transparent, so its packed record counts the displayed
 # brightness of what it adds; the vehicle_glass distortion PS writes refraction
-# offsets in renderstage_distortion and records its material opacity alone.
+# offsets in renderstage_distortion, so its analysed rewrite records its
+# material opacity alone. The pipeline cache compiles that PS coverage-only
+# instead, because background-ps.bin lists every distortion PS.
 & $graftExe (Join-Path $optiDirectory 'shaders\shader_tools\dxcompiler.dll') $graftModule `
     (Join-Path $graftWorkspace 'all-transparent-ps\f17cc532e9e9b0a89281dcd972c0680dc04fa8bfb17e043758d0b95d91ddac16.dxbc') light
 if ($LASTEXITCODE -ne 0) { throw 'Light-pass pixel shader contract failed' }

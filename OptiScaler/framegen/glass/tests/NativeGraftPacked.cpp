@@ -193,7 +193,7 @@ int wmain(int argc, wchar_t** argv)
             const auto pixel = readFile(argv[3]);
             const bool light = lightPixelShader(pixel);
             std::size_t lightCount = 0;
-            require(GlassFg::ReadLightPixelShaderList(lightCount) == GlassFg::LightPixelShaderList::Loaded &&
+            require(GlassFg::ReadLightPixelShaderList(lightCount) == GlassFg::PixelShaderList::Loaded &&
                         lightCount,
                     "light-ps.bin was not loaded");
             require(light == (mode == L"light"),

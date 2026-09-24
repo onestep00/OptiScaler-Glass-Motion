@@ -70,6 +70,12 @@ struct GeometryPipelineEntry
     // includes the displayed brightness of the colour the draw adds, except in
     // a coverage-only variant. Written with pixelHash; reported as light=.
     bool lightTarget = false;
+    // The original PS shows background content, not the surface it is drawn
+    // on (NativeGraftCatalog.h IsBackgroundPixelShader): every packed variant
+    // of the entry is coverage-only, record opacity 0 and no brightness term
+    // even when lightTarget is set. Written with pixelHash; reported as
+    // background=.
+    bool backgroundTarget = false;
     GeometryGraftKind graftKind = GeometryGraftKind::Pending;
     std::vector<std::byte> vertexBytes, pixelBytes;
     std::vector<std::string> semantics;
@@ -175,6 +181,8 @@ struct GeometryPipelineCoverage
     bool history = false;
     // GeometryPipelineEntry::lightTarget.
     bool light = false;
+    // GeometryPipelineEntry::backgroundTarget.
+    bool background = false;
 };
 
 // Process-wide publish of the diagnostic opaque probe counters. The control

@@ -85,11 +85,18 @@ class GeometryCompiler
     // then does the record opacity include the displayed brightness of the
     // colour the draw adds; otherwise it is the material opacity alone
     // (RewriteMaterialMotion lightTarget).
+    //
+    // backgroundTarget: the original PS shows background content rather than
+    // the surface it is drawn on (NativeGraftCatalog.h IsBackgroundPixelShader).
+    // The pixel stage is then the coverage-only rewrite whatever the blend
+    // equation: record opacity 0 and no brightness term, so the interior keeps
+    // the engine's motion and only the boundary takes the object's.
     HRESULT createPackedMotion(ID3D12Device* device, const GeometryRoot& root,
                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
                                const VertexConstantPair* capture = nullptr, bool* pairMissing = nullptr,
-                               const NativeGraft* graft = nullptr, bool lightTarget = false);
+                               const NativeGraft* graft = nullptr, bool lightTarget = false,
+                               bool backgroundTarget = false);
     HRESULT createCoverageAudit(ID3D12Device* device, const GeometryRoot& root,
                                 const D3D12_GRAPHICS_PIPELINE_STATE_DESC& original,
                                 Microsoft::WRL::ComPtr<ID3D12PipelineState>& output, std::string& error,
@@ -121,6 +128,7 @@ class GeometryCompiler
                          const VertexClipPair* clipPair = nullptr,
                          const NativeClipInputs* nativeInputs = nullptr,
                          const VertexInputPair* inputPair = nullptr,
-                         const NativeGraft* graft = nullptr, bool lightTarget = false);
+                         const NativeGraft* graft = nullptr, bool lightTarget = false,
+                         bool backgroundTarget = false);
 };
 } // namespace GlassFg
