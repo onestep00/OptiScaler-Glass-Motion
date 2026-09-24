@@ -3,7 +3,7 @@
 - Created: 2026-09-14
 - Updated: 2026-09-24
 - Status: shader-level coverage of the transparent VS inventory by the graft catalog, plus the in-game observations recorded in the workspace `research/ACTIVE.md`. A validated record means the grafted VS passed the offline checks; it is not in-game quality evidence unless a result is cited.
-- Applied: catalog `GGRAFT02` with 596 records, `index.bin` SHA-256 `c85137b6e45fb8250d31eaa53f6b77011ef8afd5f9abd665808adb0cf90dc9c3`, and `refused.bin` (`GGREFS01`, 45 vehicle VS) SHA-256 `adf808dff2ca9f347af57ab406d8c6ddf339f2a0115fda124291c5992a83c582`, for builds from branch `vehicle-graft` (the 641-record catalog `52e45006…` before it). Default `GraftClassMask` 1: class 2 records are off unless enabled (`research/ACTIVE.md:128`).
+- Applied: catalog `GGRAFT02` with 596 records, `index.bin` SHA-256 `c85137b6e45fb8250d31eaa53f6b77011ef8afd5f9abd665808adb0cf90dc9c3`, and `refused.bin` (`GGREFS01`, 45 vehicle VS) SHA-256 `adf808dff2ca9f347af57ab406d8c6ddf339f2a0115fda124291c5992a83c582`, for `glass-motion` builds from `764086c7` on (the 641-record catalog `52e45006…` before it). Default `GraftClassMask` 1: class 2 records are off unless enabled (`research/ACTIVE.md:128`).
 - Deprecated: no. This replaces the 2026-09-14…17 matrix (vertex history, grouped-array mapping and the plugin owner scan); that version is in git history.
 - Scope: transparent vertex shaders of the base shader cache: 250 with a native velocity-VS twin and 445 without. HUD excluded.
 
@@ -113,7 +113,7 @@ No technique of the opaque rows takes a transparency route, and none of their VS
 
 ## Observed in game
 
-All results are from 2026-09-23 and come from the workspace `research/ACTIVE.md`. The README table gives the raw-data paths.
+Results are from 2026-09-23 and 2026-09-24 and come from the workspace `research/ACTIVE.md`. The README table gives the raw-data paths.
 
 | Object | Route | Result | Source |
 | --- | --- | --- | --- |
@@ -125,6 +125,12 @@ All results are from 2026-09-23 and come from the workspace `research/ACTIVE.md`
 | NPC eyewear, hair and head attachments | root graft from a MeshStatic twin (before the factory rule); skinned class 2 root graft (mask 3) | 6–82 px wrong motion (`585b8df5`); 6 px (`9364be81`); ≈77 px vs engine ≈3.5 px with mask 3 (`0c5bb34e`); region gone with mask 1 (`580b24ad`, `class_disabled=348~367`) | ACTIVE.md:53, 114, 128 |
 | Glass in front of opaque characters | any, with the occlusion test | NPC pixels in front of glass keep the engine value; residual mean 0.8–4.4 → 0.3–1.1 px | ACTIVE.md:79 |
 | City Center street cars (`vehicle_destr_blendshape` unlit overlays, vehicle glass), 2026-09-24, `3c33ec9f`, mask 3 | camera-only records (`296676c3`, `bb99bbe6`, `7a31295c`); root `d441e9d5`, `f14708af` | camera-only: moving-car objects delivered 0 px where the engine had 17–23 px (residual mean 8.9, 9.7, 3.9 px); parked cars ≤0.13 px. Root vehicle glass: 0.25 px where the engine shows the car behind the glass. Camera-only vehicle records refused since | `EngineMotionSupply.md` "Vehicle object motion" |
+| Capture completeness, 2026-09-24, `2ac5ea9f` and later | all captured pipelines | after the capture-lock change: `prepare_lock=0`; captured/eligible 100.0% with 0 unexplained draws on every captured pipeline at the club and on the street (before: 13–20% of eligible draws dropped at random) | ACTIVE.md "병합본 게임 검증" |
+| City Center street after the vehicle refusal, 2026-09-24, `2ac5ea9f` | refused vehicle VS keep the engine MV; root vehicle glass | residual mean 0.03–0.12 px, >1 px ≤0.2% (before: frame mean up to 2.58 px, p95 20 px). Passing cars: the proxy history supplies the previous pose (`state=1`, 250–794 mm per frame), and the root graft follows it | ACTIVE.md "병합본 게임 검증", "송버드 "!" 결론과 차량 proxy" |
+| Rotating "TOURIST INFORMATION" hologram (`parallaxscreen_transparent`, root `de5e58b4`), 2026-09-24, `fb82d753` | root graft; engine history `state=1` | 0.9 px against the static background is the hologram's own rotation (about 1 mm and 0.004 rad per frame per proxy, confirmed by two screenshots); `stalemotion` leaves it unchanged | ACTIVE.md "stale MotionMatrix 규칙과 probe" |
+| Quest icon "!" and street quest markers, 2026-09-24 | none needed | absent from the `DLSSG.HUDLess` input the module reads (colour dump), so DLSS-G composites them as UI; generated frames keep the icon single during pan and strafe. [INFERENCE] the 2026-09-23 A-B difference around the icon came from the interpolated surfaces behind it | ACTIVE.md "송버드 "!" 결론과 차량 proxy" |
+| `particles_generic` on the City Center street, 2026-09-24, `d8569b1f` | ownerless camera-only (camera component only) | 1,701 draws, captured/eligible 100% (before: every draw refused as `span_owner` + `noelement`); street residual mean 0.03–0.04 px | ACTIVE.md "입자" |
+| User protocol P6, 2026-09-24, `fb82d753` | all | six segments on and off; generated-frame temporal std on glass over a moving background: still 0.39 on / 2.37 off, walk 2.06 / 3.12; non-glass control equal | ACTIVE.md "사용자 검증 절차 P6 전체 1회" |
 
 Remaining misses: in the session-7 reclassification (`9364be81`), 8 of 16 VS had class 2 grafts blocked by mask 1 and 8 were outside the transparent inventory (`research/ACTIVE.md:122`). In the integration build (mask 1), 14 VS stayed unsubstituted: 13 outside the transparent inventory (blended decal 11, debugdraw 1, unclassified 1) and one screen-space particle (`42531526`) without generic support; no further graft candidates (`research/ACTIVE.md:129`).
 
@@ -146,4 +152,4 @@ Remaining misses: in the session-7 reclassification (`9364be81`), 8 of 16 VS had
 | Per-element motion of arrays | all array draws | the engine keeps no per-element previous transform | `research/ACTIVE.md:77`; `EngineMotionSupply.md:547-554` |
 | Skinned (class 2) records | 247 records, off by default | [INFERENCE, ACTIVE.md:128] the transparent pass lacks the velocity pass's previous skinning supply (previous `INSTANCE_SKINNING_DATA` offset, previous t10 bones) | `research/ACTIVE.md:128` |
 | Vehicle VS without a root graft | 45 VS (`refused.bin`) | the vehicle's own motion (MotionMatrix) does not reach these VS; camera motion alone is wrong on a moving car. A root supply needs a MotionMatrix graft without a native twin plus declaration pairs. `glass` on MeshStatic car windows (e.g. `39f8b555`) has no vehicle data in its VS and stays camera-only | `EngineMotionSupply.md` "Vehicle object motion" |
-| Not yet observed in game | particles, smoke, holograms, liquids, destruction, procedural deformation; vehicles after the refusal | records exist for most; no in-game result | `research/requirements-and-evidence-20260923.md` §5 |
+| Not yet observed in game | smoke, liquids, destruction, procedural deformation, rain (no rain draws in the 2026-09-24 sessions) | records exist for most; no in-game result | `research/requirements-and-evidence-20260923.md` §5 |
