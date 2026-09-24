@@ -89,6 +89,16 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
             {
                 if (!device || !IsCyberpunkExecutable(GetModuleHandleW(nullptr)))
                     return;
+                // Settings before the creation hooks. The pipeline cache reads
+                // the graft class mask, the opaque probe and the compile switch
+                // when it compiles a pipeline and keeps that decision, and on the
+                // existing-device paths (NGX, DXGI discovery) the engine can
+                // create pipelines while this runs. The load also sets the hot
+                // hooks' idle latch from the file; the latch is held idle until
+                // every hook below is installed and restored after them.
+                (void)ReadControls();
+                const bool hooksIdle = HooksIdle();
+                SetHooksIdle(true);
                 const auto directory = Util::DllPath().parent_path();
                 const auto compiler = directory / L"Glass" / L"dxcompiler.dll";
                 const bool files = std::filesystem::is_regular_file(compiler) &&
@@ -133,10 +143,9 @@ void InitializeGeometryHost(ID3D12Device* device) noexcept
                 // device-creation path leaves only the per-session pipeline for
                 // the render thread.
                 WarmPackedShaderOnce();
-                // The hot hooks stay idle until the settings layer has run, so
-                // the load and the TSC calibration must not be left to the first
-                // render-thread call: both would stall a frame there.
-                (void)ReadControls();
+                // The TSC calibration must not be left to the first render-thread
+                // call: it would stall a frame there.
+                SetHooksIdle(hooksIdle);
                 WarmHookCostProbe();
                 GeometryTelemetry::refresh.store(refreshHealth, std::memory_order_release);
                 // The live channel and the periodic log must not depend on the
