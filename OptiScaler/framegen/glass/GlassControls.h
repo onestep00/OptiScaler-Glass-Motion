@@ -297,9 +297,11 @@ inline constexpr unsigned GraftClassRootOnly = 1u, GraftClassSkinning = 2u, Graf
 inline std::atomic<unsigned>& GraftClassMaskValue() noexcept
 {
     // Root-only by default. Class 2 (skinning) was tried as the default on
-    // 2026-09-23 (build 0c5bb34e): the transparent pass does not carry the
-    // velocity pass's previous skinning supply, so a skinned hair/glasses draw
-    // delivered ~77 px where the engine had ~3.5 px (p6-20260923b-on/still).
+    // 2026-09-23 (build 0c5bb34e): hair/glasses delivered ~77 px where the
+    // engine had ~3.5 px. Measured 2026-09-24 (009904f8): the MotionMatrix
+    // rows the declaration supplies to a skinned draw whose proxy has history
+    // are not a transform (hair: rows_other on every probed draw), while the
+    // previous bones are right; see research/ACTIVE.md "스키닝 A/B".
     static std::atomic<unsigned> value { GraftClassRootOnly };
     return value;
 }

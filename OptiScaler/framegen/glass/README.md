@@ -215,7 +215,7 @@ The integration build ran the in-DLL declaration hook, the factory rule, the are
 
 ## Known limits and open items
 
-- Skinned transparent draws (class 2), including NPC hair and glasses, keep the engine value by default. [INFERENCE, `research/ACTIVE.md:128`] The transparent pass does not keep the velocity pass's previous skinning supply (previous `INSTANCE_SKINNING_DATA` offset, previous t10 bones), so a skinned root graft reads a wrong previous position.
+- Skinned transparent draws (class 2), including NPC hair and glasses, keep the engine value by default. Measured on 2026-09-24 (`009904f8`, `GraftClassMask=3`): the MotionMatrix rows the declaration supplies to a skinned draw whose proxy has history are not a transform, so the root graft delivers 105–110 px on still NPC hair. The previous bones are correct; the skinned-current catalog (current world) delivers 0.08 px on still NPCs but lacks the root motion of walking NPCs (≈50 px on a close walker) (`research/ACTIVE.md` "스키닝 A/B").
 - The 6 px NPC-glasses error fixed by the factory rule has no dedicated in-game recheck (`research/ACTIVE.md:134`).
 - Record range: 11-bit motion at 1/8 px bounds a record to ±128 px. Faster motion keeps the engine value (`research/ACTIVE.md:87`); this bears on C11.
 - Coverage: 54 VS without a native twin have no camera-only graft (screen-space 11, two-stage projection 17, no `SV_Position` 6, multiple stores 7, other 13; `research/ACTIVE.md:107`). Preskinned twins (t9/b3) have no root graft. In the integration build, 14 VS stayed unsubstituted, 13 of them outside the transparent inventory (`research/ACTIVE.md:129`). See [SupportMatrix.md](SupportMatrix.md).
