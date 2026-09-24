@@ -55,28 +55,55 @@ uint2 packedAt(int2 pixel)
 
 uint objectId(uint2 packed) { return packed.x & 0x7fffu; }
 
+// Coverage class of a record: bit 63, the top bit of its 18-bit depth key.
+bool coveredRecord(uint2 packed) { return (packed.y & 0x80000000u) != 0u; }
+
 int signed11(uint value)
 {
     value &= 0x7ffu;
     return (value & 0x400u) ? int(value) - 2048 : int(value);
 }
 
-bool objectBoundary(int2 pixel, uint id)
+// Boundary bands, the bits boundaryBand returns. Silhouette: a neighbour
+// carries another object ID or no record (outside the image reads as no
+// record). NearCovered: the pixel's own record is not covered and a neighbour
+// of the same object is, so the pixel lies on the band around that object's
+// covered region.
+static const uint BandSilhouette = 1u;
+static const uint BandNearCovered = 2u;
+
+// The band one neighbour record marks: BandSilhouette for another object or no
+// record, BandNearCovered for a covered record of the same object.
+uint neighbourBand(uint2 neighbour, uint id)
 {
+    if (objectId(neighbour) != id)
+        return BandSilhouette;
+    return coveredRecord(neighbour) ? BandNearCovered : 0u;
+}
+
+// One walk over radius 1..EdgeWidth and the same 8 neighbours per radius, one
+// record load per neighbour. A covered pixel lies inside its covered region,
+// so only the silhouette band counts for it. The walk ends at the first radius
+// that finds a band that counts: either band takes the pixel, so the flags
+// found by then decide the outcome and the counters.
+uint boundaryBand(int2 pixel, uint id, bool covered)
+{
+    const uint bands = covered ? BandSilhouette : BandSilhouette | BandNearCovered;
     [loop]
     for (int radius = 1; radius <= int(EdgeWidth); ++radius)
     {
-        if (objectId(packedAt(pixel + int2(radius, 0))) != id ||
-            objectId(packedAt(pixel - int2(radius, 0))) != id ||
-            objectId(packedAt(pixel + int2(0, radius))) != id ||
-            objectId(packedAt(pixel - int2(0, radius))) != id ||
-            objectId(packedAt(pixel + int2(radius, radius))) != id ||
-            objectId(packedAt(pixel + int2(radius, -radius))) != id ||
-            objectId(packedAt(pixel + int2(-radius, radius))) != id ||
-            objectId(packedAt(pixel - int2(radius, radius))) != id)
-            return true;
+        const uint band = bands & (neighbourBand(packedAt(pixel + int2(radius, 0)), id) |
+                                   neighbourBand(packedAt(pixel - int2(radius, 0)), id) |
+                                   neighbourBand(packedAt(pixel + int2(0, radius)), id) |
+                                   neighbourBand(packedAt(pixel - int2(0, radius)), id) |
+                                   neighbourBand(packedAt(pixel + int2(radius, radius)), id) |
+                                   neighbourBand(packedAt(pixel + int2(radius, -radius)), id) |
+                                   neighbourBand(packedAt(pixel + int2(-radius, radius)), id) |
+                                   neighbourBand(packedAt(pixel - int2(radius, radius)), id));
+        if (band != 0u)
+            return band;
     }
-    return false;
+    return 0u;
 }
 
 [numthreads(8, 8, 1)]
@@ -166,8 +193,10 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     // nearest surface the border/opacity rule keeps wins, and a nearly
     // transparent layer no longer hides a visible one behind it.
     const uint depthKey18 = packed.y >> 14;
-    const bool covered = (depthKey18 & 0x20000u) != 0;
-    const bool edge = EdgeWidth != 0 && objectBoundary(pixel, id);
+    const bool covered = coveredRecord(packed);
+    const uint band = boundaryBand(pixel, id, covered);
+    const bool silhouette = (band & BandSilhouette) != 0u;
+    const bool nearCovered = (band & BandNearCovered) != 0u;
     // Delivery rule (2026-09-17): a pixel either takes the object's own motion
     // and depth exactly, or it keeps the engine's value byte for byte. The
     // previous form blended the object motion into the covered pixel by
@@ -181,16 +210,31 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     // and is left alone. Thin low-opacity features (particle sprites, thin
     // glass edges) are covered by this rule too, because they are part of the
     // scene and have to move with their own motion instead of the background.
-    const bool apply = covered || edge;
+    // Boundary rule (2026-09-25): the boundary band of the covered region takes
+    // the object's motion like the silhouette band, so a glyph rim and its core
+    // move together. Inside an emissive hologram the bright core is covered and
+    // its antialiased rim, dimmer than the threshold, is not. Kept on the
+    // engine's background motion, the rim separated from the core in generated
+    // frames under camera translation, where a hologram at 5 m and the far
+    // background differ by 10-20 px per frame: a doubled glyph. Rotation moves
+    // both alike and hid it. An uncovered pixel farther than EdgeWidth from
+    // both bands still keeps the engine's value.
+    const bool apply = covered || silhouette || nearCovered;
+    // Band pixel for the counters. A covered pixel can only be on the
+    // silhouette band, so the edge and interior counters keep their meaning:
+    // edge counts the pixels on either band, interior the covered pixels off
+    // them.
+    const bool edge = silhouette || nearCovered;
     if (count)
     {
         if (apply)
             Counters.InterlockedAdd(edge ? 8u : 12u, 1, ignored);
         // Opacity histogram of the packed pixels (<0.25, <0.5, <0.75, >=0.75)
         // and the outcome per packed pixel: not covered, boundary band applied
-        // below the interior threshold, boundary take, interior take. The sum
-        // of the four outcome buckets is the packed pixel count; the dump names
-        // them apply_buckets.
+        // below the interior threshold, boundary take, interior take. A pixel
+        // on the covered region's band is a boundary take below the threshold,
+        // like an uncovered silhouette pixel. The sum of the four outcome
+        // buckets is the packed pixel count; the dump names them apply_buckets.
         const uint opacityBucket = opacity < 0.25 ? 16u : opacity < 0.5 ? 20u : opacity < 0.75 ? 24u : 28u;
         Counters.InterlockedAdd(opacityBucket, 1, ignored);
         const uint outcomeBucket = !apply ? 32u : (edge ? (covered ? 40u : 36u) : 44u);

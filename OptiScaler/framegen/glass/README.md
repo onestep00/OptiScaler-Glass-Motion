@@ -1,7 +1,7 @@
 # Glass: engine-supplied motion for transparent surfaces in DLSS Frame Generation
 
 - Created: 2026-09-10
-- Updated: 2026-09-24
+- Updated: 2026-09-25
 - Status: product path. The previous-frame position of a transparent draw comes from the engine: its MotionMatrix supply through a root graft, or its previous camera through a camera-only graft. Module vertex history is an off-by-default diagnostic fallback. In-game results cover only the scenes in [Verification results](#verification-results). Full coverage (C12) and the 1 ms budget (C13) are not met.
 - Applied: `glass-motion` branch of this fork, deployed as `dxgi.dll` through MO2. Source defaults keep the correction off.
 - Deprecated: no
@@ -101,9 +101,9 @@ The coverage-only fallback variant, used when the equation cannot be read, analy
 `ApplyObjectMotion` runs on the module's own command list. That list is executed on the FG queue after the wait on the packed producer's fence (`PackedMotionGpu.h:1092-1150`, `NativeSession.h:533-544`). It first copies the engine MV and depth into owned textures (`PackedMotionGpu.h:1591-1602`). Per pixel:
 
 1. No record: engine value kept.
-2. Boundary: a neighbour within `BorderWidthPx` (1..4, all 8 directions) carries a different object ID. Boundary pixels are taken whatever their opacity (C3, C4b).
-3. Interior: taken only when the covered bit is set (C4).
-4. Opaque occlusion: when the engine depth is nearer than the record by more than 4 depth-key quanta, the visible surface is an opaque one drawn after the transparent pass. The pixel keeps the engine value (counter slot 15, dump field `occluded`). The depth direction comes from the frame's `DLSSG.DepthInverted` (commits `32e3ad691`, `c6b772b3e`; `GlassObjectMotion.hlsl:253-276`).
+2. Boundary: the pixel lies within `BorderWidthPx` (1..4, all 8 directions) of the object's silhouette, where a neighbour carries a different object ID or none, or, when its own record is not covered, of the object's covered region, where a neighbour of the same object ID has the covered bit. Boundary pixels are taken whatever their opacity (C3, C4b). The covered-region band exists since 2026-09-25. Inside an emissive hologram the bright core of a glyph is covered and its antialiased rim is not; under camera translation the rim kept the background's motion and split from the core in generated frames, a doubled glyph, while rotation moved both alike and hid it (workspace `research/objective.md` "범위와 변경 이유"). One walk over the neighbourhood tests both bands with one record load per neighbour, and the dump's `edge_pixels` counts both.
+3. Interior, off both bands: taken only when the covered bit is set (C4).
+4. Opaque occlusion: when the engine depth is nearer than the record by more than 4 depth-key quanta, the visible surface is an opaque one drawn after the transparent pass. The pixel keeps the engine value (counter slot 15, dump field `occluded`). The depth direction comes from the frame's `DLSSG.DepthInverted` (commits `32e3ad691`, `c6b772b3e`; `GlassObjectMotion.hlsl:297-320`).
 5. Otherwise the pixel receives the object's motion, converted to the engine's normalized MV units, and the record depth. MV z/w keep the engine values.
 
 A pixel either takes the object's motion and depth exactly or keeps the engine value byte for byte. There is no strength, blend, scale or clamp (C21). The delivery jitter convention is fixed at mode 0, gain 100; the INI cannot change it (`GlassSettings.cpp:102-107`). Other jitter modes, the engine-proximity gate (`enggate=`, `gatepx=`), `depthkeep=` and `stripes=` exist only as live-channel diagnostics (C7).
