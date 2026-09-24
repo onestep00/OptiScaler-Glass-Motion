@@ -112,7 +112,7 @@ A pixel either takes the object's motion and depth exactly or keeps the engine v
 
 `NativeHost` intercepts the native DLSS-G Evaluate. An evaluation counts as frame generation when its parameter table carries a `DLSSG.*` marker key, when its handle was already learned as FG, or when the caller is the DLSS-G provider or Streamline's FG plugin. Every other evaluation, including DLSS-SR and Ray Reconstruction, which share the `MotionVectors`/`Depth` names, passes through with no session, GPU work or parameter change (`NativeHost.cpp:1595-1663`, `GlassFgPass.h:41-54`).
 
-For an FG evaluation, `NativeSession::prepare` returns the owned MV/depth pair, and `ScopedInputs` swaps only the parameter-table pointers the provider reads (`DLSSG.MVecs`/`DLSSG.Depth`, or `MotionVectors`/`Depth` on the driver-level table) for the duration of the original call. The destructor restores them on return or unwind (`GlassFgPass.h:208-270`, `NativeHost.cpp:1818-1825`). The engine textures are never written (`controls … engine_writes=0` in the status response). `NrMotion` (default off) additionally hands the same pair to DLSS-NR as its guides (C9 option).
+For an FG evaluation, `NativeSession::prepare` returns the owned MV/depth pair, and `ScopedInputs` swaps only the parameter-table pointers the provider reads (`DLSSG.MVecs`/`DLSSG.Depth`, or `MotionVectors`/`Depth` on the driver-level table) for the duration of the original call. The destructor restores them on return or unwind (`GlassFgPass.h:208-270`, `NativeHost.cpp:1818-1825`). The engine textures are never written (`controls … engine_writes=0` in the status response). `NrMotion` (default on since 2026-09-24) additionally hands the same pair to DLSS-NR as its guides (C9 option); the status line `host_second served= refused=` and the log line `NATIVE_HOST_SECOND` count the NR evaluates that read it.
 
 The DLSS-NR pair is composed on the upscaler's own command list and read there, so that list holds session resources until the game resets or destroys it, and each execution of it until a per-queue fence signalled right behind its batch completes. A retiring session is released only after both (`InlineRecordings` in `NativeSession.h`); `tests/NativeSession.cpp` covers the unsubmitted, resubmittable, in-flight and destroyed cases.
 
@@ -150,7 +150,7 @@ Dumps:
 | `BorderWidthPx` | 2 | boundary band, 1..4 px (C3) |
 | `GraftClassMask` | 3 | admitted supply classes (bit 0 root, bit 1 skinned, bit 2 preskinned); default 3 since 2026-09-24, after the hair declaration fix (research/ACTIVE.md "hair 선언 쌍 게임 검증"); a first default of 3 was withdrawn on 2026-09-23 (`research/ACTIVE.md:128`) |
 | `VertexHistoryFallback` | false | diagnostic module vertex history; not C2 |
-| `NrMotion` | false | also supply DLSS-NR guides (C9 option) |
+| `NrMotion` | true | also supply DLSS-NR guides (C9 option); on by default since 2026-09-24 |
 | `OpaqueProbe` | false | diagnostic: admit opaque pipelines to compare with engine MV. It was left on in the deployed INI before the integration build; most `occluded` pixels of the earlier P6 run came from those opaque pipelines (`research/ACTIVE.md:127`) |
 | `SkipFartherThanMeters` | 0 | far cutoff in 25 m steps, 0 keeps every surface |
 | `MeasureGpuTime` | true | sparse GPU timestamps of the compose |

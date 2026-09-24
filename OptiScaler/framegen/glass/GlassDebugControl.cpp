@@ -192,6 +192,8 @@ void writeStatus(std::ofstream& file)
     file << "host_by_path dlssg=" << host.substitutionsByPath[0] << "/" << host.evaluationsByPath[0]
          << " alias=" << host.substitutionsByPath[1] << "/" << host.evaluationsByPath[1]
          << " prepared=" << host.preparedByPath[0] << "/" << host.preparedByPath[1] << "\n";
+    // Second consumer (DLSS-NR): evaluates served with the composed pair.
+    file << "host_second served=" << host.secondConsumerServed << " refused=" << host.secondConsumerRefused << "\n";
     // DLSS FG only: evaluations that are provably not the frame generator and
     // were passed through, plus the read-back of the parameter names the
     // substitution touched. Both have to show that nothing else was changed.

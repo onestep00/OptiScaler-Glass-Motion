@@ -66,7 +66,8 @@ bool load()
     // Second consumer: the composed motion/depth are handed to the DLSS-NR
     // evaluate as its own inputs. The engine's textures are not written, so the
     // option cannot reach DLSS-SR, Ray Reconstruction or the ray traced passes.
-    const auto nrMotion = ini.GetBoolValue("GlassFG", "NrMotion", false);
+    // On by default since 2026-09-24 (user decision).
+    const auto nrMotion = ini.GetBoolValue("GlassFG", "NrMotion", true);
     // Distance in metres; stored as 25 m steps, 0 = keep every surface.
     const auto farMeters = ini.GetLongValue("GlassFG", "SkipFartherThanMeters", 0);
     // Diagnostic opaque-pipeline probe, default off. Persisted so an offline

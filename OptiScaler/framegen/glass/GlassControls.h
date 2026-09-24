@@ -109,7 +109,7 @@ struct Controls
     // through its own evaluate inputs. The engine's own textures are never
     // written, so DLSS-SR, Ray Reconstruction and the ray traced passes keep
     // reading exactly what the game produced.
-    bool nrMotion = false;
+    bool nrMotion = true;
 
     // Far-surface skip, in steps of 25 m of view distance. 0 keeps every
     // surface. Distant level-of-detail glass carries no detail the generator

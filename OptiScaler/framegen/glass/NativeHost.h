@@ -57,6 +57,10 @@ struct NativeHostStatus
     // swap, so this counter is the direct evidence that the correction stays on
     // DLSS FG alone.
     std::uint64_t nonFrameGenerationEvaluations = 0;
+    // Second consumer (DLSS-NR): evaluates whose guides were replaced by the
+    // composed pair, and evaluates that asked and were refused (option off, no
+    // session, untracked list, compose failure).
+    std::uint64_t secondConsumerServed = 0, secondConsumerRefused = 0;
     // Per-evaluation read-back of every parameter name the substitution
     // touched. restoreFailures has to stay 0: a non-zero value means a name was
     // left pointing at our composed texture after the generator returned.

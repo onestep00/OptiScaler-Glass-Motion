@@ -171,6 +171,8 @@ struct Runtime
     // substitution counter is needed for them: reaching a substitution would
     // require passing this gate, which returns before any session exists.
     uint64_t nonFrameGenerationEvaluations = 0;
+    // Second consumer (DLSS-NR) outcomes, under mutex.
+    uint64_t secondConsumerServed = 0, secondConsumerRefused = 0;
     // Evaluations the DLSS-G provider hook proved are the frame generator even
     // though the driver-level parameter table named only MotionVectors/Depth.
     // The provider created that handle for NVSDK_NGX_Feature_FrameGeneration, so
@@ -895,7 +897,10 @@ bool SecondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* mo
         auto& r = runtime();
         std::lock_guard lock(r.mutex);
         if (!r.active)
+        {
+            ++r.secondConsumerRefused;
             return false;
+        }
         // A served list holds session work until its Reset or destruction, and
         // the session fences every submission of it, so its Reset has to reach
         // the session from now on (see TrackedLists).
@@ -903,7 +908,12 @@ bool SecondConsumerGuides(ID3D12GraphicsCommandList* command, ID3D12Resource* mo
                                                                    depthArrival, jitterX, jitterY, scaleX, scaleY,
                                                                    outMotion, outDepth);
         if (served)
+        {
             r.tracked.add(command);
+            ++r.secondConsumerServed;
+        }
+        else
+            ++r.secondConsumerRefused;
         return served;
     }
     catch (...)
@@ -1367,6 +1377,8 @@ NativeHostStatus ReadNativeHostStatus() noexcept
     status.unsubstitutedReusedMotion = r.unsubstitutedReusedMotion;
     status.unsubstitutedFreshMotion = r.unsubstitutedFreshMotion;
     status.nonFrameGenerationEvaluations = r.nonFrameGenerationEvaluations;
+    status.secondConsumerServed = r.secondConsumerServed;
+    status.secondConsumerRefused = r.secondConsumerRefused;
     status.providerConfirmedEvaluations = r.providerConfirmedEvaluations;
     status.providerUnconfirmedEvaluations = r.providerUnconfirmedEvaluations;
     status.callerConfirmedEvaluations = r.callerConfirmedEvaluations;
@@ -1435,6 +1447,10 @@ void ReportNativeHostLog() noexcept
                      static_cast<unsigned long long>(status.callerConfirmedEvaluations),
                      static_cast<unsigned long long>(status.restoreChecks),
                      static_cast<unsigned long long>(status.restoreFailures));
+        // Second consumer: DLSS-NR evaluates that read the composed pair.
+        std::fprintf(log, "NATIVE_HOST_SECOND served=%llu refused=%llu\n",
+                     static_cast<unsigned long long>(status.secondConsumerServed),
+                     static_cast<unsigned long long>(status.secondConsumerRefused));
         ReportGeometryHost(log);
         std::fflush(log);
     }

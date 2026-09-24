@@ -46,7 +46,7 @@ flowchart LR
    overwritten with the object's own values. Nothing is blended or scaled; the engine textures
    are never written.
 
-DLSS RR, SR and the ray tracing passes are untouched. The cost is about 0.2 ms of GPU time per
+DLSS RR, SR and the ray tracing passes are untouched. When the fork's DLSS-NR pass is active, the same corrected motion and depth are also handed to it as guides (`NrMotion`, on by default). The cost is about 0.2 ms of GPU time per
 generated frame on an RTX 4090 at 4K.
 
 ## Install
