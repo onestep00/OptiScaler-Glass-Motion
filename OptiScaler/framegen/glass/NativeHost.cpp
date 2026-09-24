@@ -1681,6 +1681,39 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
                         std::fflush(r.log);
                     }
                 }
+                // Diagnostic: the texture the upscaler or Ray Reconstruction
+                // writes and the colour it reads, so the GATE_DETAIL rt0/dsv ptr
+                // of a refused draw can be matched offline against the
+                // super-resolution output. Read-only Gets on the table handed
+                // through below, which stays untouched. Output is read on every
+                // pass-through to see it change; Color and the descriptions only
+                // for a printed line: 24 lines, then one each time Output changes.
+                static std::atomic<unsigned> srLines { 0 };
+                static std::uint64_t srLastOutput = 0;
+                ID3D12Resource* srOutput = nullptr;
+                if (r.log != nullptr &&
+                    parameters->Get(NVSDK_NGX_Parameter_Output, &srOutput) == NVSDK_NGX_Result_Success &&
+                    srOutput != nullptr)
+                {
+                    const std::uint64_t output = reinterpret_cast<std::uintptr_t>(srOutput);
+                    ID3D12Resource* srColor = nullptr;
+                    if ((output != srLastOutput || srLines.load(std::memory_order_relaxed) < 24) &&
+                        parameters->Get(NVSDK_NGX_Parameter_Color, &srColor) == NVSDK_NGX_Result_Success &&
+                        srColor != nullptr)
+                    {
+                        srLines.fetch_add(1, std::memory_order_relaxed);
+                        srLastOutput = output;
+                        const auto outputDesc = srOutput->GetDesc();
+                        const auto colorDesc = srColor->GetDesc();
+                        std::fprintf(r.log, "NATIVE_SR_IO output=%llx %ux%u fmt%u color=%llx %ux%u fmt%u\n",
+                                     static_cast<unsigned long long>(output), static_cast<unsigned>(outputDesc.Width),
+                                     outputDesc.Height, static_cast<unsigned>(outputDesc.Format),
+                                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(srColor)),
+                                     static_cast<unsigned>(colorDesc.Width), colorDesc.Height,
+                                     static_cast<unsigned>(colorDesc.Format));
+                        std::fflush(r.log);
+                    }
+                }
             }
             return original(command, handle, parameters, callback);
         }
@@ -1700,6 +1733,38 @@ NVSDK_NGX_Result EvaluateNativeFG(ID3D12GraphicsCommandList* command, const NVSD
             if (callerIdentity)
                 ++r.callerConfirmedEvaluations;
             NoteProviderFrameGenerationIdentity(true, handle != nullptr ? handle->Id : 0u, inputs.motionKey);
+            // Diagnostic: the textures the generator is handed, so the
+            // GATE_DETAIL rt0/dsv ptr of a refused draw can be matched offline
+            // against the HUDless colour. Only after the genuine DLSSG.HUDLess
+            // read: the driver-level block names no HUDless colour
+            // (Inputs::read sets color = motion there). 24 lines, then one each
+            // time the HUDless texture changes. frame is the engine render frame
+            // the capture numbers its draws with (GATE_DETAIL frame=).
+            static std::atomic<unsigned> fgInputLines { 0 };
+            static std::uint64_t fgLastHudless = 0;
+            const std::uint64_t hudless = reinterpret_cast<std::uintptr_t>(inputs.color);
+            if (dlssgPath && r.log != nullptr &&
+                (hudless != fgLastHudless || fgInputLines.load(std::memory_order_relaxed) < 24))
+            {
+                fgInputLines.fetch_add(1, std::memory_order_relaxed);
+                fgLastHudless = hudless;
+                const auto hudlessDesc = inputs.color->GetDesc();
+                const auto motionDesc = inputs.motion->GetDesc();
+                const auto depthDesc = inputs.depth->GetDesc();
+                std::fprintf(r.log,
+                             "NATIVE_FG_INPUTS frame=%llu hudless=%llx %ux%u fmt%u motion=%llx %ux%u fmt%u "
+                             "depth=%llx %ux%u fmt%u\n",
+                             static_cast<unsigned long long>(GetGeometryCommandStats().lastFrame),
+                             static_cast<unsigned long long>(hudless), static_cast<unsigned>(hudlessDesc.Width),
+                             hudlessDesc.Height, static_cast<unsigned>(hudlessDesc.Format),
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(inputs.motion)),
+                             static_cast<unsigned>(motionDesc.Width), motionDesc.Height,
+                             static_cast<unsigned>(motionDesc.Format),
+                             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(inputs.depth)),
+                             static_cast<unsigned>(depthDesc.Width), depthDesc.Height,
+                             static_cast<unsigned>(depthDesc.Format));
+                std::fflush(r.log);
+            }
         }
         std::lock_guard lock(r.mutex);
         entry = acquire(r, command, handle, inputs, controls);

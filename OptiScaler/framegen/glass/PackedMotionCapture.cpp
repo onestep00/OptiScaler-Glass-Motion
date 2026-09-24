@@ -821,9 +821,16 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                       f(5), f(6), t(7), f(8), f(9), f(10), t(11));
     }
     // One OM view bound to the draw (GeometryViews.h) as
-    // "<width>x<height>:fmt<N>": N is the DXGI format of the view, or of the
-    // resource when the view leaves it unknown, and ":null" marks a
-    // null-resource descriptor. "-" when no view was observed.
+    // "<width>x<height>:fmt<N>:res<R>:ptr<P>:m<mip>:s<slice>": N is the DXGI
+    // format of the view, or of the resource when the view leaves it unknown.
+    // R is the registry's identity of the resource (GeometryViewRegistry.h
+    // resourceIdentity, a private-data serial) and P the resource pointer the
+    // view was created on, the value NATIVE_FG_INPUTS and NATIVE_SR_IO print for
+    // the evaluation resources. mip and slice are the subresource the view
+    // selects: the leading MipSlice of the single-sampled union members, one mip
+    // for a multisampled view, and the first slice of the 2D array forms; a
+    // default descriptor reads 0, 0. ":null" marks a null-resource descriptor.
+    // "-" when no view was observed.
     static void formatView(char* out, std::size_t size, const GeometryView* view, bool depth) noexcept
     {
         if (!view)
@@ -833,8 +840,34 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         }
         const DXGI_FORMAT viewFormat = depth ? view->dsv.Format : view->rtv.Format;
         const DXGI_FORMAT format = viewFormat != DXGI_FORMAT_UNKNOWN ? viewFormat : view->allocation.Format;
-        std::snprintf(out, size, "%llux%u:fmt%u%s", static_cast<unsigned long long>(view->allocation.Width),
-                      view->allocation.Height, unsigned(format), view->nullResource ? ":null" : "");
+        unsigned mip = 0, slice = 0;
+        if (depth)
+            switch (view->dsv.ViewDimension)
+            {
+            case D3D12_DSV_DIMENSION_TEXTURE2DMS: break;
+            case D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY: slice = view->dsv.Texture2DMSArray.FirstArraySlice; break;
+            case D3D12_DSV_DIMENSION_TEXTURE2DARRAY:
+                mip = view->dsv.Texture2DArray.MipSlice;
+                slice = view->dsv.Texture2DArray.FirstArraySlice;
+                break;
+            default: mip = view->dsv.Texture2D.MipSlice; break;
+            }
+        else
+            switch (view->rtv.ViewDimension)
+            {
+            case D3D12_RTV_DIMENSION_BUFFER:
+            case D3D12_RTV_DIMENSION_TEXTURE2DMS: break;
+            case D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY: slice = view->rtv.Texture2DMSArray.FirstArraySlice; break;
+            case D3D12_RTV_DIMENSION_TEXTURE2DARRAY:
+                mip = view->rtv.Texture2DArray.MipSlice;
+                slice = view->rtv.Texture2DArray.FirstArraySlice;
+                break;
+            default: mip = view->rtv.Texture2D.MipSlice; break;
+            }
+        std::snprintf(out, size, "%llux%u:fmt%u:res%llx:ptr%llx:m%u:s%u%s",
+                      static_cast<unsigned long long>(view->allocation.Width), view->allocation.Height,
+                      unsigned(format), static_cast<unsigned long long>(view->resource),
+                      static_cast<unsigned long long>(view->address), mip, slice, view->nullResource ? ":null" : "");
     }
     // Motion probe of one draw of the selected pipeline (motionprobe=<hex>,
     // GlassControls.h), diagnostics only. It reads what the engine's
@@ -1238,10 +1271,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
             // Gate-trace evidence for what the refused draw renders into: its
             // viewport and scissor against the configured extent, and the size
             // and format of RT0 and the depth target, which tell an off-screen
-            // texture from a scene target at another resolution.
+            // texture from a scene target at another resolution. Their resource
+            // pointers and subresources name the texture itself, for an offline
+            // match against NATIVE_SR_IO output= and NATIVE_FG_INPUTS hudless=.
             if (gate && log && claimLine(gateViewportLines, GateViewportLimit))
             {
-                char rt0[64], dsv[64];
+                char rt0[96], dsv[96];
                 formatView(rt0, sizeof(rt0), raster->targetViews[0].get(), false);
                 formatView(dsv, sizeof(dsv), raster->depthView.get(), true);
                 std::fprintf(log,
