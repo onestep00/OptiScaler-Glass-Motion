@@ -322,7 +322,7 @@ void RenderSettings()
         result = "Recommended values applied; press Save to keep them.";
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Correction on, 2 px border, half of the material opacity as the\n"
+        ImGui::SetTooltip("Correction on, 2 px border, 10 percent opacity or brightness as the\n"
                           "inside threshold, camera jitter compensation at the measured default.");
     ImGui::SameLine();
     if (ImGui::Button("Reset all"))
