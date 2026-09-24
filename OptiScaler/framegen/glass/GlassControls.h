@@ -345,6 +345,14 @@ inline std::atomic<unsigned>& MotionProbeDigitsValue() noexcept
     static std::atomic<unsigned> value { 0 };
     return value;
 }
+// Incremented by every SetMotionProbe. The capture restarts its probe totals
+// when it sees a new value, so MOTION_PROBE_SUM counts the draws since the last
+// motionprobe= command only.
+inline std::atomic<unsigned>& MotionProbeArmingValue() noexcept
+{
+    static std::atomic<unsigned> value { 0 };
+    return value;
+}
 // digits 0 turns the probe off. prefix holds the digits right-aligned.
 inline void SetMotionProbe(std::uint64_t prefix, unsigned digits) noexcept
 {
@@ -352,6 +360,7 @@ inline void SetMotionProbe(std::uint64_t prefix, unsigned digits) noexcept
     MotionProbeDigitsValue().store(0, std::memory_order_release);
     MotionProbePrefixValue().store(digits ? prefix << (64 - 4 * digits) : 0, std::memory_order_relaxed);
     MotionProbeDigitsValue().store(digits, std::memory_order_release);
+    MotionProbeArmingValue().fetch_add(1, std::memory_order_release);
 }
 inline unsigned MotionProbeDigits() noexcept { return MotionProbeDigitsValue().load(std::memory_order_acquire); }
 inline bool MotionProbeArmed() noexcept { return MotionProbeDigitsValue().load(std::memory_order_relaxed) != 0; }

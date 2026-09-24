@@ -285,6 +285,8 @@ class Capture final : public GeometryDrawCaptureOwner
     unsigned probeTrackCursor = 0;
     std::atomic<std::uint64_t> probeWindow { 0 };
     std::atomic<unsigned> probeLines { 0 };
+    // MotionProbeArmingValue() the totals below count from.
+    std::atomic<unsigned> probeArming { 0 };
     enum ProbeTotal : unsigned
     {
         ProbeDraws,
@@ -881,6 +883,12 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                      const GeometryPipelineEntry& pipeline, const GeometryBatchSpan* span, const char* variant,
                      bool stale) noexcept
     {
+        // A new motionprobe= arming restarts the totals.
+        const auto arming = MotionProbeArmingValue().load(std::memory_order_acquire);
+        auto counted = probeArming.load(std::memory_order_relaxed);
+        if (counted != arming && probeArming.compare_exchange_strong(counted, arming, std::memory_order_relaxed))
+            for (auto& total : probeTotals)
+                total.store(0, std::memory_order_relaxed);
         const auto bump = [this](ProbeTotal total)
         { probeTotals[total].fetch_add(1, std::memory_order_relaxed); };
         const std::uint64_t proxy = span ? (span->identity ? span->identity.proxy : span->parent.proxy) : 0;
