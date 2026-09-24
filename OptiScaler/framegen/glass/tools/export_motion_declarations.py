@@ -10,6 +10,11 @@ import json
 import mmap
 import struct
 
+# The packed capture admits these blended PSOs by blend state and gives them the
+# VS's root graft. Without a pair the engine never writes rows 24..26 for them
+# (research/ACTIVE.md "스키닝 A/B").
+EXTRA_PAIR_PASSES = {'renderstage_hair_basecolor_blend'}
+
 
 def name_hash(name):
     value = 0xcbf29ce484222325
@@ -92,7 +97,7 @@ def main():
     pairs = {}
     paired_hashes, omitted = set(), []
     for technique in catalog['techniques']:
-        if not technique['transparency_route']:
+        if not (technique['transparency_route'] or technique['pass'] in EXTRA_PAIR_PASSES):
             continue
         programs = technique['programs']
         vs = [s for s in programs if s['kind'] == 'vs' and s['sha256'] in selected_hashes]

@@ -3,6 +3,9 @@
 Consumes a local, executable-specific native-writer-layouts.json inspection.
 This is an offline direct-write audit, not recursive native-call verification,
 runtime admission, or a deployment tool. Unresolved suppliers remain explicit.
+Beside the pending pairs it writes their direct-span-clear subset,
+shader-pairs-<n>-direct-span-clear.bin; only that file may be copied to
+Glass/motion-shader-pairs.bin.
 """
 import argparse
 from collections import Counter
@@ -111,7 +114,7 @@ def main():
     layouts = {item['enum']: item for item in native['constructors']}
     if len(layouts) != len(native['constructors']):
         raise ValueError('duplicate native modifier layout')
-    rows, seen, memo = [], set(), {}
+    rows, seen, memo, clear = [], set(), {}, []
     for vertex, pixel, parent in struct.iter_unpack('<QQQ', pair_blob[16:]):
         if (vertex, pixel) in seen or parents[vertex] != parent:
             raise ValueError('duplicate pair or wrong vertex metadata')
@@ -122,9 +125,16 @@ def main():
             memo[key] = audit_slots(vs['request_mask'] | ps['request_mask'], vs['slots'] + ps['slots'], layouts)
         rows.append(dict(vertex=hex(vertex), pixel=hex(pixel), vertex_metadata=hex(parent),
                          pixel_metadata=hex(key[1]), **memo[key]))
+        if not memo[key]['unresolved'] and not memo[key]['motion_overlap']:
+            clear.append((vertex, pixel, parent))
+    clear_blob = struct.pack('<8sII', b'GMSPAIR1', len(clear), 0)
+    clear_blob += b''.join(struct.pack('<QQQ', *pair) for pair in clear)
+    clear_name = 'shader-pairs-%d-direct-span-clear.bin' % len(clear)
+    (pending / clear_name).write_bytes(clear_blob)
     unknown = Counter(problem['enum'] for row in rows for problem in row['unresolved'])
     summary = dict(pairs=len(rows), distinct_metadata_pairs=len(memo),
-                   direct_span_clear_pairs=sum(not row['unresolved'] and not row['motion_overlap'] for row in rows),
+                   direct_span_clear_pairs=len(clear), direct_span_clear_file=clear_name,
+                   direct_span_clear_sha256=hashlib.sha256(clear_blob).hexdigest(),
                    overlapping_pairs=sum(bool(row['motion_overlap']) for row in rows),
                    unresolved_pairs=sum(bool(row['unresolved']) for row in rows),
                    unresolved_enums=dict(sorted(unknown.items())),

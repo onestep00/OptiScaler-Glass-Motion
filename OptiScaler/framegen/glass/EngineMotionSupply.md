@@ -743,11 +743,22 @@ of `CyberpunkDeclarationProbe.cpp`, which was deleted (commits `f07b40c28`,
 shader-cache provider builds any compiled layout. It detours the same two
 engine entries: the provider metadata getter and the vertex-stage resolution.
 Its plans come from `Glass/motion-declarations.bin` (a copy of
-`pending-motion-declarations/declarations.bin`) and
-`Glass/motion-shader-pairs.bin`, a copy of
-`shader-pairs-2018-direct-span-clear.bin` (SHA-256 `827bf29b…`). That file holds
-the 2,018 pairs with complete direct-span classifications; the six modifier-0
-pairs of "Exact pair direct-writer audit" are excluded (`research/ACTIVE.md:126`).
+`pending-motion-declarations/declarations.bin`, SHA-256 `d40206e1…`, 84 plans)
+and `Glass/motion-shader-pairs.bin`, a copy of
+`shader-pairs-1988-direct-span-clear.bin` (SHA-256 `c5056f54…`), which
+`audit_motion_writer_slots.py` writes. That file holds the 1,988 pairs with
+complete direct-span classifications; the six modifier-0 pairs of "Exact pair
+direct-writer audit" are excluded (`research/ACTIVE.md:126`). Since 2026-09-24
+the export also pairs `renderstage_hair_basecolor_blend` (54 pairs), whose
+blended hair PSOs the packed capture admits with the VS's root graft
+(`research/ACTIVE.md` "스키닝 A/B"). The metadata of 24 of them (`hair`,
+`hair_hideable`) requests `MatMod_RainParams` (modifier 25). Its supplier
+`0x3a0fdc` skips a negative row byte and writes one row through `0x1e6770`,
+the shape of modifiers 18 and 24, so `native-writer-layouts.json` now lists
+it with a one-row span. The same export no longer declares plan
+`0x43b6474bf50e96de` or the 84 pairs of the 14 `factory_mismatch` cloak VS,
+whose camera-only records read no MotionMatrix. The integration build used the
+previous data (85 plans `faad292c…`, 2,018 pairs `827bf29b…`).
 The status line `DECL` reports `hook`, `seen`, `matched`, `rejected`,
 `stage_seen`, `stage_selected` and the step that stopped installation. The
 RED4ext plugin must not be loaded in the same process; the integration deploy
@@ -863,7 +874,7 @@ motion: `296676c3` and `bb99bbe6` share key `0xcd4bded0362ae30a` (mask
 `MatMod_VehicleGridCorners`, 5 `MatMod_VehicleMeshPivotInGridSpace`), `7a31295c`
 and `d441e9d5` share `0x85d0bd41fedcea8d` (mask `0x10003004`). Only the
 declaration hook adds the MotionMatrix (row 24), and only for the VS/PS pairs of
-validated root grafts: `shader-pairs-2018-direct-span-clear.bin` has 12 pairs
+validated root grafts: `shader-pairs-1988-direct-span-clear.bin` has 12 pairs
 for `d441e9d5` and none for `296676c3`, `bb99bbe6` or `7a31295c`. Every
 transparency-route pair of the 45 vehicle root grafts is in that file.
 
