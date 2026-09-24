@@ -1450,7 +1450,7 @@ class PackedMotionGpu
                 const auto record = row[x];
                 const auto id = unsigned(record & 0x7fffu);
                 // The top bit of the 18-bit high key is the coverage class the
-                // capture set from the material opacity threshold; the low 17
+                // capture set from the record opacity threshold; the low 17
                 // bits are the depth key.
                 const auto highKey = unsigned((record >> 46) & 0x3ffffu);
                 const auto depthKey = highKey & 0x1ffffu;
@@ -1677,7 +1677,8 @@ class PackedMotionGpu
             unsigned width, height;
             float scaleX, scaleY;
             unsigned edgeWidth;
-            // 0..1. Covered pixels whose material opacity reaches this value
+            // 0..1. Covered pixels whose record opacity (material opacity or
+            // displayed brightness, whichever is larger) reaches this value
             // take the object motion and depth. Everything else keeps the
             // engine's value.
             float opacityThreshold;

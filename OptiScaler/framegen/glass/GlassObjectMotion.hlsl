@@ -13,8 +13,9 @@ cbuffer Parameters : register(b0)
     float2 MotionScale;
     uint EdgeWidth;
     // 0..1. A covered pixel takes the object's motion and depth when the
-    // material opacity of that pixel reaches this value. Pixels below it keep
-    // the engine's value byte for byte.
+    // record opacity of that pixel (the larger of its material opacity and the
+    // displayed brightness of the light it adds) reaches this value. Pixels
+    // below it keep the engine's value byte for byte.
     float OpacityThreshold;
     uint DebugMode;
     // The delivery converts the captured object motion from the frame's
@@ -158,7 +159,7 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     objectMotion += (jitter * JitterGain) / mvUnit;
     float opacity = float((packed.x >> 16) & 0xffu) / 255.0;
     // Coverage class. The capture sets the top bit of the 18-bit depth key when
-    // the pixel's material opacity reached the threshold. The packed store is an
+    // the pixel's record opacity reached the threshold. The packed store is an
     // unsigned max, so covered records always outrank uncovered ones and the
     // nearest surface wins inside each class. One 8-byte record per pixel
     // therefore resolves any number of overlapping transparent layers: the
@@ -175,7 +176,7 @@ void ApplyObjectMotion(uint3 dispatchId : SV_DispatchThreadID)
     // camera moved, which read as a ripple. There is no strength, no blend and
     // no interior clip now.
     // The visible boundary always takes the exact object motion, whatever its
-    // opacity. The interior takes it when the material opacity reaches the
+    // opacity. The interior takes it when the record opacity reaches the
     // threshold; below it the pixel belongs to the content behind the surface
     // and is left alone. Thin low-opacity features (particle sprites, thin
     // glass edges) are covered by this rule too, because they are part of the
