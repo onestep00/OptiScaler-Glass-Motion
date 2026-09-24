@@ -1,3 +1,84 @@
+# OptiScaler Glass Motion (Cyberpunk 2077)
+
+An OptiScaler fork with one addition, the **Glass** module: DLSS Frame Generation stops
+smearing transparent objects into the background. Glass, holograms, particles, rain,
+NPC hair and eyewear get their own motion vectors and depth in the generated frames.
+Only Cyberpunk 2077 is supported; the module reads the game's own engine data.
+
+## Before / after
+
+Left: stock DLSS FG. Right: with Glass. Same camera path, same place, generated frames included.
+
+| Kabuki hologram, strafing | Kabuki hologram, panning | Cherry Blossom Data Term, strafing |
+| --- | --- | --- |
+| ![hologram strafe](docs/glass/hologram-strafe.webp) | ![hologram pan](docs/glass/hologram-pan.webp) | ![data term strafe](docs/glass/dataterm-strafe.webp) |
+
+## The problem
+
+Frame generation moves every pixel by the motion vector the engine wrote there. For a
+transparent surface the engine writes the motion of what is *behind* it, so in the generated
+frame the glass, the hologram, the rain streak moves with the background instead of staying
+where it is.
+
+## What Glass does
+
+```mermaid
+flowchart LR
+  G[Game render] --> RR[DLSS RR / NR]
+  RR --> SR[DLSS SR]
+  SR --> FG[DLSS FG]
+  G -. transparent draws .-> C[Glass capture]
+  C --> M[Object MV + depth]
+  M --> FG
+```
+
+1. **Capture.** Every transparent draw that goes through the D3D12 command list is drawn a second
+   time into a small offscreen record buffer by a rewritten copy of the game's own vertex and
+   pixel shaders. The rewritten vertex shader adds the engine's previous-frame position, taken
+   from the same engine data the game's own velocity pass uses (previous object transform,
+   previous bones, previous camera). No image processing, no optical flow, no vertex history of
+   our own.
+2. **Record.** Each pixel of a transparent surface gets a record: motion, depth, and how much of
+   the displayed pixel the surface owns (its opacity, or its brightness when it adds light).
+   Overlapping surfaces resolve to the nearest one.
+3. **Compose.** Right before DLSS FG runs, the FG motion vector and depth inputs are copied and,
+   only at pixels where a record covers the surface's edge or an interior above a threshold,
+   overwritten with the object's own values. Nothing is blended or scaled; the engine textures
+   are never written.
+
+DLSS RR, SR and the ray tracing passes are untouched. The cost is about 0.2 ms of GPU time per
+generated frame on an RTX 4090 at 4K.
+
+## Install
+
+1. Install OptiScaler for Cyberpunk 2077 as usual (see the original README below): unpack the
+   release into `Cyberpunk 2077\bin\x64\`, rename `OptiScaler.dll` to `dxgi.dll`, and turn on
+   DLSS Frame Generation in the game.
+2. The release archive already contains the module data next to the DLL: `Glass\` (compiled
+   shader grafts, declaration tables, `dxcompiler.dll`, `dxil.dll`) and `OptiScaler.Glass.ini`.
+   Keep both where they are; without the INI the module stays idle.
+3. `OptiScaler.Glass.ini` defaults are fine. The useful keys are `Enabled`,
+   `InteriorOpacityPercent` (50) and `GraftClassMask` (3 = rigid + skinned).
+4. A log is written to `OptiScaler.Glass.log`. The in-game OptiScaler overlay (`Insert`) has a
+   Glass section.
+
+Mod Organizer 2 users: the same files go into the profile that owns `bin\x64\dxgi.dll`.
+
+## Notes
+
+* Objects drawn as HUD (quest markers) are not touched; the engine composites them after FG.
+* World screens that show a UI texture (adverts, terminals) are not corrected yet.
+* Rain and particles get the camera's motion only; their own fall motion has no engine supply.
+* Vehicle glass whose shader does not receive the car's motion from the engine keeps the
+  engine value instead of a wrong one.
+* Source of the module: `OptiScaler/framegen/glass/`. Details, measurements and limits:
+  `OptiScaler/framegen/glass/README.md` and `SupportMatrix.md`.
+
+---
+
+
+# Original OptiScaler README
+
 <div align="center">
 
   ![Logo](https://github.com/user-attachments/assets/c7dad5da-0b29-4710-8a57-b58e4e407abd)
