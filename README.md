@@ -58,7 +58,7 @@ generated frame on an RTX 4090 at 4K.
    shader grafts, declaration tables, `dxcompiler.dll`, `dxil.dll`) and `OptiScaler.Glass.ini`.
    Keep both where they are; without the INI the module stays idle.
 3. `OptiScaler.Glass.ini` defaults are fine. The useful keys are `Enabled`,
-   `InteriorOpacityPercent` (50) and `GraftClassMask` (3 = rigid + skinned).
+   `InteriorOpacityPercent` (10) and `GraftClassMask` (3 = rigid + skinned).
 4. A log is written to `OptiScaler.Glass.log`. The in-game OptiScaler overlay (`Insert`) has a
    Glass section.
 

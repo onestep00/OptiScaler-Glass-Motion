@@ -66,7 +66,7 @@ int wmain(int argc, wchar_t** argv)
         auditDirectory = std::filesystem::absolute(argv[1]);
         require(std::filesystem::create_directory(auditDirectory), "fresh audit directory required");
         auto initial = GlassFg::ReadControls();
-        require(initial.enabled && initial.opacityPercent == 50 && initial.measureGpuTime && initial.packedSubstitute &&
+        require(initial.enabled && initial.opacityPercent == 10 && initial.measureGpuTime && initial.packedSubstitute &&
                     initial.packedRows == 32768,
                 "defaults");
         GlassFg::WriteControls({ true, 500 });
@@ -212,7 +212,7 @@ int wmain(int argc, wchar_t** argv)
             std::ofstream f(path);
             f << "[GlassFG]\nInteriorOpacityPercent=invalid\n";
         }
-        require(GlassFg::load() && GlassFg::ReadControls().enabled && GlassFg::ReadControls().opacityPercent == 50,
+        require(GlassFg::load() && GlassFg::ReadControls().enabled && GlassFg::ReadControls().opacityPercent == 10,
                 "malformed fallback");
         GlassFg::WriteControls({ true, 50, true });
         GlassFg::PublishGpuMilliseconds(.123);

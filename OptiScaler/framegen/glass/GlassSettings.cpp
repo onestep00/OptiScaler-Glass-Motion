@@ -51,7 +51,7 @@ bool load()
     // a blend strength, so it is not read as a threshold: an old file falls back
     // to the conservative default and the legacy key is removed on the next
     // save.
-    const auto opacityPercent = ini.GetLongValue("GlassFG", "InteriorOpacityPercent", 50);
+    const auto opacityPercent = ini.GetLongValue("GlassFG", "InteriorOpacityPercent", 10);
     const auto edgeWidth = ini.GetLongValue("GlassFG", "BorderWidthPx",
                                             ini.GetLongValue("GlassFG", "EdgeWidth", 2));
     // The delivered path removes the current frame's projection jitter at the
@@ -314,7 +314,7 @@ void RenderSettings()
     if (ImGui::Button("Recommended"))
     {
         value.enabled = true;
-        value.opacityPercent = 50;
+        value.opacityPercent = 10;
         value.edgeWidth = 2;
         value.jitterMode = 0;
         value.jitterGain = 100;

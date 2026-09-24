@@ -16,7 +16,7 @@ struct Controls
     // a light-pass PS the larger of that and its displayed brightness,
     // EmissionPercentValue) reaches this value; below it the engine's motion and
     // depth stay untouched. The visible boundary always takes the exact object motion.
-    unsigned opacityPercent = 50;
+    unsigned opacityPercent = 10;
     bool measureGpuTime = true;
     unsigned edgeWidth = 2;
     // Safety staging for the full-screen packed object-motion dispatch. The

@@ -146,7 +146,7 @@ Dumps:
 | `Enabled` | false | master switch; hooks stay idle while off |
 | `ReplaceFrameGenerationInputs` | false | substitute FG motion and depth (live `apply` / `substitute=on`) |
 | `ComposePass`, `ComposeRows` | true, 240 | compose dispatch and the rows it covers from the top (1..32768); rows must cover the render height for full-frame delivery |
-| `InteriorOpacityPercent` | 50 | interior threshold (C4) |
+| `InteriorOpacityPercent` | 10 | interior threshold (C4): an interior pixel takes the object motion when max(material opacity, displayed brightness) is at least this percent; 10 since 2026-09-24 (was 50) |
 | `BorderWidthPx` | 2 | boundary band, 1..4 px (C3) |
 | `GraftClassMask` | 3 | admitted supply classes (bit 0 root, bit 1 skinned, bit 2 preskinned); default 3 since 2026-09-24, after the hair declaration fix (research/ACTIVE.md "hair 선언 쌍 게임 검증"); a first default of 3 was withdrawn on 2026-09-23 (`research/ACTIVE.md:128`) |
 | `VertexHistoryFallback` | false | diagnostic module vertex history; not C2 |
