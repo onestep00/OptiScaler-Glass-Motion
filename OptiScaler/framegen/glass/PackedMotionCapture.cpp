@@ -285,8 +285,10 @@ class Capture final : public GeometryDrawCaptureOwner
     unsigned probeTrackCursor = 0;
     std::atomic<std::uint64_t> probeWindow { 0 };
     std::atomic<unsigned> probeLines { 0 };
-    // MotionProbeArmingValue() the totals below count from.
-    std::atomic<unsigned> probeArming { 0 };
+    // Guarded by probeMutex with the totals: the MotionProbeArmingValue() the
+    // totals count from. One critical section per probed draw applies a new
+    // arming and all of that draw's counts, so no count straddles a reset.
+    unsigned probeArming = 0;
     enum ProbeTotal : unsigned
     {
         ProbeDraws,
@@ -302,7 +304,7 @@ class Capture final : public GeometryDrawCaptureOwner
         ProbeEarlierMiss,
         ProbeTotalCount
     };
-    std::array<std::atomic<std::uint64_t>, ProbeTotalCount> probeTotals {};
+    std::array<std::uint64_t, ProbeTotalCount> probeTotals {};
     // The capture mutex. It guards the frame slots and their upload memory, the
     // object mappings, the submission and fence bookkeeping, the dump id table,
     // `counters`, `overflowChunks` and the span family table. Every recording
@@ -883,18 +885,9 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
                      const GeometryPipelineEntry& pipeline, const GeometryBatchSpan* span, const char* variant,
                      bool stale) noexcept
     {
-        // A new motionprobe= arming restarts the totals.
-        const auto arming = MotionProbeArmingValue().load(std::memory_order_acquire);
-        auto counted = probeArming.load(std::memory_order_relaxed);
-        if (counted != arming && probeArming.compare_exchange_strong(counted, arming, std::memory_order_relaxed))
-            for (auto& total : probeTotals)
-                total.store(0, std::memory_order_relaxed);
-        const auto bump = [this](ProbeTotal total)
-        { probeTotals[total].fetch_add(1, std::memory_order_relaxed); };
         const std::uint64_t proxy = span ? (span->identity ? span->identity.proxy : span->parent.proxy) : 0;
         CyberpunkMotionSample sample;
         const bool sampled = ReadCyberpunkMotionSample(proxy, span ? span->first : 0, sample);
-        bump(ProbeDraws);
         // rows: cur = the proxy's current transform (no previous pose supplied),
         // prev = its history pose, other = neither. inst: the draw's
         // INSTANCE_TRANSFORM against the proxy's transform.
@@ -905,66 +898,82 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         const char* instance = !sample.instanceRead                                    ? "none"
                                : sample.currentRead && sample.instance == sample.current ? "cur"
                                                                                         : "other";
-        bump(!sample.rowsRead           ? ProbeRowsNone
-             : rows[0] == 'c'           ? ProbeRowsCurrent
-             : rows[0] == 'p'           ? ProbeRowsPrevious
-                                        : ProbeRowsOther);
-        if (sample.instanceRead && instance[0] == 'o')
-            bump(ProbeInstanceOther);
-        if (sample.historyRead && sample.history.supplied())
-            bump(ProbeSupplied);
-        if (stale)
-            bump(ProbeStale);
+        // The first probed draw of a new window writes the totals since arming;
+        // the first ProbeDrawsPerWindow draws of a window print their lines.
+        bool summary = false, detail = false;
+        if (log)
+        {
+            const auto window = GetTickCount64() / ProbeWindowMs;
+            auto seen = probeWindow.load(std::memory_order_relaxed);
+            summary = seen != window && probeWindow.compare_exchange_strong(seen, window, std::memory_order_relaxed);
+            if (summary)
+                probeLines.store(0, std::memory_order_relaxed);
+            detail = claimLine(probeLines, ProbeDrawsPerWindow);
+        }
         // earlier: 1 when the rows equal the INSTANCE_TRANSFORM this proxy was
         // drawn with in the previous render frame, 0 when they differ, -1
         // without a sample of that frame.
         int earlier = -1;
-        if (sampled && proxy && sample.instanceRead)
+        std::array<std::uint64_t, ProbeTotalCount> totals {};
         {
             std::lock_guard lock(probeMutex);
-            ProbeTrack* track = nullptr;
-            for (auto& entry : probeTracks)
-                if (entry.proxy == proxy)
+            // A new motionprobe= arming restarts the totals.
+            const auto arming = MotionProbeArmingValue().load(std::memory_order_acquire);
+            if (probeArming != arming)
+            {
+                probeArming = arming;
+                probeTotals.fill(0);
+            }
+            if (sampled && proxy && sample.instanceRead)
+            {
+                ProbeTrack* track = nullptr;
+                for (auto& entry : probeTracks)
+                    if (entry.proxy == proxy)
+                    {
+                        track = &entry;
+                        break;
+                    }
+                if (!track)
                 {
-                    track = &entry;
-                    break;
+                    track = &probeTracks[probeTrackCursor++ % ProbeTrackCount];
+                    *track = {};
+                    track->proxy = proxy;
                 }
-            if (!track)
-            {
-                track = &probeTracks[probeTrackCursor++ % ProbeTrackCount];
-                *track = {};
-                track->proxy = proxy;
+                if (track->frame != sample.frame)
+                {
+                    track->earlierFrame = track->frame;
+                    track->earlier = track->instance;
+                    track->frame = sample.frame;
+                    track->instance = sample.instance;
+                }
+                if (sample.rowsRead && track->earlierFrame && track->earlierFrame + 1 == sample.frame)
+                    earlier = track->earlier == sample.rows ? 1 : 0;
             }
-            if (track->frame != sample.frame)
-            {
-                track->earlierFrame = track->frame;
-                track->earlier = track->instance;
-                track->frame = sample.frame;
-                track->instance = sample.instance;
-            }
-            if (sample.rowsRead && track->earlierFrame && track->earlierFrame + 1 == sample.frame)
-                earlier = track->earlier == sample.rows ? 1 : 0;
+            ++probeTotals[ProbeDraws];
+            ++probeTotals[!sample.rowsRead  ? ProbeRowsNone
+                          : rows[0] == 'c'  ? ProbeRowsCurrent
+                          : rows[0] == 'p'  ? ProbeRowsPrevious
+                                            : ProbeRowsOther];
+            if (sample.instanceRead && instance[0] == 'o')
+                ++probeTotals[ProbeInstanceOther];
+            if (sample.historyRead && sample.history.supplied())
+                ++probeTotals[ProbeSupplied];
+            if (stale)
+                ++probeTotals[ProbeStale];
+            if (earlier >= 0)
+                ++probeTotals[earlier ? ProbeEarlierMatch : ProbeEarlierMiss];
+            if (detail)
+                ++probeTotals[ProbePrinted];
+            if (summary)
+                totals = probeTotals;
         }
-        if (earlier >= 0)
-            bump(earlier ? ProbeEarlierMatch : ProbeEarlierMiss);
-        if (!log)
-            return;
-        // The first probed draw of a new window writes the totals since arming.
-        const auto window = GetTickCount64() / ProbeWindowMs;
-        auto seen = probeWindow.load(std::memory_order_relaxed);
-        const bool summary =
-            seen != window && probeWindow.compare_exchange_strong(seen, window, std::memory_order_relaxed);
-        if (summary)
-            probeLines.store(0, std::memory_order_relaxed);
-        const bool detail = claimLine(probeLines, ProbeDrawsPerWindow);
         if (!summary && !detail)
             return;
         char line[2048];
         _lock_file(log);
         if (summary)
         {
-            const auto total = [this](ProbeTotal value)
-            { return static_cast<unsigned long long>(probeTotals[value].load(std::memory_order_relaxed)); };
+            const auto total = [&totals](ProbeTotal value) { return static_cast<unsigned long long>(totals[value]); };
             const auto digits = MotionProbeDigits();
             std::snprintf(line, sizeof(line),
                           "MOTION_PROBE_SUM prefix=%0*llx draws=%llu printed=%llu rows_none=%llu rows_cur=%llu "
@@ -982,7 +991,6 @@ cbuffer Constants : register(b0) { uint Words; uint GroupsX; };
         }
         if (detail)
         {
-            bump(ProbePrinted);
             // Rows minus INSTANCE_TRANSFORM: translation in mm and the largest
             // rotation/scale entry difference. Both zero when the rows carry no
             // motion for this draw.
