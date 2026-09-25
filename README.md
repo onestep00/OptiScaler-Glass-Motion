@@ -21,6 +21,12 @@ what the generated frames look like without the module.
 | --- | --- |
 | ![data term strafe](docs/glass/dataterm-strafe.webp) | ![data term pan](docs/glass/dataterm-pan.webp) |
 
+| Black Sapphire, champagne table (glass) | Black Sapphire, chandeliers and mezzanine railing | Black Sapphire, Songbird's floor with quest marker |
+| --- | --- | --- |
+| ![club glasses](docs/glass/club-glasses.webp) | ![club ceiling](docs/glass/club-ceiling.webp) | ![club songbird](docs/glass/club-songbird.webp) |
+
+The three club clips show the same rule on glass and on opaque objects seen past NPC hair and eyewear; the difference there is small.
+
 ## The problem
 
 Frame generation moves every pixel by the motion vector the engine wrote there. For a
