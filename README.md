@@ -10,18 +10,11 @@ Only Cyberpunk 2077 is supported; the module reads the game's own engine data.
 Left: stock DLSS FG. Right: with Glass. Same camera path (strafing while turning the camera),
 same place, default settings (`InteriorOpacityPercent=10`, `GraftClassMask=3`, `NrMotion=true`).
 Every displayed frame was captured (the game was frame-limited during recording so the desktop
-capture keeps up) and the clips play at half speed, so each generated frame is visible; the
-doubled text on the left is what the generated frames look like without the module.
+capture keeps up) and the clips play at half speed, so each generated frame is visible.
 
-| Kabuki hologram | Cherry Blossom Data Term |
-| --- | --- |
-| ![hologram](docs/glass/hologram-strafe-pan.webp) | ![data term](docs/glass/dataterm-strafe-pan.webp) |
-
-| Black Sapphire, champagne table (glass) |
-| --- |
-| ![club glasses](docs/glass/club-glasses.webp) |
-
-Quest markers and other HUD are composited by DLSS-G after generation and are outside the module (they are absent from the HUD-less colour it reads); their own trail while the camera moves is unchanged by Glass.
+| Fast-travel Data Term hologram | Black Sapphire, champagne table (glass) | Black Sapphire, Songbird's floor: chandelier, railing, quest marker |
+| --- | --- | --- |
+| ![data term](docs/glass/dataterm.webp) | ![club glasses](docs/glass/club-glasses.webp) | ![club songbird](docs/glass/club-songbird.webp) |
 
 ## The problem
 
