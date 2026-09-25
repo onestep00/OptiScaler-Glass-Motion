@@ -17,11 +17,11 @@ doubled text on the left is what the generated frames look like without the modu
 | --- | --- |
 | ![hologram](docs/glass/hologram-strafe-pan.webp) | ![data term](docs/glass/dataterm-strafe-pan.webp) |
 
-| Black Sapphire, champagne table (glass) | Black Sapphire, chandeliers and mezzanine railing | Black Sapphire, Songbird's floor with quest marker |
-| --- | --- | --- |
-| ![club glasses](docs/glass/club-glasses.webp) | ![club ceiling](docs/glass/club-ceiling.webp) | ![club songbird](docs/glass/club-songbird.webp) |
+| Black Sapphire, champagne table (glass) |
+| --- |
+| ![club glasses](docs/glass/club-glasses.webp) |
 
-The three club clips show the same rule on glass and on opaque objects seen past NPC hair and eyewear; the difference there is small.
+Quest markers and other HUD are composited by DLSS-G after generation and are outside the module (they are absent from the HUD-less colour it reads); their own trail while the camera moves is unchanged by Glass.
 
 ## The problem
 
