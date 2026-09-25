@@ -12,9 +12,17 @@ same place, default settings (`InteriorOpacityPercent=10`, `GraftClassMask=3`, `
 Every displayed frame was captured (the game was frame-limited during recording so the desktop
 capture keeps up) and the clips play at half speed, so each generated frame is visible.
 
-| Fast-travel Data Term hologram | Black Sapphire, champagne table (glass) | Black Sapphire, Songbird's floor: chandelier, railing, quest marker |
-| --- | --- | --- |
-| ![data term](docs/glass/dataterm.webp) | ![club glasses](docs/glass/club-glasses.webp) | ![club songbird](docs/glass/club-songbird.webp) |
+**Fast-travel Data Term hologram**
+
+![data term](docs/glass/dataterm.webp)
+
+**Black Sapphire, Songbird's floor: hanging lamps, railing, quest marker**
+
+![club songbird](docs/glass/club-songbird.webp)
+
+**Black Sapphire, champagne table (glass)**
+
+![club glasses](docs/glass/club-glasses.webp)
 
 ## The problem
 
